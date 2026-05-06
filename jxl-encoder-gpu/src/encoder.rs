@@ -35,9 +35,11 @@ use cubecl::prelude::*;
 use jxl_encoder::api::{LossyConfig, PixelLayout};
 
 use crate::launch::dct8::{dct_8x8, idct_8x8};
+use crate::launch::entropy::entropy_coeffs_pixel;
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::mask1x1::mask1x1;
+use crate::launch::quantize::quantize_dct8;
 use crate::launch::xyb::xyb_forward;
 
 /// GPU-accelerated JXL encoder. Holds a long-lived cubecl client plus
@@ -260,6 +262,101 @@ impl<R: Runtime> GpuEncoder<R> {
         );
         let bytes = self.client.read_one(h_out).expect("read gab");
         f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Per-block DCT8 quantize with dead-zone thresholding.
+    ///
+    /// `coeffs` and `weights` are `num_blocks * 64` f32 each.
+    /// `qac_qm` is `num_blocks` f32 (per-block `qac * qm_mul`).
+    /// `thresholds` is exactly 4 f32 (per-quadrant dead zone).
+    /// Returns quantized i32 coefficients, same shape as input.
+    #[allow(clippy::too_many_arguments)]
+    pub fn quantize_dct8_blocks(
+        &self,
+        coeffs: &[f32],
+        weights: &[f32],
+        qac_qm: &[f32],
+        thresholds: &[f32; 4],
+    ) -> Vec<i32> {
+        let n = coeffs.len();
+        assert!(n.is_multiple_of(64));
+        assert_eq!(weights.len(), n);
+        let num_blocks = (n / 64) as u32;
+        assert_eq!(qac_qm.len(), num_blocks as usize);
+        let h_c = self.client.create_from_slice(f32::as_bytes(coeffs));
+        let h_w = self.client.create_from_slice(f32::as_bytes(weights));
+        let h_q = self.client.create_from_slice(f32::as_bytes(qac_qm));
+        let h_t = self.client.create_from_slice(f32::as_bytes(&thresholds[..]));
+        let h_o = self.client.create_from_slice(i32::as_bytes(&vec![0_i32; n]));
+        quantize_dct8::<R>(
+            &self.client,
+            h_c,
+            h_w,
+            h_q,
+            h_t,
+            h_o.clone(),
+            num_blocks,
+        );
+        let bytes = self.client.read_one(h_o).expect("read quant");
+        i32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Per-block entropy estimation in pixel-domain mode.
+    ///
+    /// Returns `(out_4xn, error_coeffs)` where `out_4xn` is `num_blocks * 4`
+    /// f32 (per-block [entropy_sum, nzeros_sum, info_loss_sum=0,
+    /// info_loss2_sum=0]) and `error_coeffs` is `num_blocks * n` f32
+    /// (the writeback `weights[i] * (val - rval)` per coefficient).
+    #[allow(clippy::too_many_arguments)]
+    pub fn entropy_coeffs_pixel_blocks(
+        &self,
+        block_c: &[f32],
+        block_y: &[f32],
+        weights: &[f32],
+        inv_weights: &[f32],
+        n_per_block: u32,
+        cmap_factor: f32,
+        quant: f32,
+        k_cost_delta: f32,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let total = block_c.len();
+        let n = n_per_block as usize;
+        assert!(total.is_multiple_of(n));
+        let num_blocks = (total / n) as u32;
+        assert_eq!(block_y.len(), total);
+        assert_eq!(weights.len(), total);
+        assert_eq!(inv_weights.len(), total);
+
+        let h_c = self.client.create_from_slice(f32::as_bytes(block_c));
+        let h_y = self.client.create_from_slice(f32::as_bytes(block_y));
+        let h_w = self.client.create_from_slice(f32::as_bytes(weights));
+        let h_iw = self.client.create_from_slice(f32::as_bytes(inv_weights));
+        let h_err = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; total]));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; (num_blocks as usize) * 4]));
+        entropy_coeffs_pixel::<R>(
+            &self.client,
+            h_c,
+            h_y,
+            h_w,
+            h_iw,
+            h_err.clone(),
+            h_out.clone(),
+            num_blocks,
+            n_per_block,
+            cmap_factor,
+            quant,
+            k_cost_delta,
+        );
+        let out_bytes = self.client.read_one(h_out).expect("read out");
+        let err_bytes = self.client.read_one(h_err).expect("read err");
+        (
+            f32::from_bytes(&out_bytes).to_vec(),
+            f32::from_bytes(&err_bytes).to_vec(),
+        )
     }
 
     pub fn encode_lossy_via_cpu(
