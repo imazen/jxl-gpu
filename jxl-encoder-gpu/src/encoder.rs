@@ -34,7 +34,9 @@ use cubecl::prelude::*;
 
 use jxl_encoder::api::{LossyConfig, PixelLayout};
 
-use crate::launch::dct8::dct_8x8;
+use crate::launch::dct8::{dct_8x8, idct_8x8};
+use crate::launch::gab::gab_smooth;
+use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::mask1x1::mask1x1;
 use crate::launch::xyb::xyb_forward;
 
@@ -174,6 +176,89 @@ impl<R: Runtime> GpuEncoder<R> {
             .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
         dct_8x8::<R>(&self.client, h_in, h_out.clone(), num_blocks);
         let bytes = self.client.read_one(h_out).expect("read dct");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Inverse DCT8 on a contiguous batch of 8×8 blocks (counterpart to
+    /// [`dct_8x8_blocks`](Self::dct_8x8_blocks)).
+    pub fn idct_8x8_blocks(&self, dct_coeffs: &[f32]) -> Vec<f32> {
+        let n = dct_coeffs.len();
+        assert!(n.is_multiple_of(64));
+        let num_blocks = (n / 64) as u32;
+        let h_in = self.client.create_from_slice(f32::as_bytes(dct_coeffs));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        idct_8x8::<R>(&self.client, h_in, h_out.clone(), num_blocks);
+        let bytes = self.client.read_one(h_out).expect("read idct");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Gaborish-inverse 5×5 sharpening on a single channel. Returns a
+    /// new buffer with the filter applied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gaborish_5x5_channel(
+        &self,
+        plane: &[f32],
+        width: u32,
+        height: u32,
+        wc: f32,
+        wr: f32,
+        wd: f32,
+        w_big_r: f32,
+        wl: f32,
+        w_big_d: f32,
+    ) -> Vec<f32> {
+        let n = (width as usize) * (height as usize);
+        assert_eq!(plane.len(), n);
+        let h_in = self.client.create_from_slice(f32::as_bytes(plane));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        gaborish_5x5::<R>(
+            &self.client,
+            h_in,
+            h_out.clone(),
+            width,
+            height,
+            wc,
+            wr,
+            wd,
+            w_big_r,
+            wl,
+            w_big_d,
+        );
+        let bytes = self.client.read_one(h_out).expect("read gaborish");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// 3×3 gab smooth on a single channel.
+    pub fn gab_smooth_channel(
+        &self,
+        plane: &[f32],
+        width: u32,
+        height: u32,
+        w_center: f32,
+        w1: f32,
+        w2: f32,
+    ) -> Vec<f32> {
+        let n = (width as usize) * (height as usize);
+        assert_eq!(plane.len(), n);
+        let h_in = self.client.create_from_slice(f32::as_bytes(plane));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        gab_smooth::<R>(
+            &self.client,
+            h_in,
+            h_out.clone(),
+            width,
+            height,
+            w_center,
+            w1,
+            w2,
+        );
+        let bytes = self.client.read_one(h_out).expect("read gab");
         f32::from_bytes(&bytes).to_vec()
     }
 
