@@ -26,12 +26,15 @@
 //!
 //! Gated behind `feature = "encoder"` (default-on).
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use cubecl::Runtime;
 use cubecl::prelude::*;
 
 use jxl_encoder::api::{LossyConfig, PixelLayout};
+
+use crate::launch::xyb::xyb_forward;
 
 /// GPU-accelerated JXL encoder. Holds a long-lived cubecl client plus
 /// per-(width, height) GPU buffer caches.
@@ -77,6 +80,67 @@ impl<R: Runtime> GpuEncoder<R> {
     ///
     /// Forwards any [`jxl_encoder::api::EncodeError`] from the wrapped
     /// CPU encoder.
+    /// Convert linear RGB pixels to XYB on the GPU.
+    ///
+    /// Input: planar linear RGB, three channels of `n` f32 values each.
+    /// Output: planar XYB, returned as `(x, y, b)` Vecs.
+    ///
+    /// Caller is responsible for sRGB→linear conversion. For the
+    /// standard sRGB transfer function:
+    ///
+    /// ```text
+    /// fn srgb_to_linear(v: f32) -> f32 {
+    ///     if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    /// }
+    /// ```
+    ///
+    /// This is the first concrete Phase 4 progressive-replacement step:
+    /// a public GPU-accelerated XYB transform that downstream encoders
+    /// can call directly.
+    pub fn xyb_from_linear_rgb(
+        &self,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let n = r.len();
+        assert_eq!(g.len(), n, "g.len() != r.len()");
+        assert_eq!(b.len(), n, "b.len() != r.len()");
+
+        let h_r = self.client.create_from_slice(f32::as_bytes(r));
+        let h_g = self.client.create_from_slice(f32::as_bytes(g));
+        let h_b = self.client.create_from_slice(f32::as_bytes(b));
+        let h_x = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        let h_y = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        let h_b_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+
+        xyb_forward::<R>(
+            &self.client,
+            h_r,
+            h_g,
+            h_b,
+            h_x.clone(),
+            h_y.clone(),
+            h_b_out.clone(),
+            n as u32,
+        );
+
+        let xb = self.client.read_one(h_x).expect("read x");
+        let yb = self.client.read_one(h_y).expect("read y");
+        let bb = self.client.read_one(h_b_out).expect("read b");
+        (
+            f32::from_bytes(&xb).to_vec(),
+            f32::from_bytes(&yb).to_vec(),
+            f32::from_bytes(&bb).to_vec(),
+        )
+    }
+
     pub fn encode_lossy_via_cpu(
         &self,
         config: &LossyConfig,

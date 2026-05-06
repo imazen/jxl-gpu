@@ -45,7 +45,25 @@ fn main() {
     assert!(bytes.len() > 16, "output suspiciously small");
 
     println!("✓ Phase 4 dependency on jxl-encoder works end-to-end.");
-    println!("  (GPU kernels not yet wired in — that's the next series of replacements.)");
+    println!("  (GPU kernels not yet wired into the bitstream — but next test runs GPU XYB:)\n");
+
+    // Standalone GPU XYB demo on linear-RGB input.
+    let n = (W * H) as usize;
+    let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
+    let g: Vec<f32> = (0..n).map(|i| 0.5 - 0.4 * (i as f32 / n as f32)).collect();
+    let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * ((i % 17) as f32 / 17.0)).collect();
+    let (x, y, b_out) = enc.xyb_from_linear_rgb(&r, &g, &b);
+    println!(
+        "GPU XYB on {} pixels: X[0]={:.4}, Y[0]={:.4}, B[0]={:.4}",
+        n, x[0], y[0], b_out[0]
+    );
+    assert_eq!(x.len(), n);
+    assert_eq!(y.len(), n);
+    assert_eq!(b_out.len(), n);
+    assert!(x.iter().all(|v| v.is_finite()));
+    assert!(y.iter().all(|v| v.is_finite()));
+    assert!(b_out.iter().all(|v| v.is_finite()));
+    println!("✓ GpuEncoder::xyb_from_linear_rgb produces finite XYB.");
 }
 
 #[cfg(not(all(feature = "cuda", feature = "encoder")))]
