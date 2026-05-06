@@ -22,6 +22,11 @@ cubecl = { version = "0.10.0-pre.4", default-features = false, features = ["std"
 # `_scalar` variants on a stable release.
 jxl-encoder-simd = { path = "../jxl-encoder/jxl-encoder-simd", default-features = true }
 
+# Runtime dep on jxl-encoder for the sequential parts (ANS entropy
+# coding, bitstream writer, container muxing, frame headers). Optional
+# — gated by the `encoder` feature in the jxl-encoder-gpu crate.
+jxl-encoder = { path = "../jxl-encoder/jxl-encoder", default-features = false }
+
 bytemuck = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 

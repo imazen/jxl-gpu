@@ -11,14 +11,18 @@ rust-version.workspace = true
 publish = false
 
 [features]
-default = ["cuda"]
+default = ["cuda", "encoder"]
 cuda = ["cubecl/cuda"]
 wgpu = ["cubecl/wgpu"]
 hip = ["cubecl/hip"]
 cpu = ["cubecl/cpu"]
+# `encoder` brings in the jxl-encoder dep for the high-level GpuEncoder
+# facade. Disable for kernel-library-only builds (smaller dep tree).
+encoder = ["dep:jxl-encoder"]
 
 [dependencies]
 cubecl = { workspace = true }
+jxl-encoder = { workspace = true, optional = true, features = ["std"] }
 
 [dev-dependencies]
 jxl-encoder-simd = { workspace = true }

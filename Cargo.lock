@@ -1015,6 +1015,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "enough"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8e1bd41ecce82c300d0c84fa35b080fa6db50a5398b18f1abf0357bb067549e"
+
+[[package]]
 name = "entities"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1771,12 +1777,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "jxl-encoder"
+version = "0.3.2"
+dependencies = [
+ "archmage",
+ "bytemuck",
+ "enough",
+ "hashbrown 0.16.1",
+ "jxl-encoder-simd",
+ "once_cell",
+ "thiserror",
+ "whereat",
+]
+
+[[package]]
 name = "jxl-encoder-gpu"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
  "cubecl",
  "image",
+ "jxl-encoder",
  "jxl-encoder-simd",
 ]
 
@@ -3775,6 +3796,12 @@ dependencies = [
  "raw-window-handle",
  "web-sys",
 ]
+
+[[package]]
+name = "whereat"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab90f361db038ba3135da12c938c328fb43a012992101879e3d6ebccb4d7eba8"
 
 [[package]]
 name = "winapi"
