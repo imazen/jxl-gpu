@@ -37,6 +37,9 @@ use jxl_encoder::api::{LossyConfig, PixelLayout};
 use crate::launch::adaptive_quant::{compute_pre_erosion, per_block_modulations};
 use crate::launch::block_l2::block_l2;
 use crate::launch::cfl::{find_best_multiplier, find_best_multiplier_newton};
+use crate::launch::dct16::{dct_16x16, idct_16x16};
+use crate::launch::dct32::{dct_32x32, idct_32x32};
+use crate::launch::dct64::{dct_64x64, idct_64x64};
 use crate::launch::dct8::{dct_8x8, idct_8x8};
 use crate::launch::dequant::dequant_dct8;
 use crate::launch::entropy::entropy_coeffs_pixel;
@@ -799,6 +802,49 @@ impl<R: Runtime> GpuEncoder<R> {
         aq_map.copy_from_slice(new_aq);
     }
 
+    /// Forward DCT16×16 on a contiguous batch of 16×16 blocks
+    /// (`num_blocks * 256` floats).
+    pub fn dct_16x16_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 256, |c, h_in, h_out, n| {
+            dct_16x16::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT16×16.
+    pub fn idct_16x16_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 256, |c, h_in, h_out, n| {
+            idct_16x16::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT32×32 (`num_blocks * 1024` floats).
+    pub fn dct_32x32_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 1024, |c, h_in, h_out, n| {
+            dct_32x32::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT32×32.
+    pub fn idct_32x32_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 1024, |c, h_in, h_out, n| {
+            idct_32x32::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT64×64 (`num_blocks * 4096` floats).
+    pub fn dct_64x64_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 4096, |c, h_in, h_out, n| {
+            dct_64x64::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT64×64.
+    pub fn idct_64x64_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 4096, |c, h_in, h_out, n| {
+            idct_64x64::<R>(c, h_in, h_out, n)
+        })
+    }
+
     pub fn encode_lossy_via_cpu(
         &self,
         config: &LossyConfig,
@@ -818,4 +864,29 @@ impl<R: Runtime> Default for GpuEncoder<R> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Helper for the common "f32 in, same-size f32 out, num_blocks-driven
+/// launch" pattern used by DCT/IDCT methods.
+fn run_block_inout<R, F>(
+    client: &ComputeClient<R>,
+    input: &[f32],
+    block_size: usize,
+    launcher: F,
+) -> Vec<f32>
+where
+    R: Runtime,
+    F: FnOnce(&ComputeClient<R>, cubecl::server::Handle, cubecl::server::Handle, u32),
+{
+    let n = input.len();
+    assert!(
+        n.is_multiple_of(block_size),
+        "input len {n} not a multiple of block size {block_size}"
+    );
+    let num_blocks = (n / block_size) as u32;
+    let h_in = client.create_from_slice(f32::as_bytes(input));
+    let h_out = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+    launcher(client, h_in, h_out.clone(), num_blocks);
+    let bytes = client.read_one(h_out).expect("read");
+    f32::from_bytes(&bytes).to_vec()
 }
