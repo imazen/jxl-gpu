@@ -79,6 +79,39 @@ fn main() {
     assert_eq!(dct.len(), 4 * 64);
     assert!(dct.iter().all(|v| v.is_finite()));
     println!("✓ GpuEncoder::dct_8x8_blocks produced {} finite coefficients.", dct.len());
+
+    // Equivalence test: GPU XYB vs jxl-encoder-simd CPU XYB on 256x256 random.
+    {
+        const N2: usize = 256 * 256;
+        // Deterministic pseudo-random linear-RGB
+        let mut r2 = vec![0.0f32; N2];
+        let mut g2 = vec![0.0f32; N2];
+        let mut b2 = vec![0.0f32; N2];
+        for i in 0..N2 {
+            let u = ((i.wrapping_mul(2654435761)) & 0xFFFF) as f32 / 65535.0;
+            let v = ((i.wrapping_mul(0x9E3779B9)) & 0xFFFF) as f32 / 65535.0;
+            let w = ((i.wrapping_mul(0xBF58476D)) & 0xFFFF) as f32 / 65535.0;
+            r2[i] = u;
+            g2[i] = v;
+            b2[i] = w;
+        }
+        let (gpu_x, gpu_y, gpu_b) = enc.xyb_from_linear_rgb(&r2, &g2, &b2);
+        let mut cpu_x = vec![0.0f32; N2];
+        let mut cpu_y = vec![0.0f32; N2];
+        let mut cpu_b = vec![0.0f32; N2];
+        jxl_encoder_simd::forward_xyb_scalar(&r2, &g2, &b2, &mut cpu_x, &mut cpu_y, &mut cpu_b, N2);
+
+        let max_x = gpu_x.iter().zip(&cpu_x).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let max_y = gpu_y.iter().zip(&cpu_y).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let max_b = gpu_b.iter().zip(&cpu_b).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        println!(
+            "GPU vs CPU XYB on 256x256 random: max|Δ| X={max_x:.3e}, Y={max_y:.3e}, B={max_b:.3e}"
+        );
+        assert!(max_x < 5e-6, "X channel diverges: {max_x:.3e}");
+        assert!(max_y < 5e-6, "Y channel diverges: {max_y:.3e}");
+        assert!(max_b < 5e-6, "B channel diverges: {max_b:.3e}");
+        println!("✓ GpuEncoder::xyb_from_linear_rgb matches jxl-encoder-simd CPU within 5e-6.");
+    }
 }
 
 #[cfg(not(all(feature = "cuda", feature = "encoder")))]
