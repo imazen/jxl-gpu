@@ -1,0 +1,39 @@
+[workspace]
+members = ["jxl-encoder-gpu"]
+resolver = "2"
+
+[workspace.package]
+authors = ["Imazen <support@imazen.io>"]
+homepage = "https://github.com/imazen/jxl-encoder-gpu"
+repository = "https://github.com/imazen/jxl-encoder-gpu"
+edition = "2024"
+rust-version = "1.93"
+
+[workspace.dependencies]
+jxl-encoder-gpu = { version = "0.0.1", path = "jxl-encoder-gpu", default-features = false }
+
+# CubeCL — single source of truth for the GPU backend version.
+# Pinned to match zenmetrics; bump together when upgrading.
+cubecl = { version = "0.10.0-pre.4", default-features = false, features = ["std"] }
+
+# CPU reference parity — the SIMD/scalar primitives we are porting.
+# Pulled from local jxl-encoder workspace (path dep, host-specific) for
+# now; switch to a published version once jxl-encoder-simd publishes the
+# `_scalar` variants on a stable release.
+jxl-encoder-simd = { path = "../jxl-encoder/jxl-encoder-simd", default-features = true }
+
+bytemuck = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = "full"
+split-debuginfo = "packed"
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+debug = false
+codegen-units = 1

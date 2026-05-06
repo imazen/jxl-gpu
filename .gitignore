@@ -1,0 +1,6 @@
+target/
+.jj/
+.workongoing
+*.log
+*.callgrind*
+callgrind.out.*

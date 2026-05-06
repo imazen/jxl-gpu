@@ -1,0 +1,26 @@
+[package]
+name = "jxl-encoder-gpu"
+version = "0.0.1"
+description = "Multi-vendor GPU kernels for jxl-encoder via CubeCL (CUDA/WGPU/HIP)"
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["cuda"]
+cuda = ["cubecl/cuda"]
+wgpu = ["cubecl/wgpu"]
+hip = ["cubecl/hip"]
+cpu = ["cubecl/cpu"]
+
+[dependencies]
+cubecl = { workspace = true }
+
+[dev-dependencies]
+jxl-encoder-simd = { workspace = true }
+bytemuck = { workspace = true }
+image = { workspace = true }
