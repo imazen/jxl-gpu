@@ -37,9 +37,16 @@ use jxl_encoder::api::{LossyConfig, PixelLayout};
 use crate::launch::adaptive_quant::{compute_pre_erosion, per_block_modulations};
 use crate::launch::block_l2::block_l2;
 use crate::launch::cfl::{find_best_multiplier, find_best_multiplier_newton};
-use crate::launch::dct16::{dct_16x16, idct_16x16};
-use crate::launch::dct32::{dct_32x32, idct_32x32};
-use crate::launch::dct64::{dct_64x64, idct_64x64};
+use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
+use crate::launch::dct32::{
+    dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32,
+};
+use crate::launch::dct4::{
+    dct_4x4_full, dct_4x8_full, dct_8x4_full, idct_4x4_full, idct_4x8_full, idct_8x4_full,
+};
+use crate::launch::dct64::{
+    dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64,
+};
 use crate::launch::dct8::{dct_8x8, idct_8x8};
 use crate::launch::dequant::dequant_dct8;
 use crate::launch::entropy::entropy_coeffs_pixel;
@@ -842,6 +849,132 @@ impl<R: Runtime> GpuEncoder<R> {
     pub fn idct_64x64_blocks(&self, blocks: &[f32]) -> Vec<f32> {
         run_block_inout::<R, _>(&self.client, blocks, 4096, |c, h_in, h_out, n| {
             idct_64x64::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT16×8 (16 tall × 8 wide; `num_blocks * 128` floats).
+    pub fn dct_16x8_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 128, |c, h_in, h_out, n| {
+            dct_16x8::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT16×8.
+    pub fn idct_16x8_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 128, |c, h_in, h_out, n| {
+            idct_16x8::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT8×16 (8 tall × 16 wide; `num_blocks * 128` floats).
+    pub fn dct_8x16_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 128, |c, h_in, h_out, n| {
+            dct_8x16::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT8×16.
+    pub fn idct_8x16_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 128, |c, h_in, h_out, n| {
+            idct_8x16::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT32×16 (`num_blocks * 512` floats).
+    pub fn dct_32x16_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 512, |c, h_in, h_out, n| {
+            dct_32x16::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT32×16.
+    pub fn idct_32x16_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 512, |c, h_in, h_out, n| {
+            idct_32x16::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT16×32 (`num_blocks * 512` floats).
+    pub fn dct_16x32_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 512, |c, h_in, h_out, n| {
+            dct_16x32::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT16×32.
+    pub fn idct_16x32_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 512, |c, h_in, h_out, n| {
+            idct_16x32::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT64×32 (`num_blocks * 2048` floats).
+    pub fn dct_64x32_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 2048, |c, h_in, h_out, n| {
+            dct_64x32::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT64×32.
+    pub fn idct_64x32_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 2048, |c, h_in, h_out, n| {
+            idct_64x32::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT32×64 (`num_blocks * 2048` floats).
+    pub fn dct_32x64_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 2048, |c, h_in, h_out, n| {
+            dct_32x64::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT32×64.
+    pub fn idct_32x64_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 2048, |c, h_in, h_out, n| {
+            idct_32x64::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT4×4 full (sub-block-partitioned 8×8; `num_blocks * 64`).
+    pub fn dct_4x4_full_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 64, |c, h_in, h_out, n| {
+            dct_4x4_full::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT4×4 full.
+    pub fn idct_4x4_full_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 64, |c, h_in, h_out, n| {
+            idct_4x4_full::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT4×8 full.
+    pub fn dct_4x8_full_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 64, |c, h_in, h_out, n| {
+            dct_4x8_full::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT4×8 full.
+    pub fn idct_4x8_full_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 64, |c, h_in, h_out, n| {
+            idct_4x8_full::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Forward DCT8×4 full.
+    pub fn dct_8x4_full_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 64, |c, h_in, h_out, n| {
+            dct_8x4_full::<R>(c, h_in, h_out, n)
+        })
+    }
+
+    /// Inverse DCT8×4 full.
+    pub fn idct_8x4_full_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        run_block_inout::<R, _>(&self.client, blocks, 64, |c, h_in, h_out, n| {
+            idct_8x4_full::<R>(c, h_in, h_out, n)
         })
     }
 
