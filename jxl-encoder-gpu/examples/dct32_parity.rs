@@ -27,8 +27,8 @@ fn main() {
         dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32,
     };
     use jxl_encoder_simd::{
-        dct_16x32_scalar, dct_32x16_scalar, dct_32x32_scalar, idct_16x32_scalar,
-        idct_32x16_scalar, idct_32x32_scalar,
+        dct_16x32_scalar, dct_32x16_scalar, dct_32x32_scalar, idct_16x32_scalar, idct_32x16_scalar,
+        idct_32x32_scalar,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -54,8 +54,7 @@ fn main() {
         let mut cpu_dct = vec![0.0f32; N];
         for b in 0..NB {
             let inb: &[f32; SZ] = (&input[b * SZ..b * SZ + SZ]).try_into().unwrap();
-            let outb: &mut [f32; SZ] =
-                (&mut cpu_dct[b * SZ..b * SZ + SZ]).try_into().unwrap();
+            let outb: &mut [f32; SZ] = (&mut cpu_dct[b * SZ..b * SZ + SZ]).try_into().unwrap();
             dct_32x32_scalar(inb, outb);
         }
         let h_in = client.create_from_slice(f32::as_bytes(&input));
@@ -74,8 +73,7 @@ fn main() {
         let mut cpu_idct = vec![0.0f32; N];
         for b in 0..NB {
             let inb: &[f32; SZ] = (&cpu_dct[b * SZ..b * SZ + SZ]).try_into().unwrap();
-            let outb: &mut [f32; SZ] =
-                (&mut cpu_idct[b * SZ..b * SZ + SZ]).try_into().unwrap();
+            let outb: &mut [f32; SZ] = (&mut cpu_idct[b * SZ..b * SZ + SZ]).try_into().unwrap();
             idct_32x32_scalar(inb, outb);
         }
         let h_idct_in = client.create_from_slice(f32::as_bytes(&cpu_dct));
@@ -127,8 +125,7 @@ fn main() {
             let mut cpu_dct = vec![0.0f32; N];
             for b in 0..NB {
                 let inb: &[f32; SZ] = (&input[b * SZ..b * SZ + SZ]).try_into().unwrap();
-                let outb: &mut [f32; SZ] =
-                    (&mut cpu_dct[b * SZ..b * SZ + SZ]).try_into().unwrap();
+                let outb: &mut [f32; SZ] = (&mut cpu_dct[b * SZ..b * SZ + SZ]).try_into().unwrap();
                 $cpu_fwd(inb, outb);
             }
             let h_in = client.create_from_slice(f32::as_bytes(&input));
@@ -139,16 +136,22 @@ fn main() {
             let (mf, mfp) = max_abs_diff(gpu, &cpu_dct);
             let ok_f = mf < 1e-5;
             println!(
-                concat!("DCT", $name, " forward parity ({} blocks): max|Δ| = {:.3e} at {}  {}"),
-                NB, mf, mfp, if ok_f { "✓" } else { "✗" }
+                concat!(
+                    "DCT",
+                    $name,
+                    " forward parity ({} blocks): max|Δ| = {:.3e} at {}  {}"
+                ),
+                NB,
+                mf,
+                mfp,
+                if ok_f { "✓" } else { "✗" }
             );
             all_ok &= ok_f;
 
             let mut cpu_idct = vec![0.0f32; N];
             for b in 0..NB {
                 let inb: &[f32; SZ] = (&cpu_dct[b * SZ..b * SZ + SZ]).try_into().unwrap();
-                let outb: &mut [f32; SZ] =
-                    (&mut cpu_idct[b * SZ..b * SZ + SZ]).try_into().unwrap();
+                let outb: &mut [f32; SZ] = (&mut cpu_idct[b * SZ..b * SZ + SZ]).try_into().unwrap();
                 $cpu_inv(inb, outb);
             }
             let h_idct_in = client.create_from_slice(f32::as_bytes(&cpu_dct));
@@ -159,8 +162,14 @@ fn main() {
             let (mi, mip) = max_abs_diff(gpu, &cpu_idct);
             let ok_i = mi < 1e-4;
             println!(
-                concat!("IDCT", $name, " parity:                       max|Δ| = {:.3e} at {}  {}"),
-                mi, mip, if ok_i { "✓" } else { "✗" }
+                concat!(
+                    "IDCT",
+                    $name,
+                    " parity:                       max|Δ| = {:.3e} at {}  {}"
+                ),
+                mi,
+                mip,
+                if ok_i { "✓" } else { "✗" }
             );
             all_ok &= ok_i;
 
@@ -175,20 +184,42 @@ fn main() {
                 let (mrt, mrtp) = max_abs_diff(gpu_rt, &input);
                 let ok_rt = mrt < 1e-4;
                 println!(
-                    concat!("GPU DCT", $name, "→IDCT roundtrip:           max|Δ| = {:.3e} at {}  {}"),
-                    mrt, mrtp, if ok_rt { "✓" } else { "✗" }
+                    concat!(
+                        "GPU DCT",
+                        $name,
+                        "→IDCT roundtrip:           max|Δ| = {:.3e} at {}  {}"
+                    ),
+                    mrt,
+                    mrtp,
+                    if ok_rt { "✓" } else { "✗" }
                 );
                 all_ok &= ok_rt;
             } else {
-                println!(
-                    concat!("GPU DCT", $name, "→IDCT roundtrip:           skipped (asymmetric layout)")
-                );
+                println!(concat!(
+                    "GPU DCT",
+                    $name,
+                    "→IDCT roundtrip:           skipped (asymmetric layout)"
+                ));
             }
         }};
     }
 
-    check_512!("32x16", true, dct_32x16::<Backend>, idct_32x16::<Backend>, dct_32x16_scalar, idct_32x16_scalar);
-    check_512!("16x32", true, dct_16x32::<Backend>, idct_16x32::<Backend>, dct_16x32_scalar, idct_16x32_scalar);
+    check_512!(
+        "32x16",
+        true,
+        dct_32x16::<Backend>,
+        idct_32x16::<Backend>,
+        dct_32x16_scalar,
+        idct_32x16_scalar
+    );
+    check_512!(
+        "16x32",
+        true,
+        dct_16x32::<Backend>,
+        idct_16x32::<Backend>,
+        dct_16x32_scalar,
+        idct_16x32_scalar
+    );
 
     if all_ok {
         println!("\n✓ DCT32 family (6 kernels) parity OK.");

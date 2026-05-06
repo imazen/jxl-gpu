@@ -42,8 +42,7 @@ fn main() {
     let mut cpu_dct = vec![0.0f32; N];
     for b in 0..NB {
         let inb: &[f32; 256] = (&input[b * 256..b * 256 + 256]).try_into().unwrap();
-        let outb: &mut [f32; 256] =
-            (&mut cpu_dct[b * 256..b * 256 + 256]).try_into().unwrap();
+        let outb: &mut [f32; 256] = (&mut cpu_dct[b * 256..b * 256 + 256]).try_into().unwrap();
         dct_16x16_scalar(inb, outb);
     }
 
@@ -58,8 +57,7 @@ fn main() {
     let mut cpu_idct = vec![0.0f32; N];
     for b in 0..NB {
         let inb: &[f32; 256] = (&cpu_dct[b * 256..b * 256 + 256]).try_into().unwrap();
-        let outb: &mut [f32; 256] =
-            (&mut cpu_idct[b * 256..b * 256 + 256]).try_into().unwrap();
+        let outb: &mut [f32; 256] = (&mut cpu_idct[b * 256..b * 256 + 256]).try_into().unwrap();
         idct_16x16_scalar(inb, outb);
     }
 

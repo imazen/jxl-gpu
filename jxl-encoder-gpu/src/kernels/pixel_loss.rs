@@ -16,6 +16,8 @@
 //! backend (RTX 5070 has hardware DP at reduced throughput); WGPU
 //! support depends on the device's `float64-blend` feature.
 
+#![allow(clippy::assign_op_pattern)]
+
 use cubecl::prelude::*;
 
 /// Per-block 8th-power norm. One cube per block.

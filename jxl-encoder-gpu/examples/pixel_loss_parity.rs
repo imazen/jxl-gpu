@@ -113,8 +113,13 @@ fn main() {
             max_rel = r;
         }
     }
-    println!("pixel_loss parity ({NB} blocks, 8x8): max|Δ| = {max_abs:.3e}, max|rel| = {max_rel:.3e} at block {max_idx}");
+    println!(
+        "pixel_loss parity ({NB} blocks, 8x8): max|Δ| = {max_abs:.3e}, max|rel| = {max_rel:.3e} at block {max_idx}"
+    );
     // 8th power chain — sub-ulp f64 ops compound; relative tol 1e-12 is generous.
-    assert!(max_rel < 1e-10, "pixel_loss relative diverges: {max_rel:.3e}");
+    assert!(
+        max_rel < 1e-10,
+        "pixel_loss relative diverges: {max_rel:.3e}"
+    );
     println!("\n✓ pixel_loss parity OK (relative tolerance 1e-10).");
 }

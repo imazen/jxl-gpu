@@ -38,3 +38,11 @@
   Recursive butterfly: dct1d_16 → dct1d_8 → dct1d_4 → dct1d_2 (forward);
   inv_idct1d_16 → inv_idct1d_8_core → inv_idct1d_4 (inverse).
 - Example: `examples/dct16_parity.rs`
+- DCT16 rectangular family (forward + inverse for 16x8 and 8x16). All
+  four kernels parity-verified vs jxl-encoder-simd scalars:
+  - `dct_16x8_kernel` 3.73e-8, `dct_8x16_kernel` 4.01e-8
+  - `idct_16x8_kernel` 3.58e-7, `idct_8x16_kernel` 3.13e-7
+  - DCT8x16 roundtrip 3.87e-7. DCT16x8 roundtrip skipped — CPU API
+    has asymmetric forward/inverse storage layouts (CPU also fails,
+    1.28 abs); the encoder pipeline transposes between them.
+- Example: `examples/dct16_rect_parity.rs`

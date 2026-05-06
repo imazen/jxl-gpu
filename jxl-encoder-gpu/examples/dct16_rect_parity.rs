@@ -23,10 +23,8 @@ fn main() {
 #[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
 fn main() {
     use cubecl::prelude::*;
-    use jxl_encoder_gpu::launch::dct16::{dct_16x8, dct_8x16, idct_16x8, idct_8x16};
-    use jxl_encoder_simd::{
-        dct_16x8_scalar, dct_8x16_scalar, idct_16x8_scalar, idct_8x16_scalar,
-    };
+    use jxl_encoder_gpu::launch::dct16::{dct_8x16, dct_16x8, idct_8x16, idct_16x8};
+    use jxl_encoder_simd::{dct_8x16_scalar, dct_16x8_scalar, idct_8x16_scalar, idct_16x8_scalar};
 
     let device = <Backend as cubecl::Runtime>::Device::default();
     let client = <Backend as cubecl::Runtime>::client(&device);
@@ -70,8 +68,15 @@ fn main() {
             let (mf, mfp) = max_abs_diff(gpu_dct, &cpu_dct);
             let ok_f = mf < 1e-5;
             println!(
-                concat!("DCT", $name, " forward parity ({} blocks): max|Δ| = {:.3e} at {}  {}"),
-                NB, mf, mfp, if ok_f { "✓" } else { "✗" }
+                concat!(
+                    "DCT",
+                    $name,
+                    " forward parity ({} blocks): max|Δ| = {:.3e} at {}  {}"
+                ),
+                NB,
+                mf,
+                mfp,
+                if ok_f { "✓" } else { "✗" }
             );
             all_ok &= ok_f;
 
@@ -91,8 +96,14 @@ fn main() {
             let (mi, mip) = max_abs_diff(gpu_idct, &cpu_idct);
             let ok_i = mi < 1e-5;
             println!(
-                concat!("IDCT", $name, " parity (CPU DCT → GPU IDCT):  max|Δ| = {:.3e} at {}  {}"),
-                mi, mip, if ok_i { "✓" } else { "✗" }
+                concat!(
+                    "IDCT",
+                    $name,
+                    " parity (CPU DCT → GPU IDCT):  max|Δ| = {:.3e} at {}  {}"
+                ),
+                mi,
+                mip,
+                if ok_i { "✓" } else { "✗" }
             );
             all_ok &= ok_i;
 
@@ -107,20 +118,42 @@ fn main() {
                 let (mrt, mrtp) = max_abs_diff(gpu_rt, &input);
                 let ok_rt = mrt < 5e-5;
                 println!(
-                    concat!("GPU DCT", $name, "→IDCT roundtrip:           max|Δ| = {:.3e} at {}  {}"),
-                    mrt, mrtp, if ok_rt { "✓" } else { "✗" }
+                    concat!(
+                        "GPU DCT",
+                        $name,
+                        "→IDCT roundtrip:           max|Δ| = {:.3e} at {}  {}"
+                    ),
+                    mrt,
+                    mrtp,
+                    if ok_rt { "✓" } else { "✗" }
                 );
                 all_ok &= ok_rt;
             } else {
-                println!(
-                    concat!("GPU DCT", $name, "→IDCT roundtrip:           skipped (asymmetric layout — see comment)")
-                );
+                println!(concat!(
+                    "GPU DCT",
+                    $name,
+                    "→IDCT roundtrip:           skipped (asymmetric layout — see comment)"
+                ));
             }
         }};
     }
 
-    check!("16x8", false, dct_16x8::<Backend>, idct_16x8::<Backend>, dct_16x8_scalar, idct_16x8_scalar);
-    check!("8x16", true,  dct_8x16::<Backend>, idct_8x16::<Backend>, dct_8x16_scalar, idct_8x16_scalar);
+    check!(
+        "16x8",
+        false,
+        dct_16x8::<Backend>,
+        idct_16x8::<Backend>,
+        dct_16x8_scalar,
+        idct_16x8_scalar
+    );
+    check!(
+        "8x16",
+        true,
+        dct_8x16::<Backend>,
+        idct_8x16::<Backend>,
+        dct_8x16_scalar,
+        idct_8x16_scalar
+    );
 
     if all_ok {
         println!("\n✓ DCT16 rectangular family parity OK.");

@@ -40,16 +40,8 @@ fn main() {
         const H: usize = YB * 8;
         const N: usize = PADDED_W * H;
 
-        let mut orig = [
-            vec![0.0f32; N],
-            vec![0.0f32; N],
-            vec![0.0f32; N],
-        ];
-        let mut recon = [
-            vec![0.0f32; N],
-            vec![0.0f32; N],
-            vec![0.0f32; N],
-        ];
+        let mut orig = [vec![0.0f32; N], vec![0.0f32; N], vec![0.0f32; N]];
+        let mut recon = [vec![0.0f32; N], vec![0.0f32; N], vec![0.0f32; N]];
         let mut mask = vec![0.0f32; N];
         for i in 0..N {
             let u = (i as f32) / (N as f32);
@@ -163,15 +155,7 @@ fn main() {
         let h_qac = client.create_from_slice(f32::as_bytes(&qac_qm));
         let h_thr = client.create_from_slice(f32::as_bytes(&thresholds[..]));
         let h_out = client.create_from_slice(i32::as_bytes(&vec![0i32; N_COEF]));
-        quantize_dct8::<Backend>(
-            &client,
-            h_coef,
-            h_w,
-            h_qac,
-            h_thr,
-            h_out.clone(),
-            NB as u32,
-        );
+        quantize_dct8::<Backend>(&client, h_coef, h_w, h_qac, h_thr, h_out.clone(), NB as u32);
         let bytes = client.read_one(h_out).expect("read quantize");
         let gpu: &[i32] = i32::from_bytes(&bytes);
 

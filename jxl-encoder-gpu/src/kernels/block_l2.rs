@@ -12,6 +12,8 @@
 //! One cube per block (cube_dim = 1, cube_count = num_blocks). Inner loop
 //! reduces 64 pixels × 3 channels into a single f32 per block.
 
+#![allow(clippy::assign_op_pattern)]
+
 use cubecl::prelude::*;
 
 const W_X: f32 = 12.339_445;

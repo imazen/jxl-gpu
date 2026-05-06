@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # CPU-backend build on every platform (no CUDA on shared runners).
+  # Verifies the crate compiles + runs tests with cubecl-cpu fallback.
+  build-cpu:
+    name: build (cpu) / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - windows-11-arm
+          - macos-15-intel
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: cargo build --no-default-features --features cpu --lib
+        run: cargo build --release --no-default-features --features cpu --lib
+      - name: cargo test --no-default-features --features cpu
+        # Tests run with the CPU backend; partition_selector test has no
+        # GPU dependency so it always runs.
+        run: cargo test --release --no-default-features --features cpu --tests
+
+  # Cross-compile to i686-unknown-linux-gnu — catches 32-bit pointer-width
+  # bugs (mandatory per global CLAUDE.md).
+  build-i686:
+    name: build (cpu) / i686-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: cross build --target i686-unknown-linux-gnu
+        run: cross build --release --no-default-features --features cpu --lib --target i686-unknown-linux-gnu
+
+  # Format + clippy gate on Linux (the canonical lint host).
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy (lib + tests only — examples are throwaway parity probes)
+        run: cargo clippy --release --no-default-features --features cpu --lib --tests -- -D warnings
+
+  # CUDA build on a self-hosted runner with NVIDIA hardware.
+  # Disabled by default — uncomment + add a self-hosted runner with
+  # CUDA 13+ to enable. The full parity examples only run here.
+  # build-cuda:
+  #   name: build + parity (cuda) / self-hosted
+  #   runs-on: [self-hosted, linux, x64, gpu]
+  #   steps:
+  #     - uses: actions/checkout@v5
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #     - name: cargo build --features cuda
+  #       run: cargo build --release --features cuda --examples
+  #     - name: parity smoke test
+  #       run: |
+  #         for ex in xyb_parity phase1_parity dct8_parity \
+  #                   phase2_small_parity pixel_loss_parity dequant_parity \
+  #                   dct16_parity dct16_rect_parity dct4_parity \
+  #                   dct32_parity dct64_parity quantize_cfl_parity \
+  #                   epf_parity entropy_parity per_block_modulations_parity \
+  #                   pre_erosion_parity cost_grid_demo; do
+  #           echo "=== $ex ==="
+  #           ./target/release/examples/$ex
+  #         done

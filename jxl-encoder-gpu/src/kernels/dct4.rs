@@ -298,8 +298,7 @@ pub fn dct_4x4_full_kernel(input: &Array<f32>, output: &mut Array<f32>) {
                 let mut ix: u32 = 0u32;
                 while ix < 4u32 {
                     let ixu = ix as usize;
-                    out[(yu + cu * 2usize) * 8usize + xu + ixu * 2usize] =
-                        row[ixu] * 0.25f32;
+                    out[(yu + cu * 2usize) * 8usize + xu + ixu * 2usize] = row[ixu] * 0.25f32;
                     ix += 1u32;
                 }
                 col += 1u32;
@@ -413,8 +412,7 @@ pub fn idct_4x4_full_kernel(input: &Array<f32>, output: &mut Array<f32>) {
                 let mut ix: u32 = 0u32;
                 while ix < 4u32 {
                     let ixu = ix as usize;
-                    output[off + (yu * 4usize + ru) * 8usize + (xu * 4usize + ixu)] =
-                        row[ixu];
+                    output[off + (yu * 4usize + ru) * 8usize + (xu * 4usize + ixu)] = row[ixu];
                     ix += 1u32;
                 }
                 r += 1u32;

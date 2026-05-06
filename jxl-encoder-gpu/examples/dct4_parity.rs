@@ -54,8 +54,7 @@ fn main() {
             let mut cpu_dct = vec![0.0f32; N];
             for b in 0..NB {
                 let inb: &[f32; 64] = (&input[b * 64..b * 64 + 64]).try_into().unwrap();
-                let outb: &mut [f32; 64] =
-                    (&mut cpu_dct[b * 64..b * 64 + 64]).try_into().unwrap();
+                let outb: &mut [f32; 64] = (&mut cpu_dct[b * 64..b * 64 + 64]).try_into().unwrap();
                 $cpu_fwd(inb, outb);
             }
 
@@ -68,8 +67,15 @@ fn main() {
             let (mf, mfp) = max_abs_diff(gpu_dct, &cpu_dct);
             let ok_f = mf < $tol_fwd;
             println!(
-                concat!("DCT", $name, " forward parity ({} blocks): max|Δ| = {:.3e} at {}  {}"),
-                NB, mf, mfp, if ok_f { "✓" } else { "✗" }
+                concat!(
+                    "DCT",
+                    $name,
+                    " forward parity ({} blocks): max|Δ| = {:.3e} at {}  {}"
+                ),
+                NB,
+                mf,
+                mfp,
+                if ok_f { "✓" } else { "✗" }
             );
             all_ok &= ok_f;
 
@@ -77,8 +83,7 @@ fn main() {
             let mut cpu_idct = vec![0.0f32; N];
             for b in 0..NB {
                 let inb: &[f32; 64] = (&cpu_dct[b * 64..b * 64 + 64]).try_into().unwrap();
-                let outb: &mut [f32; 64] =
-                    (&mut cpu_idct[b * 64..b * 64 + 64]).try_into().unwrap();
+                let outb: &mut [f32; 64] = (&mut cpu_idct[b * 64..b * 64 + 64]).try_into().unwrap();
                 $cpu_inv(inb, outb);
             }
 
@@ -91,8 +96,14 @@ fn main() {
             let (mi, mip) = max_abs_diff(gpu_idct, &cpu_idct);
             let ok_i = mi < $tol_inv;
             println!(
-                concat!("IDCT", $name, " parity (CPU DCT → GPU IDCT):  max|Δ| = {:.3e} at {}  {}"),
-                mi, mip, if ok_i { "✓" } else { "✗" }
+                concat!(
+                    "IDCT",
+                    $name,
+                    " parity (CPU DCT → GPU IDCT):  max|Δ| = {:.3e} at {}  {}"
+                ),
+                mi,
+                mip,
+                if ok_i { "✓" } else { "✗" }
             );
             all_ok &= ok_i;
 
@@ -107,17 +118,50 @@ fn main() {
                 let (mrt, mrtp) = max_abs_diff(gpu_rt, &input);
                 let ok_rt = mrt < 5e-5;
                 println!(
-                    concat!("GPU DCT", $name, "→IDCT roundtrip:           max|Δ| = {:.3e} at {}  {}"),
-                    mrt, mrtp, if ok_rt { "✓" } else { "✗" }
+                    concat!(
+                        "GPU DCT",
+                        $name,
+                        "→IDCT roundtrip:           max|Δ| = {:.3e} at {}  {}"
+                    ),
+                    mrt,
+                    mrtp,
+                    if ok_rt { "✓" } else { "✗" }
                 );
                 all_ok &= ok_rt;
             }
         }};
     }
 
-    check_pair!("4x4_full", true, 1e-6, 5e-6, dct_4x4_full::<Backend>, idct_4x4_full::<Backend>, dct_4x4_full_scalar, idct_4x4_full_scalar);
-    check_pair!("4x8_full", true, 1e-6, 5e-6, dct_4x8_full::<Backend>, idct_4x8_full::<Backend>, dct_4x8_full_scalar, idct_4x8_full_scalar);
-    check_pair!("8x4_full", true, 1e-6, 5e-6, dct_8x4_full::<Backend>, idct_8x4_full::<Backend>, dct_8x4_full_scalar, idct_8x4_full_scalar);
+    check_pair!(
+        "4x4_full",
+        true,
+        1e-6,
+        5e-6,
+        dct_4x4_full::<Backend>,
+        idct_4x4_full::<Backend>,
+        dct_4x4_full_scalar,
+        idct_4x4_full_scalar
+    );
+    check_pair!(
+        "4x8_full",
+        true,
+        1e-6,
+        5e-6,
+        dct_4x8_full::<Backend>,
+        idct_4x8_full::<Backend>,
+        dct_4x8_full_scalar,
+        idct_4x8_full_scalar
+    );
+    check_pair!(
+        "8x4_full",
+        true,
+        1e-6,
+        5e-6,
+        dct_8x4_full::<Backend>,
+        idct_8x4_full::<Backend>,
+        dct_8x4_full_scalar,
+        idct_8x4_full_scalar
+    );
 
     if all_ok {
         println!("\n✓ DCT4 family (6 kernels) parity OK.");

@@ -19,5 +19,6 @@ extern crate alloc;
 
 pub mod kernels;
 pub mod launch;
+pub mod pipeline;
 
 pub use cubecl;

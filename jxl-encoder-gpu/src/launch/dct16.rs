@@ -7,8 +7,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::kernels::dct16::{
-    dct_16x16_kernel, dct_16x8_kernel, dct_8x16_kernel, idct_16x16_kernel, idct_16x8_kernel,
-    idct_8x16_kernel,
+    dct_8x16_kernel, dct_16x8_kernel, dct_16x16_kernel, idct_8x16_kernel, idct_16x8_kernel,
+    idct_16x16_kernel,
 };
 
 pub fn dct_16x16<R: Runtime>(
