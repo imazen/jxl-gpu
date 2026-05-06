@@ -64,6 +64,21 @@ fn main() {
     assert!(y.iter().all(|v| v.is_finite()));
     assert!(b_out.iter().all(|v| v.is_finite()));
     println!("✓ GpuEncoder::xyb_from_linear_rgb produces finite XYB.");
+
+    // mask1x1 on the Y channel (same shape as input).
+    let mask = enc.mask1x1_field(&y, W, H);
+    assert_eq!(mask.len(), n);
+    assert!(mask.iter().all(|v| v.is_finite() && *v > 0.0));
+    println!("✓ GpuEncoder::mask1x1_field produced {} positive finite values.", mask.len());
+
+    // DCT8 on a 4-block batch of synthetic 8x8 inputs.
+    let blocks: Vec<f32> = (0..(4 * 64))
+        .map(|i| 0.5 + 0.1 * ((i as f32 * 0.31).sin()))
+        .collect();
+    let dct = enc.dct_8x8_blocks(&blocks);
+    assert_eq!(dct.len(), 4 * 64);
+    assert!(dct.iter().all(|v| v.is_finite()));
+    println!("✓ GpuEncoder::dct_8x8_blocks produced {} finite coefficients.", dct.len());
 }
 
 #[cfg(not(all(feature = "cuda", feature = "encoder")))]

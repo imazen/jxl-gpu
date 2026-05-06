@@ -34,6 +34,8 @@ use cubecl::prelude::*;
 
 use jxl_encoder::api::{LossyConfig, PixelLayout};
 
+use crate::launch::dct8::dct_8x8;
+use crate::launch::mask1x1::mask1x1;
 use crate::launch::xyb::xyb_forward;
 
 /// GPU-accelerated JXL encoder. Holds a long-lived cubecl client plus
@@ -139,6 +141,40 @@ impl<R: Runtime> GpuEncoder<R> {
             f32::from_bytes(&yb).to_vec(),
             f32::from_bytes(&bb).to_vec(),
         )
+    }
+
+    /// Compute the per-pixel masking field from an XYB-Y channel.
+    ///
+    /// Mirrors `jxl_encoder_simd::compute_mask1x1` but on GPU. Output has
+    /// the same shape as `xyb_y` (one f32 per pixel).
+    pub fn mask1x1_field(&self, xyb_y: &[f32], width: u32, height: u32) -> Vec<f32> {
+        let n = (width as usize) * (height as usize);
+        assert_eq!(xyb_y.len(), n, "xyb_y length mismatch with width*height");
+        let h_in = self.client.create_from_slice(f32::as_bytes(xyb_y));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        mask1x1::<R>(&self.client, h_in, h_out.clone(), width, height);
+        let bytes = self.client.read_one(h_out).expect("read mask1x1");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Forward DCT8 on a contiguous batch of 8×8 blocks.
+    ///
+    /// Input layout: `num_blocks × 64` floats, row-major within each
+    /// block. Output same shape, with DCT coefficients (transposed
+    /// layout per libjxl convention — see `dct_8x8_scalar` docs).
+    pub fn dct_8x8_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        let n = blocks.len();
+        assert!(n.is_multiple_of(64), "blocks length must be multiple of 64");
+        let num_blocks = (n / 64) as u32;
+        let h_in = self.client.create_from_slice(f32::as_bytes(blocks));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        dct_8x8::<R>(&self.client, h_in, h_out.clone(), num_blocks);
+        let bytes = self.client.read_one(h_out).expect("read dct");
+        f32::from_bytes(&bytes).to_vec()
     }
 
     pub fn encode_lossy_via_cpu(
