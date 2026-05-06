@@ -29,8 +29,8 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 
 | Kernel | Parity ref | Status | Tolerance |
 |---|---|---|---|
-| `dct_8x8` | `dct8::dct_8x8_scalar` | ❌ | — |
-| `idct_8x8` | `dct8::idct_8x8_scalar` | ❌ | — |
+| `dct_8x8` | `dct8::dct_8x8_scalar` | ✓ | 2.98e-8 abs (256 blocks) |
+| `idct_8x8` | `dct8::idct_8x8_scalar` | ✓ | 1.79e-7 abs; roundtrip 2.24e-7 |
 | `dct_8x16` / `dct_16x8` / `dct_16x16` | `dct16::*_scalar` | ❌ | — |
 | `dct_16x32` / `dct_32x16` / `dct_32x32` | `dct32::*_scalar` | ❌ | — |
 | `dct_32x64` / `dct_64x32` / `dct_64x64` | `dct64::*_scalar` | ❌ | — |
@@ -69,8 +69,16 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 ## Coverage summary
 
 - Phase 1: 5 of 7 kernels with parity (71%)
-- Phase 2: 0 of 23 kernels with parity (0%)
+- Phase 2: 2 of 23 kernels with parity (9%)
 - Phase 3: 0 of 3 components done (0%)
 - Phase 4: 0 of 4 integration points done (0%)
 
-**Grand total: 5 of 37 deliverables verified (14%)**
+**Grand total: 7 of 37 deliverables verified (19%)**
+
+### Note on AC strategy search (Phase 3)
+
+The Phase 2 kernels listed are the "naive" port (one cube per block,
+single-threaded). For the whole-image-per-strategy AC search planned in
+Phase 3, the per-block kernels should be re-emitted as cooperative
+(cube_dim = 8 or 64, intra-block parallelism) for higher throughput.
+The naive versions stay as the parity baseline.

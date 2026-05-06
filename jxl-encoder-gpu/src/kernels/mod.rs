@@ -4,6 +4,7 @@
 //! and a parity example under `examples/` proving it matches the
 //! corresponding `jxl_encoder_simd::*_scalar` function.
 
+pub mod dct8;
 pub mod gab;
 pub mod gaborish;
 pub mod mask1x1;

@@ -59,16 +59,7 @@ fn main() {
 
         let h_in = client.create_from_slice(f32::as_bytes(&input));
         let h_out = client.create_from_slice(f32::as_bytes(&vec![0.0f32; N]));
-        gab_smooth::<Backend>(
-            &client,
-            h_in,
-            h_out.clone(),
-            W as u32,
-            H as u32,
-            wc,
-            w1,
-            w2,
-        );
+        gab_smooth::<Backend>(&client, h_in, h_out.clone(), W as u32, H as u32, wc, w1, w2);
         let bytes = client.read_one(h_out).expect("read gab");
         let gpu: &[f32] = f32::from_bytes(&bytes);
         let (m, p) = max_abs_diff(gpu, &cpu_out);
@@ -91,18 +82,7 @@ fn main() {
         let w_big_d = -0.0001_f32;
 
         let mut cpu_out = vec![0.0f32; N];
-        gaborish_5x5_scalar(
-            &mut cpu_out,
-            &input,
-            W,
-            H,
-            wc,
-            wr,
-            wd,
-            w_big_r,
-            wl,
-            w_big_d,
-        );
+        gaborish_5x5_scalar(&mut cpu_out, &input, W, H, wc, wr, wd, w_big_r, wl, w_big_d);
 
         let h_in = client.create_from_slice(f32::as_bytes(&input));
         let h_out = client.create_from_slice(f32::as_bytes(&vec![0.0f32; N]));

@@ -4,6 +4,7 @@
 //! select the backend at construction time (e.g.
 //! `jxl_encoder_gpu::launch::xyb_forward::<cubecl::cuda::CudaRuntime>(...)`).
 
+pub mod dct8;
 pub mod gab;
 pub mod gaborish;
 pub mod mask1x1;
