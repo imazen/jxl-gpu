@@ -34,8 +34,9 @@ use cubecl::prelude::*;
 
 use jxl_encoder::api::{LossyConfig, PixelLayout};
 
+use crate::launch::adaptive_quant::{compute_pre_erosion, per_block_modulations};
 use crate::launch::block_l2::block_l2;
-use crate::launch::cfl::find_best_multiplier;
+use crate::launch::cfl::{find_best_multiplier, find_best_multiplier_newton};
 use crate::launch::dct8::{dct_8x8, idct_8x8};
 use crate::launch::dequant::dequant_dct8;
 use crate::launch::entropy::entropy_coeffs_pixel;
@@ -677,6 +678,125 @@ impl<R: Runtime> GpuEncoder<R> {
         );
         let bytes = self.client.read_one(h_o).expect("read cfl");
         i32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Per-tile CfL multiplier search via Newton's method (warm-started
+    /// from LS, refines toward smoothed-L1 optimum).
+    #[allow(clippy::too_many_arguments)]
+    pub fn cfl_multipliers_newton(
+        &self,
+        values_m: &[f32],
+        values_s: &[f32],
+        bases: &[f32],
+        num_per_tile: u32,
+        distance_mul: f32,
+        eps: f32,
+        max_iters: u32,
+    ) -> Vec<i32> {
+        let num_tiles = bases.len() as u32;
+        let h_m = self.client.create_from_slice(f32::as_bytes(values_m));
+        let h_s = self.client.create_from_slice(f32::as_bytes(values_s));
+        let h_b = self.client.create_from_slice(f32::as_bytes(bases));
+        let h_o = self
+            .client
+            .create_from_slice(i32::as_bytes(&vec![0_i32; num_tiles as usize]));
+        find_best_multiplier_newton::<R>(
+            &self.client,
+            h_m,
+            h_s,
+            h_b,
+            h_o.clone(),
+            num_tiles,
+            num_per_tile,
+            distance_mul,
+            eps,
+            max_iters,
+        );
+        let bytes = self.client.read_one(h_o).expect("read cfl_newton");
+        i32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Adaptive-quant pre-erosion map. Caller pre-computes the output
+    /// dimensions from the tile bounds (see `compute_pre_erosion_kernel`
+    /// docs for the formula).
+    #[allow(clippy::too_many_arguments)]
+    pub fn pre_erosion(
+        &self,
+        xyb_y: &[f32],
+        width: u32,
+        height: u32,
+        x0: u32,
+        y_start: u32,
+        pre_erosion_w: u32,
+        pre_erosion_h: u32,
+    ) -> Vec<f32> {
+        let n_in = (width as usize) * (height as usize);
+        assert_eq!(xyb_y.len(), n_in);
+        let n_out = (pre_erosion_w as usize) * (pre_erosion_h as usize);
+        let h_in = self.client.create_from_slice(f32::as_bytes(xyb_y));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_out]));
+        compute_pre_erosion::<R>(
+            &self.client,
+            h_in,
+            h_out.clone(),
+            n_in,
+            width,
+            height,
+            x0,
+            y_start,
+            pre_erosion_w,
+            pre_erosion_h,
+        );
+        let bytes = self.client.read_one(h_out).expect("read pre_erosion");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Per-block adaptive-quant modulations (mask + gamma + hf + blue).
+    /// `aq_map` is read AND written in-place.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_per_block_modulations(
+        &self,
+        xyb_x: &[f32],
+        xyb_y: &[f32],
+        xyb_b: &[f32],
+        aq_map: &mut [f32],
+        stride: u32,
+        aq_map_stride: u32,
+        rect_x0_blocks: u32,
+        rect_y0_blocks: u32,
+        rect_w_blocks: u32,
+        rect_h_blocks: u32,
+        butteraugli_target: f32,
+        scale: f32,
+    ) {
+        let xyb_n = xyb_y.len();
+        let aq_n = aq_map.len();
+        let h_x = self.client.create_from_slice(f32::as_bytes(xyb_x));
+        let h_y = self.client.create_from_slice(f32::as_bytes(xyb_y));
+        let h_b = self.client.create_from_slice(f32::as_bytes(xyb_b));
+        let h_aq = self.client.create_from_slice(f32::as_bytes(aq_map));
+        per_block_modulations::<R>(
+            &self.client,
+            h_x,
+            h_y,
+            h_b,
+            h_aq.clone(),
+            xyb_n,
+            aq_n,
+            stride,
+            aq_map_stride,
+            rect_x0_blocks,
+            rect_y0_blocks,
+            rect_w_blocks,
+            rect_h_blocks,
+            butteraugli_target,
+            scale,
+        );
+        let bytes = self.client.read_one(h_aq).expect("read aq_map");
+        let new_aq: &[f32] = f32::from_bytes(&bytes);
+        aq_map.copy_from_slice(new_aq);
     }
 
     pub fn encode_lossy_via_cpu(
