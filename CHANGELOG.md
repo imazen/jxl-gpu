@@ -21,3 +21,20 @@
     Cooperative (intra-block parallelism) variant deferred — naive port
     is the parity baseline.
 - Example: `examples/dct8_parity.rs`
+- Phase 2 small kernels:
+  - `kernels::block_l2::block_l2_kernel` — 1.40e-9 abs vs scalar
+  - `kernels::quantize::quantize_dct8_kernel` — bit-exact (0 diffs, 64 blocks)
+  - User-implemented `round_ties_even_to_i32` in cubecl since 0.10 has
+    no ties-to-even cast. Required for AdjustQuantBlockAC parity.
+- Example: `examples/phase2_small_parity.rs`
+- `kernels::pixel_loss::pixel_loss_kernel` — per-block 8th-power norm
+  with f64 accumulation. Confirms cubecl 0.10 supports f64 ops on the
+  CUDA backend. 3.75e-16 relative parity vs scalar reference.
+- `kernels::dequant::dequant_dct8_kernel` — per-block AC dequant + CfL
+  restore. Y bit-exact; X/B 1.53e-5 abs (FMA contraction on the CfL add).
+- Examples: `examples/pixel_loss_parity.rs`, `examples/dequant_parity.rs`
+- `kernels::dct16` — 16x16 forward + inverse DCT (1-cube-per-block).
+  Forward 5.96e-8 abs, inverse 5.36e-7, roundtrip 4.47e-7 (64 blocks).
+  Recursive butterfly: dct1d_16 → dct1d_8 → dct1d_4 → dct1d_2 (forward);
+  inv_idct1d_16 → inv_idct1d_8_core → inv_idct1d_4 (inverse).
+- Example: `examples/dct16_parity.rs`
