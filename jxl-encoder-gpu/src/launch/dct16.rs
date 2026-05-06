@@ -6,7 +6,10 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::kernels::dct16::{dct_16x16_kernel, idct_16x16_kernel};
+use crate::kernels::dct16::{
+    dct_16x16_kernel, dct_16x8_kernel, dct_8x16_kernel, idct_16x16_kernel, idct_16x8_kernel,
+    idct_8x16_kernel,
+};
 
 pub fn dct_16x16<R: Runtime>(
     client: &ComputeClient<R>,
@@ -45,3 +48,31 @@ pub fn idct_16x16<R: Runtime>(
         );
     }
 }
+
+macro_rules! launch_128 {
+    ($name:ident, $kernel:ident) => {
+        pub fn $name<R: Runtime>(
+            client: &ComputeClient<R>,
+            input: Handle,
+            output: Handle,
+            num_blocks: u32,
+        ) {
+            let n = (num_blocks as usize) * 128;
+            let cubes = num_blocks.max(1);
+            unsafe {
+                $kernel::launch_unchecked::<R>(
+                    client,
+                    CubeCount::Static(cubes, 1, 1),
+                    CubeDim::new_1d(1),
+                    ArrayArg::from_raw_parts(input, n),
+                    ArrayArg::from_raw_parts(output, n),
+                );
+            }
+        }
+    };
+}
+
+launch_128!(dct_16x8, dct_16x8_kernel);
+launch_128!(dct_8x16, dct_8x16_kernel);
+launch_128!(idct_16x8, idct_16x8_kernel);
+launch_128!(idct_8x16, idct_8x16_kernel);

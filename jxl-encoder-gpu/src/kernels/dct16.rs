@@ -97,7 +97,7 @@ fn fwd_dct1d_4(mem: &mut SharedMemory<f32>, base: u32) {
 
 /// Forward 1D 8-point DCT, in-place at offset `base`.
 #[cube]
-fn fwd_dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
+pub(crate) fn fwd_dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
     let b = base as usize;
     let m0 = mem[b];
     let m1 = mem[b + 1usize];
@@ -177,7 +177,7 @@ fn fwd_dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
 /// Forward 1D 16-point DCT, in-place at offset `base` (no scaling — caller
 /// applies 1/16).
 #[cube]
-fn fwd_dct1d_16(mem: &mut SharedMemory<f32>, base: u32) {
+pub(crate) fn fwd_dct1d_16(mem: &mut SharedMemory<f32>, base: u32) {
     let b = base as usize;
     let m0 = mem[b];
     let m1 = mem[b + 1usize];
@@ -487,7 +487,7 @@ fn inv_idct1d_4(mem: &mut SharedMemory<f32>, base: u32) {
 
 /// IDCT-8 core (no N scaling), in-place at offset `base`.
 #[cube]
-fn inv_idct1d_8_core(mem: &mut SharedMemory<f32>, base: u32) {
+pub(crate) fn inv_idct1d_8_core(mem: &mut SharedMemory<f32>, base: u32) {
     let b = base as usize;
     // De-interleave
     let mut t0 = mem[b];
@@ -561,6 +561,61 @@ fn inv_idct1d_8_core(mem: &mut SharedMemory<f32>, base: u32) {
     mem[b + 5usize] = (t2 - t6) * HALF;
     mem[b + 3usize] = (t3 + t7) * HALF;
     mem[b + 4usize] = (t3 - t7) * HALF;
+}
+
+/// IDCT-16 core (no N scaling), in-place at offset `base`. Same as
+/// `inv_idct1d_16` but skips the `*=16` scaling step. Used by recursive
+/// IDCT-32 / IDCT-64.
+#[cube]
+pub(crate) fn inv_idct1d_16_core(mem: &mut SharedMemory<f32>, base: u32) {
+    let b = base as usize;
+
+    // De-interleave: even -> first[0..8], odd -> second[0..8]
+    let mut first = SharedMemory::<f32>::new(8usize);
+    let mut second = SharedMemory::<f32>::new(8usize);
+    let mut i: u32 = 0u32;
+    while i < 8u32 {
+        let iu = i as usize;
+        first[iu] = mem[b + 2usize * iu];
+        second[iu] = mem[b + 2usize * iu + 1usize];
+        i += 1u32;
+    }
+
+    // Reverse B transform on second half
+    second[6usize] = second[6usize] - second[7usize];
+    second[5usize] = second[5usize] - second[6usize];
+    second[4usize] = second[4usize] - second[5usize];
+    second[3usize] = second[3usize] - second[4usize];
+    second[2usize] = second[2usize] - second[3usize];
+    second[1usize] = second[1usize] - second[2usize];
+    second[0usize] = (second[0usize] - second[1usize]) * ONE_OVER_SQRT2;
+
+    // IDCT-8 core on second half
+    inv_idct1d_8_core(&mut second, 0u32);
+
+    // Divide by WC16
+    second[0usize] = second[0usize] * INV_WC16_0;
+    second[1usize] = second[1usize] * INV_WC16_1;
+    second[2usize] = second[2usize] * INV_WC16_2;
+    second[3usize] = second[3usize] * INV_WC16_3;
+    second[4usize] = second[4usize] * INV_WC16_4;
+    second[5usize] = second[5usize] * INV_WC16_5;
+    second[6usize] = second[6usize] * INV_WC16_6;
+    second[7usize] = second[7usize] * INV_WC16_7;
+
+    // IDCT-8 core on first half
+    inv_idct1d_8_core(&mut first, 0u32);
+
+    // Combine
+    let mut i: u32 = 0u32;
+    while i < 8u32 {
+        let iu = i as usize;
+        let f = first[iu];
+        let s = second[iu];
+        mem[b + iu] = (f + s) * HALF;
+        mem[b + 15usize - iu] = (f - s) * HALF;
+        i += 1u32;
+    }
 }
 
 /// Inverse 1D 16-point IDCT, in-place at offset `base`. Includes *=16
@@ -687,12 +742,267 @@ pub fn idct_16x16_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     }
 }
 
-// Suppress fwd_dct1d_4/8 unused-helper warnings (kept in source as
-// reference for the inlined butterfly logic above; future cooperative
-// kernels will call them directly).
-#[allow(dead_code)]
+// =============================================================================
+// Rectangular variants: DCT16x8, DCT8x16, IDCT16x8, IDCT8x16
+// =============================================================================
+
+/// Inverse 1D 8-point IDCT with *=8 scaling. Wraps `inv_idct1d_8_core`.
 #[cube]
-fn _unused_keepalive(mem: &mut SharedMemory<f32>) {
-    fwd_dct1d_4(mem, 0u32);
-    fwd_dct1d_8(mem, 0u32);
+fn inv_idct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
+    let b = base as usize;
+    let mut i: u32 = 0u32;
+    while i < 8u32 {
+        let iu = i as usize;
+        mem[b + iu] = mem[b + iu] * 8.0f32;
+        i += 1u32;
+    }
+    inv_idct1d_8_core(mem, base);
+}
+
+/// Forward 16x8 DCT (16 rows × 8 cols). Per-row 8-pt DCT (1/8), transpose
+/// to 8 rows × 16 cols, per-row 16-pt DCT (1/16). No final transpose.
+#[cube(launch_unchecked)]
+pub fn dct_16x8_kernel(input: &Array<f32>, output: &mut Array<f32>) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = input.len() / 128usize;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 128usize;
+
+    let mut scratch = SharedMemory::<f32>::new(128usize);
+    let mut transposed = SharedMemory::<f32>::new(128usize);
+
+    // Per-row 8-pt DCT + scale 1/8
+    let mut r: u32 = 0u32;
+    while r < 16u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            scratch[row_off_us + cu] = input[off + row_off_us + cu];
+            c += 1u32;
+        }
+        fwd_dct1d_8(&mut scratch, row_off);
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            scratch[row_off_us + cu] = scratch[row_off_us + cu] * 0.125f32;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // Transpose 16x8 → 8x16: transposed[c*16 + r] = scratch[r*8 + c]
+    let mut r: u32 = 0u32;
+    while r < 16u32 {
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            transposed[cu * 16usize + ru] = scratch[ru * 8usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // Per-row (now 8 rows × 16 cols) 16-pt DCT + scale 1/16
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 16u32;
+        let row_off_us = row_off as usize;
+        fwd_dct1d_16(&mut transposed, row_off);
+        let mut c: u32 = 0u32;
+        while c < 16u32 {
+            let cu = c as usize;
+            transposed[row_off_us + cu] = transposed[row_off_us + cu] * ONE_OVER_16;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // No final transpose (ROWS >= COLS).
+    let mut i: u32 = 0u32;
+    while i < 128u32 {
+        let iu = i as usize;
+        output[off + iu] = transposed[iu];
+        i += 1u32;
+    }
+}
+
+/// Forward 8x16 DCT (8 rows × 16 cols). Per-row 16-pt DCT (1/16), transpose
+/// to 16 rows × 8 cols, per-row 8-pt DCT (1/8), FINAL transpose to 8x16
+/// (ROWS < COLS).
+#[cube(launch_unchecked)]
+pub fn dct_8x16_kernel(input: &Array<f32>, output: &mut Array<f32>) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = input.len() / 128usize;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 128usize;
+
+    let mut scratch = SharedMemory::<f32>::new(128usize);
+    let mut transposed = SharedMemory::<f32>::new(128usize);
+
+    // Per-row 16-pt DCT + scale 1/16 (8 rows × 16 cols)
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 16u32;
+        let row_off_us = row_off as usize;
+        let mut c: u32 = 0u32;
+        while c < 16u32 {
+            let cu = c as usize;
+            scratch[row_off_us + cu] = input[off + row_off_us + cu];
+            c += 1u32;
+        }
+        fwd_dct1d_16(&mut scratch, row_off);
+        let mut c: u32 = 0u32;
+        while c < 16u32 {
+            let cu = c as usize;
+            scratch[row_off_us + cu] = scratch[row_off_us + cu] * ONE_OVER_16;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // Transpose 8x16 → 16x8: transposed[c*8 + r] = scratch[r*16 + c]
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let mut c: u32 = 0u32;
+        while c < 16u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            transposed[cu * 8usize + ru] = scratch[ru * 16usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // Per-row 8-pt DCT + scale 1/8 (16 rows × 8 cols)
+    let mut r: u32 = 0u32;
+    while r < 16u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        fwd_dct1d_8(&mut transposed, row_off);
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            transposed[row_off_us + cu] = transposed[row_off_us + cu] * 0.125f32;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // FINAL transpose 16x8 → 8x16 (ROWS < COLS branch)
+    let mut r: u32 = 0u32;
+    while r < 16u32 {
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            output[off + cu * 16usize + ru] = transposed[ru * 8usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+}
+
+/// Inverse 16x8 IDCT: per-row 8-pt IDCT (×8), then per-column 16-pt IDCT (×16).
+#[cube(launch_unchecked)]
+pub fn idct_16x8_kernel(input: &Array<f32>, output: &mut Array<f32>) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = input.len() / 128usize;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 128usize;
+
+    let mut scratch = SharedMemory::<f32>::new(128usize);
+
+    // Load and per-row 8-pt IDCT (×8)
+    let mut r: u32 = 0u32;
+    while r < 16u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            scratch[row_off_us + cu] = input[off + row_off_us + cu];
+            c += 1u32;
+        }
+        inv_idct1d_8(&mut scratch, row_off);
+        r += 1u32;
+    }
+
+    // Per-column 16-pt IDCT: gather column into 16-elem scratch, IDCT, scatter
+    let mut col: u32 = 0u32;
+    while col < 8u32 {
+        let mut col_buf = SharedMemory::<f32>::new(16usize);
+        let cu = col as usize;
+        let mut row: u32 = 0u32;
+        while row < 16u32 {
+            let ru = row as usize;
+            col_buf[ru] = scratch[ru * 8usize + cu];
+            row += 1u32;
+        }
+        inv_idct1d_16(&mut col_buf, 0u32);
+        let mut row: u32 = 0u32;
+        while row < 16u32 {
+            let ru = row as usize;
+            output[off + ru * 8usize + cu] = col_buf[ru];
+            row += 1u32;
+        }
+        col += 1u32;
+    }
+}
+
+/// Inverse 8x16 IDCT: per-row 16-pt IDCT (×16), then per-column 8-pt IDCT (×8).
+#[cube(launch_unchecked)]
+pub fn idct_8x16_kernel(input: &Array<f32>, output: &mut Array<f32>) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = input.len() / 128usize;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 128usize;
+
+    let mut scratch = SharedMemory::<f32>::new(128usize);
+
+    // Load and per-row 16-pt IDCT (×16)
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 16u32;
+        let row_off_us = row_off as usize;
+        let mut c: u32 = 0u32;
+        while c < 16u32 {
+            let cu = c as usize;
+            scratch[row_off_us + cu] = input[off + row_off_us + cu];
+            c += 1u32;
+        }
+        inv_idct1d_16(&mut scratch, row_off);
+        r += 1u32;
+    }
+
+    // Per-column 8-pt IDCT: gather column into 8-elem scratch, IDCT, scatter
+    let mut col: u32 = 0u32;
+    while col < 16u32 {
+        let mut col_buf = SharedMemory::<f32>::new(8usize);
+        let cu = col as usize;
+        let mut row: u32 = 0u32;
+        while row < 8u32 {
+            let ru = row as usize;
+            col_buf[ru] = scratch[ru * 16usize + cu];
+            row += 1u32;
+        }
+        inv_idct1d_8(&mut col_buf, 0u32);
+        let mut row: u32 = 0u32;
+        while row < 8u32 {
+            let ru = row as usize;
+            output[off + ru * 16usize + cu] = col_buf[ru];
+            row += 1u32;
+        }
+        col += 1u32;
+    }
 }
