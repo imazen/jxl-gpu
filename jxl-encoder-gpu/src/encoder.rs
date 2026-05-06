@@ -34,12 +34,16 @@ use cubecl::prelude::*;
 
 use jxl_encoder::api::{LossyConfig, PixelLayout};
 
+use crate::launch::block_l2::block_l2;
+use crate::launch::cfl::find_best_multiplier;
 use crate::launch::dct8::{dct_8x8, idct_8x8};
+use crate::launch::dequant::dequant_dct8;
 use crate::launch::entropy::entropy_coeffs_pixel;
 use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::mask1x1::mask1x1;
+use crate::launch::pixel_loss::pixel_loss;
 use crate::launch::quantize::quantize_dct8;
 use crate::launch::xyb::xyb_forward;
 
@@ -492,6 +496,187 @@ impl<R: Runtime> GpuEncoder<R> {
             f32::from_bytes(&yb).to_vec(),
             f32::from_bytes(&bb).to_vec(),
         )
+    }
+
+    /// Per-block DCT8 dequantize with CfL restore (3 channels at once).
+    /// Returns `(out_x, out_y, out_b)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dequant_dct8_blocks(
+        &self,
+        quant_x: &[i32],
+        quant_y: &[i32],
+        quant_b: &[i32],
+        weights_x: &[f32],
+        weights_y: &[f32],
+        weights_b: &[f32],
+        qac_qm_x: &[f32],
+        qac_qm_y: &[f32],
+        qac_qm_b: &[f32],
+        x_factor: &[f32],
+        b_factor: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let n_coef = quant_x.len();
+        assert!(n_coef.is_multiple_of(64));
+        let nb = n_coef / 64;
+        let num_blocks = nb as u32;
+        let h_qx = self.client.create_from_slice(i32::as_bytes(quant_x));
+        let h_qy = self.client.create_from_slice(i32::as_bytes(quant_y));
+        let h_qb = self.client.create_from_slice(i32::as_bytes(quant_b));
+        let h_wx = self.client.create_from_slice(f32::as_bytes(weights_x));
+        let h_wy = self.client.create_from_slice(f32::as_bytes(weights_y));
+        let h_wb = self.client.create_from_slice(f32::as_bytes(weights_b));
+        let h_qmx = self.client.create_from_slice(f32::as_bytes(qac_qm_x));
+        let h_qmy = self.client.create_from_slice(f32::as_bytes(qac_qm_y));
+        let h_qmb = self.client.create_from_slice(f32::as_bytes(qac_qm_b));
+        let h_xf = self.client.create_from_slice(f32::as_bytes(x_factor));
+        let h_bf = self.client.create_from_slice(f32::as_bytes(b_factor));
+        let h_ox = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_coef]));
+        let h_oy = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_coef]));
+        let h_ob = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_coef]));
+        dequant_dct8::<R>(
+            &self.client,
+            h_qx,
+            h_qy,
+            h_qb,
+            h_wx,
+            h_wy,
+            h_wb,
+            h_qmx,
+            h_qmy,
+            h_qmb,
+            h_xf,
+            h_bf,
+            h_ox.clone(),
+            h_oy.clone(),
+            h_ob.clone(),
+            num_blocks,
+        );
+        let xb = self.client.read_one(h_ox).expect("x");
+        let yb = self.client.read_one(h_oy).expect("y");
+        let bb = self.client.read_one(h_ob).expect("b");
+        (
+            f32::from_bytes(&xb).to_vec(),
+            f32::from_bytes(&yb).to_vec(),
+            f32::from_bytes(&bb).to_vec(),
+        )
+    }
+
+    /// Per-8×8-block masked weighted L2 error for 3-channel original/reconstructed.
+    /// Returns `xsize_blocks * ysize_blocks` per-block costs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn block_l2_errors(
+        &self,
+        orig_x: &[f32],
+        orig_y: &[f32],
+        orig_b: &[f32],
+        recon_x: &[f32],
+        recon_y: &[f32],
+        recon_b: &[f32],
+        mask: &[f32],
+        xsize_blocks: u32,
+        ysize_blocks: u32,
+        padded_width: u32,
+    ) -> Vec<f32> {
+        let n_blocks = (xsize_blocks * ysize_blocks) as usize;
+        let h_ox = self.client.create_from_slice(f32::as_bytes(orig_x));
+        let h_oy = self.client.create_from_slice(f32::as_bytes(orig_y));
+        let h_ob = self.client.create_from_slice(f32::as_bytes(orig_b));
+        let h_rx = self.client.create_from_slice(f32::as_bytes(recon_x));
+        let h_ry = self.client.create_from_slice(f32::as_bytes(recon_y));
+        let h_rb = self.client.create_from_slice(f32::as_bytes(recon_b));
+        let h_m = self.client.create_from_slice(f32::as_bytes(mask));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks]));
+        block_l2::<R>(
+            &self.client,
+            h_ox,
+            h_oy,
+            h_ob,
+            h_rx,
+            h_ry,
+            h_rb,
+            h_m,
+            h_out.clone(),
+            xsize_blocks,
+            ysize_blocks,
+            padded_width,
+        );
+        let bytes = self.client.read_one(h_out).expect("read block_l2");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Per-block 8th-power norm of masked pixel errors. Returns `num_blocks` f64.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pixel_loss_blocks(
+        &self,
+        pixel_error: &[f32],
+        mask: &[f32],
+        mask_row_base: &[u32],
+        mask_stride: u32,
+        mask_offset: f32,
+        block_width: u32,
+        block_height: u32,
+    ) -> Vec<f64> {
+        let num_blocks = mask_row_base.len() as u32;
+        let h_err = self.client.create_from_slice(f32::as_bytes(pixel_error));
+        let h_mask = self.client.create_from_slice(f32::as_bytes(mask));
+        let h_mrb = self.client.create_from_slice(u32::as_bytes(mask_row_base));
+        let h_out = self
+            .client
+            .create_from_slice(f64::as_bytes(&vec![0.0_f64; num_blocks as usize]));
+        pixel_loss::<R>(
+            &self.client,
+            h_err,
+            h_mask,
+            h_mrb,
+            h_out.clone(),
+            num_blocks,
+            mask.len(),
+            mask_stride,
+            mask_offset,
+            block_width,
+            block_height,
+        );
+        let bytes = self.client.read_one(h_out).expect("read pixel_loss");
+        f64::from_bytes(&bytes).to_vec()
+    }
+
+    /// Per-tile CfL multiplier search via regularized least-squares.
+    /// Returns one i32 per tile (cast to i8 by caller; range [-128, 127]).
+    pub fn cfl_multipliers(
+        &self,
+        values_m: &[f32],
+        values_s: &[f32],
+        bases: &[f32],
+        num_per_tile: u32,
+        distance_mul: f32,
+    ) -> Vec<i32> {
+        let num_tiles = bases.len() as u32;
+        let h_m = self.client.create_from_slice(f32::as_bytes(values_m));
+        let h_s = self.client.create_from_slice(f32::as_bytes(values_s));
+        let h_b = self.client.create_from_slice(f32::as_bytes(bases));
+        let h_o = self
+            .client
+            .create_from_slice(i32::as_bytes(&vec![0_i32; num_tiles as usize]));
+        find_best_multiplier::<R>(
+            &self.client,
+            h_m,
+            h_s,
+            h_b,
+            h_o.clone(),
+            num_tiles,
+            num_per_tile,
+            distance_mul,
+        );
+        let bytes = self.client.read_one(h_o).expect("read cfl");
+        i32::from_bytes(&bytes).to_vec()
     }
 
     pub fn encode_lossy_via_cpu(
