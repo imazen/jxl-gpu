@@ -62,7 +62,7 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 
 | Component | Status |
 |---|---|
-| Per-strategy whole-image cost grid kernels | ✓ | 15 strategies × 2 flavors = 30 cost-grid functions: full DCT4/8/16/32/64 family (squares + rects) + IDENTITY + DCT2X2, in both single-channel proxy and 3-channel XYB-weighted + mask1x1-modulated forms. Validated end-to-end on real CLIC2025 photos (`phase3_xyb_real_image_demo`, `corpus_subblock_picks_demo`). Remaining: AFV0-3 (kernels not ported) + CfL-aware variants (chroma-from-luma decorrelation in coefficient space) |
+| Per-strategy whole-image cost grid kernels | ✓ | 15 strategies × 2 flavors = 30 cost-grid functions: full DCT4/8/16/32/64 family (squares + rects) + IDENTITY + DCT2X2, in both single-channel proxy and 3-channel XYB-weighted + mask1x1-modulated forms. Validated end-to-end on real CLIC2025 photos (`phase3_xyb_real_image_demo`, `corpus_subblock_picks_demo`). Remaining: AFV0-3 (forward transform kernels ported as of 2026-05-07; cost grid integration still TODO) + CfL-aware variants (chroma-from-luma decorrelation in coefficient space) |
 | Host-side partition selector | ✓ | Full 7-strategy coverage at 16×16 tier: DCT16×16 + 2× DCT16×8 + 2× DCT8×16 + Four DCT8×8 + per-cell `FourSubBlocks([SubStrategy; 4])` choosing from {DCT8, DCT4×4, DCT4×8, DCT8×4, IDENTITY, DCT2X2}. Recursive composition through 32×32 + 64×64 tiers. Corpus validation: pure 4-DCT8 essentially dies (0.1% of 32k regions) when sub-block alternatives offered |
 | Refactor `ac_strategy_search.rs` to consume cost grids | ⛔ | requires touching `jxl-encoder` crate (separate repo) — needs user permission |
 
@@ -104,13 +104,16 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
-**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, AdjustQuantBlockAC heuristics, non-DCT8 strategies for quantize/dequant, `estimate_entropy_full` orchestration, `apply_dct` for AFV0-3 (IDENTITY + DCT2X2 now on GPU).
+**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, AdjustQuantBlockAC heuristics, non-DCT8 strategies for quantize/dequant, `estimate_entropy_full` orchestration, **inverse** AFV0-3 transform (forward AFV0-3 done as of 2026-05-07; IDENTITY + DCT2X2 forward + inverse done).
 
 ## Coverage summary
 
 - Phase 1: 7 of 7 ✓ (xyb fwd/inv, gab, gaborish_5x5, mask1x1, denoise, pad_plane)
-- Phase 2 DCT/IDCT: 26 of 26 ✓ (all 8/16/32/64 squares, rectangulars,
-  and 4-family sub-block variants)
+- Phase 2 DCT/IDCT: 30 of ~31 ✓ (all 8/16/32/64 squares, rectangulars,
+  and 4-family sub-block variants; raw 4×4 + 4×8 forward DCTs as
+  primitives for AFV; AFV4×4 forward + inverse; **AFV0-3 forward
+  composition done in `forks::afv`**; only inverse 4×4/4×8 raw DCTs
+  remain for the AFV decoder side)
 - Phase 2 other: 13 of ~13 ✓ (quantize_dct8, quantize_large,
   dequant_dct8, block_l2, pixel_loss, cfl_find_best_multiplier +
   Newton, compute_pre_erosion, per_block_modulations, epf_step1,
@@ -128,11 +131,12 @@ for GPU-friendly batching.
 **Grand total: 56 of ~65 deliverables verified (~86%)**
 
 DCT/IDCT family complete. CfL complete. EPF Steps 1+2 complete.
-10 fork modules verified composing through GpuEncoder. Remaining
-work concentrates in (a) EPF Step 0 GPU kernel (12-tap), (b) full
-estimate_entropy_full orchestration, (c) GPU kernels for non-DCT8
-strategies' quantize/dequant, (d) AFV0-3 forward + inverse + cost
-grid integration.
+11 fork modules verified composing through GpuEncoder (added
+forks::afv). Remaining work concentrates in (a) EPF Step 0 GPU
+kernel (12-tap), (b) full estimate_entropy_full orchestration,
+(c) GPU kernels for non-DCT8 strategies' quantize/dequant,
+(d) **inverse** AFV0-3 transform (forward done) + AFV cost grid
+integration.
 
 ### Note on AC strategy search (Phase 3)
 
