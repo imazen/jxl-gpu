@@ -59,6 +59,31 @@ use cubecl::Runtime;
 
 use crate::encoder::GpuEncoder;
 
+/// Per-channel offsets for pixel-domain loss masking. Bit-for-bit
+/// from upstream `jxl_encoder::vardct::ac_strategy::MASK_CHANNEL_OFFSET`
+/// (= libjxl `enc_ac_strategy.cc:446`).
+///
+/// Indexed by channel: X=0, Y=1, B=2. The Y channel has no offset
+/// (luma is already perceptually well-scaled); X and B add a constant
+/// before the 8th-power norm to dampen ultra-low-magnitude chroma
+/// errors.
+pub const MASK_CHANNEL_OFFSET: [f32; 3] = [12.0, 0.0, 4.0];
+
+/// Per-channel multipliers for the pixel-domain 8th-power loss.
+/// Bit-for-bit from upstream
+/// `jxl_encoder::vardct::ac_strategy::CHANNEL_MUL` (= libjxl
+/// `enc_ac_strategy.cc:479`). These are pre-computed `base^8` values
+/// (X corresponds to base ≈ 8.222, Y to 1.0, B to 1.03 — the
+/// upstream "8.2^8" comment is approximate).
+///
+/// Indexed by channel (X=0, Y=1, B=2). `f64` to keep precision
+/// during the 8th-power accumulation that consumes them.
+pub const CHANNEL_MUL: [f64; 3] = [
+    20_882_706.465_593_6, // X — upstream comment "8.2^8" is approximate
+    1.0,                  // Y = 1.0^8
+    1.266_770_080_64,     // B = 1.03^8
+];
+
 /// Constants for coefficient-domain entropy estimation (libjxl-tiny
 /// style, NOT distance-scaled). Bit-for-bit from upstream
 /// `jxl_encoder::vardct::ac_strategy::COEFF_DOMAIN_CONSTANTS`.
@@ -232,6 +257,18 @@ pub fn pixel_loss_blocks_gpu<R: Runtime>(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn test_channel_constants_match_upstream() {
+        // Spot-check constants against libjxl enc_ac_strategy.cc reference.
+        // (The MUL values are the literal upstream constants — the X-channel
+        // comment "8.2^8" in libjxl is misleading; the actual value
+        // corresponds to a base ≈ 8.222. We preserve the literal.)
+        assert_eq!(MASK_CHANNEL_OFFSET, [12.0_f32, 0.0, 4.0]);
+        assert_eq!(CHANNEL_MUL[0], 20_882_706.465_593_6);
+        assert_eq!(CHANNEL_MUL[1], 1.0);
+        assert_eq!(CHANNEL_MUL[2], 1.266_770_080_64);
+    }
 
     #[test]
     fn test_compute_scaled_constants_d1_no_scale() {
