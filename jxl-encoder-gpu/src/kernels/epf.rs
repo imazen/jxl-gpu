@@ -358,3 +358,221 @@ pub fn epf_step2_kernel(
         out_b[oidx] = sum_b * inv_tw;
     }
 }
+
+/// EPF step 0 — 5×5 plus kernel with 3×3-plus SAD over 12 neighbor
+/// positions. The heaviest filter step. Mirrors
+/// `jxl_encoder::vardct::epf::epf_step0_strip` (which itself is the
+/// strip-parallel form of upstream's serial step 0).
+///
+/// One thread per OUTPUT pixel. Inputs must be padded with `pad >= 3`
+/// (the 5×5 plus pattern reaches ±2 from center; the 3×3-plus SAD
+/// adds another ±1 around each neighbor → ±3 total reach).
+///
+/// Mirrors the structure of `epf_step1_kernel` (4 cross neighbors)
+/// expanded to 12 neighbors per the `EPF0_NEIGHBORS` constant. SAD
+/// computation reuses `sad_3x3_plus`.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn epf_step0_kernel(
+    in_x: &Array<f32>,
+    in_y: &Array<f32>,
+    in_b: &Array<f32>,
+    out_x: &mut Array<f32>,
+    out_y: &mut Array<f32>,
+    out_b: &mut Array<f32>,
+    inv_sigma: &Array<f32>,
+    width: u32,
+    height: u32,
+    xsize_blocks: u32,
+    in_stride: u32,
+    pad: u32,
+    sigma_scale: f32,
+    border_sigma_mul: f32,
+) {
+    let oidx = ABSOLUTE_POS;
+    let w = width as usize;
+    let h = height as usize;
+    let total = w * h;
+    if oidx >= total {
+        terminate!();
+    }
+    let py = oidx / w;
+    let px = oidx - py * w;
+    let xb = xsize_blocks as usize;
+    let stride = in_stride as usize;
+    let p = pad as usize;
+    let by = py / 8usize;
+    let bx = px / 8usize;
+    let sigma_idx = by * xb + bx;
+    let is = inv_sigma[sigma_idx];
+
+    let ipx = px + p;
+    let ipy = py + p;
+    let pidx = ipy * stride + ipx;
+
+    let center_x = in_x[pidx];
+    let center_y = in_y[pidx];
+    let center_b = in_b[pidx];
+
+    if is == 0.0f32 {
+        out_x[oidx] = center_x;
+        out_y[oidx] = center_y;
+        out_b[oidx] = center_b;
+    } else {
+        let mod_x = px - (px / 8usize) * 8usize;
+        let mod_y = py - (py / 8usize) * 8usize;
+        let at_border_x = (mod_x == 0usize) || (mod_x == 7usize);
+        let at_border_y = (mod_y == 0usize) || (mod_y == 7usize);
+        let bm = if at_border_x || at_border_y {
+            border_sigma_mul
+        } else {
+            f32::new(1.0)
+        };
+        let eff_is = is * sigma_scale * bm;
+
+        let cx = ipx as u32;
+        let cy = ipy as u32;
+
+        let mut total_w = f32::new(1.0);
+        let mut sum_x = center_x;
+        let mut sum_y = center_y;
+        let mut sum_b = center_b;
+
+        // Neighbor (-2, 0): cy-2, cx
+        let nx = cx;
+        let ny = cy - 2u32;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = (ipy - 2usize) * stride + ipx;
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (-1, -1): cy-1, cx-1
+        let nx = cx - 1u32;
+        let ny = cy - 1u32;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = (ipy - 1usize) * stride + (ipx - 1usize);
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (-1, 0): cy-1, cx
+        let nx = cx;
+        let ny = cy - 1u32;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = (ipy - 1usize) * stride + ipx;
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (-1, 1): cy-1, cx+1
+        let nx = cx + 1u32;
+        let ny = cy - 1u32;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = (ipy - 1usize) * stride + (ipx + 1usize);
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (0, -2): cy, cx-2
+        let nx = cx - 2u32;
+        let ny = cy;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = ipy * stride + (ipx - 2usize);
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (0, -1): cy, cx-1
+        let nx = cx - 1u32;
+        let ny = cy;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = ipy * stride + (ipx - 1usize);
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (0, 1): cy, cx+1
+        let nx = cx + 1u32;
+        let ny = cy;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = ipy * stride + (ipx + 1usize);
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (0, 2): cy, cx+2
+        let nx = cx + 2u32;
+        let ny = cy;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = ipy * stride + (ipx + 2usize);
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (1, -1): cy+1, cx-1
+        let nx = cx - 1u32;
+        let ny = cy + 1u32;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = (ipy + 1usize) * stride + (ipx - 1usize);
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (1, 0): cy+1, cx
+        let nx = cx;
+        let ny = cy + 1u32;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = (ipy + 1usize) * stride + ipx;
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (1, 1): cy+1, cx+1
+        let nx = cx + 1u32;
+        let ny = cy + 1u32;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = (ipy + 1usize) * stride + (ipx + 1usize);
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        // Neighbor (2, 0): cy+2, cx
+        let nx = cx;
+        let ny = cy + 2u32;
+        let sad = sad_3x3_plus(in_x, in_y, in_b, cx, cy, nx, ny, in_stride);
+        let weight = f32::max(sad * eff_is + 1.0f32, 0.0f32);
+        let nidx = (ipy + 2usize) * stride + ipx;
+        total_w = total_w + weight;
+        sum_x = sum_x + weight * in_x[nidx];
+        sum_y = sum_y + weight * in_y[nidx];
+        sum_b = sum_b + weight * in_b[nidx];
+
+        let inv_tw = 1.0f32 / total_w;
+        out_x[oidx] = sum_x * inv_tw;
+        out_y[oidx] = sum_y * inv_tw;
+        out_b[oidx] = sum_b * inv_tw;
+    }
+}
