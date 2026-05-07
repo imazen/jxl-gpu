@@ -198,6 +198,34 @@ pub fn distance_to_qac(distance: f32) -> f32 {
     K_AC_QUANT / distance.max(1e-3)
 }
 
+/// Map per-block mask means to a per-block qac field, centered on
+/// `distance` and varying in a 4× range:
+/// `qac ∈ [distance_to_qac(distance * 2), distance_to_qac(distance / 2)]`.
+///
+/// High mask values (smooth regions, where the eye is less sensitive)
+/// map to LOW qac (heavy quant); low mask values (edges) map to HIGH
+/// qac (light quant). Pure CPU — no GPU touch — so cheap to call once
+/// per distance in a sweep over the same image's
+/// [`LossyEncoder::compute_block_mask_means`] output.
+///
+/// Used by [`LossyEncoder::compute_aq_field`] and
+/// [`LossyEncoder::encode_many_with_aq`] internally; exposed for
+/// callers that want a custom prepass (e.g., a different mask, or
+/// a different distance-range mapping).
+pub fn block_means_to_qac_field(block_means: &[f32], distance: f32) -> alloc::vec::Vec<f32> {
+    let m_min = block_means.iter().copied().fold(f32::INFINITY, f32::min);
+    let m_max = block_means.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let qac_max = distance_to_qac(distance * 0.5); // detail → light quant
+    let qac_min = distance_to_qac(distance * 2.0); // smooth → heavy quant
+    block_means
+        .iter()
+        .map(|&m| {
+            let t = if m_max > m_min { (m - m_min) / (m_max - m_min) } else { 0.5 };
+            qac_max + (qac_min - qac_max) * t
+        })
+        .collect()
+}
+
 /// Pad a `width × height` plane up to `padded_width × padded_height` with
 /// edge-replication on the right/bottom. Output buffer is allocated by
 /// this function; caller passes empty Vec or pre-allocated of correct size.
@@ -599,13 +627,28 @@ impl<R: Runtime> LossyEncoder<R> {
         b: &[f32],
         distance: f32,
     ) -> Vec<f32> {
+        let block_means = self.compute_block_mask_means(enc, r, g, b);
+        block_means_to_qac_field(&block_means, distance)
+    }
+
+    /// Compute per-block mean of mask1x1 (one f32 per padded 8×8
+    /// block). This is the input-dependent half of [`Self::compute_aq_field`]
+    /// — exposed separately so batch encodes (e.g.,
+    /// [`Self::encode_many_with_aq`]) can compute it once and reuse
+    /// across many distances.
+    pub fn compute_block_mask_means(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+    ) -> Vec<f32> {
         use crate::forks::adaptive_quant::compute_mask1x1_gpu;
         let (w, h) = (self.width as usize, self.height as usize);
         // Run XYB on unpadded input — mask1x1 only needs the Y channel.
         let (_xx, xy, _xb) = enc.xyb_from_linear_rgb(r, g, b);
         let mask = compute_mask1x1_gpu(enc, &xy, w, h);
 
-        // Per-block mean of mask, clamped to image bounds.
         let (pw, _ph) = (self.padded_width as usize, self.padded_height as usize);
         let blocks_per_row = pw / 8;
         let blocks_per_col = (self.padded_height as usize) / 8;
@@ -633,18 +676,48 @@ impl<R: Runtime> LossyEncoder<R> {
                     if count > 0 { (sum / count as f64) as f32 } else { 1.0 };
             }
         }
-
-        // Map block_means' range to [qac_min..qac_max] inversely
-        // (high mask = smooth = heavy quant = LOW qac).
-        let m_min = block_means.iter().copied().fold(f32::INFINITY, f32::min);
-        let m_max = block_means.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let qac_max = distance_to_qac(distance * 0.5); // detail → light quant
-        let qac_min = distance_to_qac(distance * 2.0); // smooth → heavy quant
         block_means
+    }
+
+    /// Batch content-driven AQ — one input upload, one mask1x1 prepass,
+    /// N derived qac fields, N adaptive encodes.
+    ///
+    /// Equivalent to calling [`Self::encode_one_with_aq`] in a loop, but
+    /// amortizes the input upload AND the mask1x1 prepass across all
+    /// distances. The mask depends only on the input image, not on
+    /// distance, so it's computed once.
+    ///
+    /// Returns one `(R, G, B)` tuple per distance, in the same order.
+    pub fn encode_many_with_aq(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        distances: &[f32],
+    ) -> Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (pw, ph) = (self.padded_width as usize, self.padded_height as usize);
+        // mask1x1 prepass — done once.
+        let block_means = self.compute_block_mask_means(enc, r, g, b);
+        // Upload padded input once.
+        let r_pad = pad_to_alignment(r, w, h, pw, ph);
+        let g_pad = pad_to_alignment(g, w, h, pw, ph);
+        let b_pad = pad_to_alignment(b, w, h, pw, ph);
+        let g_r = enc.upload_plane(&r_pad, self.padded_width, self.padded_height);
+        let g_g = enc.upload_plane(&g_pad, self.padded_width, self.padded_height);
+        let g_b = enc.upload_plane(&b_pad, self.padded_width, self.padded_height);
+        distances
             .iter()
-            .map(|&m| {
-                let t = if m_max > m_min { (m - m_min) / (m_max - m_min) } else { 0.5 };
-                qac_max + (qac_min - qac_max) * t
+            .map(|&d| {
+                let aq_field = block_means_to_qac_field(&block_means, d);
+                let (rec_r, rec_g, rec_b) =
+                    self.run_pipeline_with_qac(enc, &g_r, &g_g, &g_b, &aq_field);
+                (
+                    crop_to_original(&rec_r, pw, w, h),
+                    crop_to_original(&rec_g, pw, w, h),
+                    crop_to_original(&rec_b, pw, w, h),
+                )
             })
             .collect()
     }
@@ -829,6 +902,52 @@ mod tests {
         for out in &outputs {
             assert_eq!(out.len(), n * 3);
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_lossy_encoder_many_with_aq() {
+        // Batch content-driven AQ — single mask prepass, multiple
+        // distance-derived qac fields.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy = LossyEncoder::new(&enc, 32, 32);
+        let n = 32 * 32;
+        let mut r = Vec::with_capacity(n);
+        let mut g = Vec::with_capacity(n);
+        let mut b = Vec::with_capacity(n);
+        for y in 0..32 {
+            for x in 0..32 {
+                let v = if y < 16 { 0.2 } else { 0.8 };
+                r.push(v + 0.01 * x as f32);
+                g.push(v + 0.01 * x as f32);
+                b.push(v + 0.01 * x as f32);
+            }
+        }
+        let distances = [0.5, 1.0, 2.0, 4.0];
+        let outs = lossy.encode_many_with_aq(&enc, &r, &g, &b, &distances);
+        assert_eq!(outs.len(), distances.len());
+        for (rr, gg, bb) in &outs {
+            assert_eq!(rr.len(), n);
+            assert_eq!(gg.len(), n);
+            assert_eq!(bb.len(), n);
+            for v in rr.iter().chain(gg).chain(bb) {
+                assert!(v.is_finite());
+            }
+        }
+        // Higher distance → higher MAE on average.
+        let mae = |out: &(Vec<f32>, Vec<f32>, Vec<f32>)| {
+            let mut s = 0.0_f64;
+            for i in 0..n {
+                s += (r[i] - out.0[i]).abs() as f64;
+                s += (g[i] - out.1[i]).abs() as f64;
+                s += (b[i] - out.2[i]).abs() as f64;
+            }
+            s / (3.0 * n as f64)
+        };
+        let mae_low = mae(&outs[0]);
+        let mae_hi = mae(&outs[distances.len() - 1]);
+        assert!(mae_hi >= mae_low, "MAE non-monotonic: {mae_low} → {mae_hi}");
     }
 
     #[cfg(feature = "cuda")]
