@@ -44,6 +44,7 @@ use cubecl::server::Handle;
 
 use crate::encoder::GpuEncoder;
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
+use crate::launch::dc_restore::restore_dc;
 use crate::launch::dequant::dequant_dct8;
 use crate::launch::gather::{gather_blocks, scatter_blocks};
 use crate::launch::quantize::quantize_dct8;
@@ -837,6 +838,31 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Restore DC values (slot 0 of each block) from `src` into `dst`,
+    /// leaving all AC coefficients in `dst` untouched. Both inputs
+    /// must have the same shape.
+    ///
+    /// Use case: the GPU `quantize_dct8` kernel always zeros DC (the
+    /// real encoder uses dc_coding for DC). After dequant, callers
+    /// can bit-exact-restore DC from the forward DCT output by
+    /// calling this method with `src = forward_dct_output, dst =
+    /// dequantized_output`. Replaces the host-side download +
+    /// fixup + re-upload pattern.
+    ///
+    /// `dst` is mutated in place via the existing GPU buffer; the
+    /// caller's `&GpuBlocks` reference is unchanged after this call.
+    pub fn restore_dc_persistent(&self, src: &GpuBlocks<R>, dst: &GpuBlocks<R>) {
+        assert_eq!(src.coeffs_per_block, dst.coeffs_per_block);
+        assert_eq!(src.num_blocks, dst.num_blocks);
+        restore_dc::<R>(
+            self.client_ref(),
+            src.handle.clone(),
+            dst.handle.clone(),
+            src.coeffs_per_block,
+            src.num_blocks,
+        );
+    }
+
     /// Persistent-API mask1x1 field on the Y channel.
     pub fn mask1x1_persistent(&self, y: &GpuPlane<R>) -> GpuPlane<R> {
         let n = y.n_pixels();
@@ -1063,6 +1089,38 @@ mod tests {
         assert_eq!(q.coeffs_per_block(), 64);
         let host = enc.download_i32_blocks(&q);
         assert!(host.iter().all(|&v| v == 0));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_restore_dc_persistent() {
+        // src has DC=42, AC=anything. dst has DC=0, AC=anything.
+        // After restore, dst[block*64] should equal src[block*64];
+        // dst's AC slots should remain unchanged.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let nb = 4_u32;
+        let cpb = 64_u32;
+        let n = (nb * cpb) as usize;
+        let mut src_data = vec![0.0_f32; n];
+        let mut dst_data = vec![0.0_f32; n];
+        for b in 0..nb as usize {
+            src_data[b * 64] = 42.0; // DC
+            for k in 1..64 {
+                src_data[b * 64 + k] = 99.0; // AC (should NOT propagate)
+                dst_data[b * 64 + k] = 7.0;  // dst AC (must remain)
+            }
+        }
+        let src = enc.upload_blocks(&src_data, nb, cpb);
+        let dst = enc.upload_blocks(&dst_data, nb, cpb);
+        enc.restore_dc_persistent(&src, &dst);
+        let dst_after = enc.download_blocks(&dst);
+        for b in 0..nb as usize {
+            assert_eq!(dst_after[b * 64], 42.0, "DC not restored at block {b}");
+            for k in 1..64 {
+                assert_eq!(dst_after[b * 64 + k], 7.0, "AC drifted at block {b} slot {k}");
+            }
+        }
     }
 
     #[cfg(feature = "cuda")]

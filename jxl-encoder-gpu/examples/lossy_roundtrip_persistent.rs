@@ -19,10 +19,11 @@
 //!
 //! DC handling: the GPU quantize_dct8 kernel always zeros DC (in the
 //! real encoder, DC has its own quant + entropy coding via dc_coding).
-//! We download the forward DCT coefficients once to extract DC, then
-//! restore them after dequant. This is the same mitigation as the
-//! original lossy_roundtrip_demo; closing it requires a separate DC
-//! quant path (next API addition).
+//! We bridge by calling restore_dc_persistent — a small GPU kernel
+//! that copies the DC slot from the forward DCT output into the
+//! dequantized buffers, leaving AC untouched. No host hop required.
+//! In a real encoder, dc_coding handles DC properly (separate quant
+//! + entropy); this restore is just a roundtrip-demo bridge.
 
 #[cfg(all(feature = "cuda", feature = "encoder"))]
 fn main() {
@@ -110,7 +111,7 @@ fn main() {
 
     let xf = vec![0.0_f32; NB];
     let bf = vec![0.0_f32; NB];
-    let (mut dq_x, mut dq_y, mut dq_b) = enc.dequant_dct8_persistent(
+    let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
         &q_x,
         &q_y,
         &q_b,
@@ -124,22 +125,11 @@ fn main() {
         &bf,
     );
 
-    // DC restoration (still host-side; the GPU quantize zeros DC).
-    let host_coeffs_x = enc.download_blocks(&coeffs_x);
-    let host_coeffs_y = enc.download_blocks(&coeffs_y);
-    let host_coeffs_b = enc.download_blocks(&coeffs_b);
-    let mut host_dq_x = enc.download_blocks(&dq_x);
-    let mut host_dq_y = enc.download_blocks(&dq_y);
-    let mut host_dq_b = enc.download_blocks(&dq_b);
-    for b in 0..NB {
-        let off = b * 64;
-        host_dq_x[off] = host_coeffs_x[off];
-        host_dq_y[off] = host_coeffs_y[off];
-        host_dq_b[off] = host_coeffs_b[off];
-    }
-    dq_x = enc.upload_blocks(&host_dq_x, NB as u32, 64);
-    dq_y = enc.upload_blocks(&host_dq_y, NB as u32, 64);
-    dq_b = enc.upload_blocks(&host_dq_b, NB as u32, 64);
+    // DC restoration on-GPU: copy DC slot from forward DCT outputs
+    // into the dequantized buffers (no host transfer).
+    enc.restore_dc_persistent(&coeffs_x, &dq_x);
+    enc.restore_dc_persistent(&coeffs_y, &dq_y);
+    enc.restore_dc_persistent(&coeffs_b, &dq_b);
 
     let recon_x_blocks = enc.idct_8x8_persistent(&dq_x);
     let recon_y_blocks = enc.idct_8x8_persistent(&dq_y);
@@ -197,12 +187,12 @@ fn main() {
     assert!(sum_g / n < 0.05, "G MAE: {:.3e}", sum_g / n);
     assert!(sum_b_acc / n < 0.15, "B MAE: {:.3e}", sum_b_acc / n);
 
-    println!("\n✓ Full lossy DCT8 roundtrip via persistent API:");
+    println!("\n✓ Full GPU lossy DCT8 roundtrip via persistent API:");
     println!(
-        "  upload_plane × 3 → XYB → gaborish × 3 → gather × 3 →\n  DCT × 3 → quantize × 3 → dequant → (DC restore via host hop) →\n  IDCT × 3 → scatter × 3 → XYB inverse → download_plane × 3"
+        "  upload_plane × 3 → XYB → gaborish × 3 → gather × 3 →\n  DCT × 3 → quantize × 3 → dequant → restore_dc × 3 (GPU) →\n  IDCT × 3 → scatter × 3 → XYB inverse → download_plane × 3"
     );
     println!(
-        "  All non-DC stages run on-GPU end-to-end. Only DC restoration\n  hops through host (encoder DC-coding path is the proper fix)."
+        "  ALL stages run on-GPU end-to-end. Only host-↔-GPU transfers\n  are 3 input uploads + 3 output downloads at the pipeline edges.\n  Mid-pipeline data never leaves the GPU."
     );
 }
 
