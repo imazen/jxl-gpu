@@ -59,6 +59,35 @@ use cubecl::Runtime;
 
 use crate::encoder::GpuEncoder;
 
+/// Combine per-block per-channel pixel-domain losses (output of
+/// [`pixel_loss_blocks_gpu`] called once per channel) into a single
+/// per-block total via the [`CHANNEL_MUL`] weights.
+///
+/// `losses_x[i] * CHANNEL_MUL[0] + losses_y[i] * CHANNEL_MUL[1] +
+/// losses_b[i] * CHANNEL_MUL[2]` per block. Matches upstream's
+/// process_channel inner loop in `estimate_entropy_full`'s DCT8 fast
+/// path:
+/// ```text
+/// channel_loss *= CHANNEL_MUL[c];
+/// total_pixel_loss += channel_loss;
+/// ```
+///
+/// All three input slices must have the same length.
+pub fn combine_pixel_loss_3channel(
+    losses_x: &[f64],
+    losses_y: &[f64],
+    losses_b: &[f64],
+) -> Vec<f64> {
+    debug_assert_eq!(losses_x.len(), losses_y.len());
+    debug_assert_eq!(losses_x.len(), losses_b.len());
+    losses_x
+        .iter()
+        .zip(losses_y.iter())
+        .zip(losses_b.iter())
+        .map(|((&x, &y), &b)| x * CHANNEL_MUL[0] + y * CHANNEL_MUL[1] + b * CHANNEL_MUL[2])
+        .collect()
+}
+
 /// Per-strategy entropy multipliers consumed by
 /// `estimate_entropy_full`. Bit-for-bit port of upstream
 /// `jxl_encoder::effort::EntropyMulTable` (which itself mirrors the
@@ -367,6 +396,42 @@ pub fn pixel_loss_blocks_gpu<R: Runtime>(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn test_combine_pixel_loss_3channel_zero_in() {
+        let n = 5_usize;
+        let zeros = alloc::vec![0.0_f64; n];
+        let out = combine_pixel_loss_3channel(&zeros, &zeros, &zeros);
+        assert_eq!(out.len(), n);
+        for &v in &out {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_combine_pixel_loss_3channel_per_channel_weighting() {
+        // X-only input → out = X * CHANNEL_MUL[0]
+        let x = alloc::vec![1.0_f64, 2.0, 3.0];
+        let zero = alloc::vec![0.0_f64; 3];
+        let out = combine_pixel_loss_3channel(&x, &zero, &zero);
+        for i in 0..3 {
+            assert!((out[i] - x[i] * CHANNEL_MUL[0]).abs() < 1e-3);
+        }
+
+        // Y-only input → out = Y * 1.0 (= Y)
+        let y = alloc::vec![1.5_f64, 2.5, 3.5];
+        let out = combine_pixel_loss_3channel(&zero, &y, &zero);
+        for i in 0..3 {
+            assert!((out[i] - y[i]).abs() < 1e-9);
+        }
+
+        // B-only → out = B * CHANNEL_MUL[2] (≈ 1.267)
+        let b = alloc::vec![10.0_f64, 20.0, 30.0];
+        let out = combine_pixel_loss_3channel(&zero, &zero, &b);
+        for i in 0..3 {
+            assert!((out[i] - b[i] * CHANNEL_MUL[2]).abs() < 1e-9);
+        }
+    }
 
     #[test]
     fn test_entropy_mul_table_reference() {
