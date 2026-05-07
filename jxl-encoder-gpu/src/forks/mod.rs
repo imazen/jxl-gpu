@@ -19,5 +19,6 @@
 //! AGPL-3.0-or-later or commercial per `LICENSE-AGPL3` /
 //! `LICENSE-COMMERCIAL` at the repo root.
 
+pub mod adaptive_quant;
 pub mod gaborish;
 pub mod xyb;
