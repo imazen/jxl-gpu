@@ -88,6 +88,12 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Borrow the underlying cubecl client. Used by the persistent-API
+    /// methods in [`crate::persistent`] to chain custom launches.
+    pub(crate) fn client_ref(&self) -> &ComputeClient<R> {
+        &self.client
+    }
+
     /// Access the underlying cubecl client.
     pub fn client(&self) -> &ComputeClient<R> {
         &self.client
