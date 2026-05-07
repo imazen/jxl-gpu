@@ -23,6 +23,47 @@ pub const DCT8_PARAMS: [[f64; 6]; 3] = [
     [512.0, -2.0, -1.0, 0.0, -1.0, -2.0],    // B channel
 ];
 
+/// libjxl IDENTITY dequant weights from `quant_weights.cc:80-90, 564-579`.
+/// Per-channel: `[DC, AC_pos1_pos8, AC_pos9]`. All other 8×8 positions
+/// use the DC weight.
+pub const IDENTITY_DEQUANT_WEIGHTS: [[f32; 3]; 3] = [
+    [280.0, 3160.0, 3160.0], // X channel
+    [60.0, 864.0, 864.0],    // Y channel
+    [18.0, 200.0, 200.0],    // B channel
+];
+
+/// libjxl DCT2X2 dequant band weights from `quant_weights.cc:48-77, 583-607`.
+/// 6 hierarchical band weights per channel.
+pub const DCT2_DEQUANT_WEIGHTS: [[f32; 6]; 3] = [
+    [3840.0, 2560.0, 1280.0, 640.0, 480.0, 300.0], // X channel
+    [960.0, 640.0, 320.0, 180.0, 140.0, 120.0],    // Y channel
+    [640.0, 320.0, 128.0, 64.0, 32.0, 16.0],       // B channel
+];
+
+/// libjxl DCT4X8 band parameters from jxl-oxide `dequant.rs:44-48`.
+/// `[X, Y, B]` × 4 bands per channel. Used for BOTH DCT4X8 and DCT8X4.
+pub const DCT4X8_PARAMS: [[f64; 4]; 3] = [
+    [2198.0505, -0.96269625, -0.7619425, -0.65511405],
+    [764.36554, -0.926302, -0.967523, -0.2784529],
+    [527.10754, -1.4594386, -1.4500821, -1.5843723],
+];
+
+/// libjxl DCT4X4 band parameters from jxl-oxide `dequant.rs:49-53`.
+/// `[X, Y, B]` × 4 bands per channel.
+pub const DCT4_PARAMS: [[f64; 4]; 3] = [
+    [2200.0, 0.0, 0.0, 0.0],
+    [392.0, 0.0, 0.0, 0.0],
+    [112.0, -0.25, -0.25, -0.5],
+];
+
+/// libjxl DCT4X4 LLF multiplier parameters from jxl-oxide `dequant.rs:257-277`.
+/// `params[0]` is used for LLF positions 1 and 8, `params[1]` for position 9.
+pub const DCT4_LLF_PARAMS: [[f64; 2]; 3] = [
+    [1.0, 1.0],
+    [1.0, 1.0],
+    [1.0, 1.0],
+];
+
 /// libjxl DCT16x8 band parameters from `quant_weights.cc:716-745`.
 /// `[X, Y, B]` × 7 bands per channel. Used for BOTH the DCT16X8 and
 /// DCT8X16 strategies (they share the rotated table — the weight
@@ -358,6 +399,155 @@ pub fn dct64x64_weights() -> Vec<f32> {
     )
 }
 
+/// Generate IDENTITY quant weights (64 per channel, 192 total).
+/// All 64 positions get the DC weight, then positions 1, 8, 9 are
+/// overwritten per `IDENTITY_DEQUANT_WEIGHTS`. Output is `1 / dequant`.
+pub fn identity_weights() -> Vec<f32> {
+    let mut weights = vec![0.0_f32; 3 * 64];
+    for (c, ch) in IDENTITY_DEQUANT_WEIGHTS.iter().enumerate() {
+        let start = c * 64;
+        let dq0 = ch[0];
+        let dq1 = ch[1];
+        let dq2 = ch[2];
+        for w in &mut weights[start..start + 64] {
+            *w = 1.0 / dq0;
+        }
+        weights[start + 1] = 1.0 / dq1;
+        weights[start + 8] = 1.0 / dq1;
+        weights[start + 9] = 1.0 / dq2;
+    }
+    weights
+}
+
+/// Generate DCT2X2 quant weights (64 per channel, 192 total). Position 0
+/// is filled with the libjxl `0xBAD` sentinel (DC handled separately by
+/// the encoder); positions 1/8/9 use band 0/1, and the four hierarchical
+/// 2×2/4×4 quadrants use bands 2-5 per `DCT2_DEQUANT_WEIGHTS`.
+pub fn dct2x2_weights() -> Vec<f32> {
+    let mut weights = vec![0.0_f32; 3 * 64];
+    for (c, w) in DCT2_DEQUANT_WEIGHTS.iter().enumerate() {
+        let start = c * 64;
+        // DC sentinel: 1/0xBAD ≈ 0.0000003. Encoder treats DC specially.
+        weights[start] = 1.0 / 0xBAD as f32;
+        weights[start + 1] = 1.0 / w[0];
+        weights[start + 8] = 1.0 / w[0];
+        weights[start + 9] = 1.0 / w[1];
+        // 2×2 quadrants at offsets (0..2, 2..4) and (2..4, 0..2) → band 2
+        for y in 0..2usize {
+            for x in 0..2usize {
+                weights[start + y * 8 + x + 2] = 1.0 / w[2];
+                weights[start + (y + 2) * 8 + x] = 1.0 / w[2];
+            }
+        }
+        // 2×2 bottom-right quadrant at (2..4, 2..4) → band 3
+        for y in 0..2usize {
+            for x in 0..2usize {
+                weights[start + (y + 2) * 8 + x + 2] = 1.0 / w[3];
+            }
+        }
+        // 4×4 right + bottom band at (0..4, 4..8) and (4..8, 0..4) → band 4
+        for y in 0..4usize {
+            for x in 0..4usize {
+                weights[start + y * 8 + x + 4] = 1.0 / w[4];
+                weights[start + (y + 4) * 8 + x] = 1.0 / w[4];
+            }
+        }
+        // 4×4 bottom-right at (4..8, 4..8) → band 5
+        for y in 0..4usize {
+            for x in 0..4usize {
+                weights[start + (y + 4) * 8 + x + 4] = 1.0 / w[5];
+            }
+        }
+    }
+    weights
+}
+
+/// Generate DCT4X8 quant weights (64 per channel = 8×8 row-duplicated
+/// from a 4-tall × 8-wide base, 192 total). Same table used for DCT8X4.
+pub fn dct4x8_weights() -> Vec<f32> {
+    let mut weights = Vec::with_capacity(192);
+    let sqrt2 = core::f64::consts::SQRT_2;
+
+    for params in &DCT4X8_PARAMS {
+        let mut bands = vec![params[0]];
+        let mut last = params[0];
+        for &v in &params[1..] {
+            last *= band_mult(v);
+            bands.push(last);
+        }
+        let width = 8usize;
+        let height = 4usize;
+        let mut mat = vec![0.0_f64; width * height];
+        for y in 0..height {
+            let dy = y as f64 / (height - 1).max(1) as f64;
+            for x in 0..width {
+                let dx = x as f64 / (width - 1).max(1) as f64;
+                let distance = (dx * dx + dy * dy).sqrt();
+                let scaled = distance * (bands.len() - 1) as f64 / (sqrt2 + 1e-6);
+                mat[y * width + x] = interpolate_band(scaled, &bands);
+            }
+        }
+        // Duplicate each row to expand 4×8 → 8×8.
+        for row in 0..height {
+            for x in 0..width {
+                weights.push((1.0 / mat[row * width + x]) as f32);
+            }
+            for x in 0..width {
+                weights.push((1.0 / mat[row * width + x]) as f32);
+            }
+        }
+    }
+    weights
+}
+
+/// Generate DCT4X4 quant weights (64 per channel, 192 total). Builds a
+/// 4×4 base via parametric bands then 2×2-replicates each cell into the
+/// 8×8 layout, with LLF divisors applied to positions 1, 8, 9.
+pub fn dct4x4_weights() -> Vec<f32> {
+    let mut weights = Vec::with_capacity(192);
+    let sqrt2 = core::f64::consts::SQRT_2;
+
+    for (c, params) in DCT4_PARAMS.iter().enumerate() {
+        let mut bands = vec![params[0]];
+        let mut last = params[0];
+        for &v in &params[1..] {
+            last *= band_mult(v);
+            bands.push(last);
+        }
+        let size = 4usize;
+        let mut mat = vec![0.0_f64; size * size];
+        for y in 0..size {
+            let dy = y as f64 / (size - 1).max(1) as f64;
+            for x in 0..size {
+                let dx = x as f64 / (size - 1).max(1) as f64;
+                let distance = (dx * dx + dy * dy).sqrt();
+                let scaled = distance * (bands.len() - 1) as f64 / (sqrt2 + 1e-6);
+                mat[y * size + x] = interpolate_band(scaled, &bands);
+            }
+        }
+        // 2×2-replicate each weight into the 8×8 layout.
+        let mut channel = vec![0.0_f64; 64];
+        for y in 0..4 {
+            for x in 0..4 {
+                let w = mat[y * 4 + x];
+                channel[y * 16 + x * 2] = w;
+                channel[y * 16 + x * 2 + 1] = w;
+                channel[(y * 2 + 1) * 8 + x * 2] = w;
+                channel[(y * 2 + 1) * 8 + x * 2 + 1] = w;
+            }
+        }
+        // LLF divisors at positions 1, 8, 9.
+        channel[1] /= DCT4_LLF_PARAMS[c][0];
+        channel[8] /= DCT4_LLF_PARAMS[c][0];
+        channel[9] /= DCT4_LLF_PARAMS[c][1];
+
+        for w in &channel {
+            weights.push((1.0 / w) as f32);
+        }
+    }
+    weights
+}
+
 /// Generate DCT32x64 quant weights (32 rows × 64 cols = 2048 per channel,
 /// 6144 total). Same table also used for DCT64x32.
 pub fn dct32x64_weights() -> Vec<f32> {
@@ -490,6 +680,39 @@ mod tests {
                 dc < hf,
                 "DCT32 channel {c}: DC={dc} should be < HF={hf}"
             );
+        }
+    }
+
+    #[test]
+    fn test_identity_dct2x2_dct4_shapes() {
+        assert_eq!(identity_weights().len(), 192);
+        assert_eq!(dct2x2_weights().len(), 192);
+        assert_eq!(dct4x8_weights().len(), 192);
+        assert_eq!(dct4x4_weights().len(), 192);
+    }
+
+    #[test]
+    fn test_identity_position_layout() {
+        // IDENTITY: positions 1, 8 use ch[1]; position 9 uses ch[2];
+        // all other positions use ch[0].
+        let w = identity_weights();
+        for c in 0..3 {
+            let dq = IDENTITY_DEQUANT_WEIGHTS[c];
+            let s = c * 64;
+            assert_eq!(w[s], 1.0 / dq[0]);          // DC = ch[0]
+            assert_eq!(w[s + 1], 1.0 / dq[1]);      // AC ch[1]
+            assert_eq!(w[s + 8], 1.0 / dq[1]);      // AC ch[1]
+            assert_eq!(w[s + 9], 1.0 / dq[2]);      // pos9 ch[2]
+            assert_eq!(w[s + 5], 1.0 / dq[0]);      // arbitrary other pos = DC
+        }
+    }
+
+    #[test]
+    fn test_dct2x2_dc_sentinel() {
+        // DCT2X2: position 0 is the 1/0xBAD sentinel — DC handled separately.
+        let w = dct2x2_weights();
+        for c in 0..3 {
+            assert_eq!(w[c * 64], 1.0 / 0xBAD as f32);
         }
     }
 
