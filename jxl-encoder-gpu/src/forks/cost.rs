@@ -59,6 +59,70 @@ use cubecl::Runtime;
 
 use crate::encoder::GpuEncoder;
 
+/// Constants for coefficient-domain entropy estimation (libjxl-tiny
+/// style, NOT distance-scaled). Bit-for-bit from upstream
+/// `jxl_encoder::vardct::ac_strategy::COEFF_DOMAIN_CONSTANTS`.
+///
+/// Tuple order matches [`compute_scaled_constants`] output:
+/// `(info_loss_mul, cost_delta, zeros_mul)`.
+///
+/// Use these as the `scaled_constants` argument to entropy
+/// estimation when `mask1x1 = None` (i.e., the cheaper coefficient-
+/// domain path that doesn't need an IDCT-back-to-pixels round-trip).
+pub const COEFF_DOMAIN_CONSTANTS: (f32, f32, f32) = (138.0, 5.335_918_5, 7.565_053_4);
+
+// Pixel-domain constants — ratio shape and exponents per upstream
+// `jxl_encoder::vardct::ac_strategy::compute_scaled_constants`.
+const K_BIAS: f32 = 0.137_317_43;
+const K_POW_INFO_LOSS: f32 = 0.336_778_07;
+const K_POW_ZEROS_MUL: f32 = 0.509_909_3;
+const K_POW_COST_DELTA: f32 = 0.367_029_4;
+
+/// Distance-scaled constants for the pixel-domain entropy / cost
+/// model. Bit-for-bit port of upstream
+/// `jxl_encoder::vardct::ac_strategy::compute_scaled_constants`.
+///
+/// `bases = (info_loss_base, zeros_base, cost_delta_base)` — the
+/// per-encoder `EffortProfile` base values. **Argument tuple order
+/// differs from output tuple order**, matching upstream:
+/// - Input: `(info_loss, zeros, cost_delta)`
+/// - Output: `(info_loss, cost_delta, zeros)` — same as
+///   [`COEFF_DOMAIN_CONSTANTS`] layout.
+///
+/// At distance == 1.0 returns the bases unchanged (with the position
+/// shuffle); for higher distances scales them up via
+/// `((distance + 0.137) / 1.137).powf(K_POW_*)`.
+///
+/// Call this ONCE per AC-strategy search (not per
+/// (block, strategy) pair) — the result is constant within a search.
+/// For coefficient-domain mode (no pixel-loss IDCT round-trip), use
+/// the precomputed [`COEFF_DOMAIN_CONSTANTS`] directly without
+/// calling this function.
+///
+/// ```
+/// use jxl_encoder_gpu::forks::cost::compute_scaled_constants;
+///
+/// // At d=1.0 the ratio is exactly 1.0 → no scaling.
+/// // Bases are in (info_loss, zeros, cost_delta) order;
+/// // output is (info_loss, cost_delta, zeros).
+/// let (info, cost, zeros) =
+///     compute_scaled_constants(1.0, (1.0, 2.0, 3.0));
+/// assert!((info - 1.0).abs() < 1e-6);
+/// assert!((cost - 3.0).abs() < 1e-6);
+/// assert!((zeros - 2.0).abs() < 1e-6);
+/// ```
+pub fn compute_scaled_constants(
+    distance: f32,
+    bases: (f32, f32, f32),
+) -> (f32, f32, f32) {
+    let (info_loss_base, zeros_base, cost_delta_base) = bases;
+    let ratio = (distance + K_BIAS) / (1.0 + K_BIAS);
+    let info_loss_mul = info_loss_base * ratio.powf(K_POW_INFO_LOSS);
+    let zeros_mul = zeros_base * ratio.powf(K_POW_ZEROS_MUL);
+    let cost_delta = cost_delta_base * ratio.powf(K_POW_COST_DELTA);
+    (info_loss_mul, cost_delta, zeros_mul)
+}
+
 /// Per-block entropy estimation in the pixel-domain — wraps
 /// [`GpuEncoder::entropy_coeffs_pixel_blocks`].
 ///
@@ -168,6 +232,43 @@ pub fn pixel_loss_blocks_gpu<R: Runtime>(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn test_compute_scaled_constants_d1_no_scale() {
+        // ratio = 1.0 at distance == 1.0 → bases echo back.
+        let (info, cost, zeros) =
+            compute_scaled_constants(1.0, (1.0, 2.0, 3.0));
+        assert!((info - 1.0).abs() < 1e-6);
+        assert!((cost - 3.0).abs() < 1e-6);
+        assert!((zeros - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_scaled_constants_d3_scales_up() {
+        // distance 3.0 → ratio = (3.0 + 0.137) / 1.137 ≈ 2.760.
+        // Each base scaled by ratio^K_POW_*; all > base.
+        let bases = (10.0, 20.0, 30.0);
+        let (info, cost, zeros) = compute_scaled_constants(3.0, bases);
+        let ratio = (3.0_f32 + K_BIAS) / (1.0 + K_BIAS);
+        let expected_info = 10.0 * ratio.powf(K_POW_INFO_LOSS);
+        let expected_zeros = 20.0 * ratio.powf(K_POW_ZEROS_MUL);
+        let expected_cost = 30.0 * ratio.powf(K_POW_COST_DELTA);
+        assert!((info - expected_info).abs() < 1e-3);
+        assert!((cost - expected_cost).abs() < 1e-3);
+        assert!((zeros - expected_zeros).abs() < 1e-3);
+        // All scale up at d=3.0.
+        assert!(info > 10.0);
+        assert!(zeros > 20.0);
+        assert!(cost > 30.0);
+    }
+
+    #[test]
+    fn test_coeff_domain_constants_match_upstream() {
+        // Spot-check the const matches upstream values.
+        assert_eq!(COEFF_DOMAIN_CONSTANTS.0, 138.0);
+        assert!((COEFF_DOMAIN_CONSTANTS.1 - 5.335_918_5).abs() < 1e-6);
+        assert!((COEFF_DOMAIN_CONSTANTS.2 - 7.565_053_4).abs() < 1e-6);
+    }
 
     #[cfg(feature = "cuda")]
     #[test]
