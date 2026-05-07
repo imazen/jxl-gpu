@@ -132,15 +132,10 @@ fn main() {
             out
         };
 
-        let mk_w = |size: usize, side: usize, scale: f32| {
-            let mut wt = vec![1.0f32; size];
-            for i in 0..size {
-                let r = (i / side) as f32;
-                let c = (i % side) as f32;
-                wt[i] = (1.0 + 0.7 * (r + c)) * scale;
-            }
-            wt
-        };
+        // Real libjxl quant weights for all four strategies.
+        let dct8_all = jxl_encoder_gpu::quant_weights::dct8_weights();
+        let dct16_all = jxl_encoder_gpu::quant_weights::dct16x16_weights();
+        let dct16x8_all = jxl_encoder_gpu::quant_weights::dct16x8_weights();
         let replicate = |per: &[f32], k: usize| {
             let mut out = vec![0.0f32; k * per.len()];
             for j in 0..k {
@@ -163,9 +158,9 @@ fn main() {
             upload(&client, &repack(&xx, 8, 8, xb8, yb8)),
             upload(&client, &repack(&xy, 8, 8, xb8, yb8)),
             upload(&client, &repack(&xb, 8, 8, xb8, yb8)),
-            upload(&client, &replicate(&mk_w(64, 8, 0.6), nb8)),
-            upload(&client, &replicate(&mk_w(64, 8, 1.0), nb8)),
-            upload(&client, &replicate(&mk_w(64, 8, 1.3), nb8)),
+            upload(&client, &replicate(&dct8_all[..64], nb8)),
+            upload(&client, &replicate(&dct8_all[64..128], nb8)),
+            upload(&client, &replicate(&dct8_all[128..192], nb8)),
             upload(&client, &qac8),
             upload(&client, &qac8),
             upload(&client, &qac8),
@@ -187,9 +182,9 @@ fn main() {
             upload(&client, &repack(&xx, 16, 16, xb16, yb16)),
             upload(&client, &repack(&xy, 16, 16, xb16, yb16)),
             upload(&client, &repack(&xb, 16, 16, xb16, yb16)),
-            upload(&client, &replicate(&mk_w(256, 16, 0.6), nb16)),
-            upload(&client, &replicate(&mk_w(256, 16, 1.0), nb16)),
-            upload(&client, &replicate(&mk_w(256, 16, 1.3), nb16)),
+            upload(&client, &replicate(&dct16_all[..256], nb16)),
+            upload(&client, &replicate(&dct16_all[256..512], nb16)),
+            upload(&client, &replicate(&dct16_all[512..768], nb16)),
             upload(&client, &qac16),
             upload(&client, &qac16),
             upload(&client, &qac16),
@@ -224,9 +219,9 @@ fn main() {
             upload(&client, &repack(&xx, 8, 16, xb_16x8, yb_16x8)),
             upload(&client, &repack(&xy, 8, 16, xb_16x8, yb_16x8)),
             upload(&client, &repack(&xb, 8, 16, xb_16x8, yb_16x8)),
-            upload(&client, &replicate(&mk_w(128, 8, 0.6), nb_16x8)),
-            upload(&client, &replicate(&mk_w(128, 8, 1.0), nb_16x8)),
-            upload(&client, &replicate(&mk_w(128, 8, 1.3), nb_16x8)),
+            upload(&client, &replicate(&dct16x8_all[..128], nb_16x8)),
+            upload(&client, &replicate(&dct16x8_all[128..256], nb_16x8)),
+            upload(&client, &replicate(&dct16x8_all[256..384], nb_16x8)),
             upload(&client, &qac_16x8),
             upload(&client, &qac_16x8),
             upload(&client, &qac_16x8),
@@ -256,9 +251,9 @@ fn main() {
             upload(&client, &repack(&xx, 16, 8, xb_8x16, yb_8x16)),
             upload(&client, &repack(&xy, 16, 8, xb_8x16, yb_8x16)),
             upload(&client, &repack(&xb, 16, 8, xb_8x16, yb_8x16)),
-            upload(&client, &replicate(&mk_w(128, 16, 0.6), nb_8x16)),
-            upload(&client, &replicate(&mk_w(128, 16, 1.0), nb_8x16)),
-            upload(&client, &replicate(&mk_w(128, 16, 1.3), nb_8x16)),
+            upload(&client, &replicate(&dct16x8_all[..128], nb_8x16)),
+            upload(&client, &replicate(&dct16x8_all[128..256], nb_8x16)),
+            upload(&client, &replicate(&dct16x8_all[256..384], nb_8x16)),
             upload(&client, &qac_8x16),
             upload(&client, &qac_8x16),
             upload(&client, &qac_8x16),
