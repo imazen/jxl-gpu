@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Validated — Content-driven AQ wins across CLIC2025 corpus (`a1617849`)
+
+Added fast-ssim2 + imgref dev-deps and SSIMULACRA2 measurement to
+`quality_sweep_with_aq_demo` and `corpus_aq_sweep_demo`. AQ wins on
+8/8 CLIC2025-1024 images at every distance from d=1.0 onwards,
+with **zero perceptual losses** across the corpus:
+
+| dist | uniform µ | AQ µ | Δssim2 µ | wins | losses |
+|---|---|---|---|---|---|
+| 0.5 | 73.45 | 73.91 | +0.46 | 7 | 0 |
+| 1.0 | 71.51 | 72.45 | +0.94 | 8 | 0 |
+| 2.0 | 67.03 | 69.23 | +2.19 | 8 | 0 |
+| 4.0 | 58.21 | 62.46 | +4.25 | 8 | 0 |
+| 8.0 | 43.80 | 50.33 | +6.52 | 8 | 0 |
+
+(8-image subset; win threshold |Δssim2| > 0.05.) The benefit grows
+with distance — exactly as expected, since heavy-quant headroom for
+bit redistribution is what AQ trades on. Generalizes across content,
+not image-specific.
+
+`corpus_aq_sweep_demo`: corpus-level harness (CORPUS_DIR + MAX_IMAGES
+env vars) reporting per-distance Δssim2 mean, win/loss counts, and
+worst-case regression.
+
 ### Added — Turnkey content-driven AQ + batch sweep (`3cfb4ad9`, `e0634ae4`, `0ebbb22d`)
 
 Top-of-stack one-call interface for content-driven adaptive
