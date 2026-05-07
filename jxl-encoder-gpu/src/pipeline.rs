@@ -72,6 +72,7 @@ fn _unused_vec() -> Vec<f32> {
 
 use crate::launch::{
     block_l2::block_l2,
+    dct2x2::{dct2x2_forward, dct2x2_inverse},
     dct4::{
         dct_4x4_full, dct_4x8_full, dct_8x4_full, idct_4x4_full, idct_4x8_full, idct_8x4_full,
     },
@@ -79,6 +80,7 @@ use crate::launch::{
     dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16},
     dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32},
     dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64},
+    identity::{identity_forward, identity_inverse},
     quantize::{quantize_dct8, quantize_large},
 };
 
@@ -1208,6 +1210,116 @@ fn cost_grid_dct4_xyb_impl<R: Runtime>(
         mask1x1,
         h_costs.clone(),
         xsize_blocks, ysize_blocks, xsize_blocks * 8,
+    );
+    CostGrid { costs: h_costs, xsize_blocks, ysize_blocks }
+}
+
+/// IDENTITY single-channel cost grid. 64-coeff layout (8×8 sub-block
+/// structure), reuses quantize_dct8 + dequant_simple_dct8.
+pub fn compute_cost_grid_identity_single_channel<R: Runtime>(
+    client: &ComputeClient<R>,
+    original: Handle,
+    weights: Handle,
+    qac_qm: Handle,
+    thresholds: Handle,
+    xsize_blocks: u32,
+    ysize_blocks: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks * ysize_blocks;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 64;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+
+    let h_dct = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_quant = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dequant = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon = client.create_from_slice(f32::as_bytes(&zero_f));
+
+    identity_forward::<R>(client, original.clone(), h_dct.clone(), num_blocks);
+    quantize_dct8::<R>(
+        client,
+        h_dct.clone(),
+        weights.clone(),
+        qac_qm,
+        thresholds,
+        h_quant.clone(),
+        num_blocks,
+    );
+    dequant_simple_dct8::<R>(client, h_quant, weights, h_dequant.clone(), num_blocks);
+    identity_inverse::<R>(client, h_dequant, h_recon.clone(), num_blocks);
+
+    let n_pixels = nb * 64;
+    let h_mask = client.create_from_slice(f32::as_bytes(&vec![1.0f32; n_pixels]));
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb]));
+    block_l2::<R>(
+        client,
+        original.clone(),
+        original.clone(),
+        original,
+        h_recon.clone(),
+        h_recon.clone(),
+        h_recon,
+        h_mask,
+        h_costs.clone(),
+        xsize_blocks,
+        ysize_blocks,
+        xsize_blocks * 8,
+    );
+    CostGrid { costs: h_costs, xsize_blocks, ysize_blocks }
+}
+
+/// DCT2X2 single-channel cost grid. 64-coeff layout, hierarchical
+/// 2×2 Hadamard at scales 8/4/2 (forward) and 2/4/8 (inverse).
+pub fn compute_cost_grid_dct2x2_single_channel<R: Runtime>(
+    client: &ComputeClient<R>,
+    original: Handle,
+    weights: Handle,
+    qac_qm: Handle,
+    thresholds: Handle,
+    xsize_blocks: u32,
+    ysize_blocks: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks * ysize_blocks;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 64;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+
+    let h_dct = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_quant = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dequant = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon = client.create_from_slice(f32::as_bytes(&zero_f));
+
+    dct2x2_forward::<R>(client, original.clone(), h_dct.clone(), num_blocks);
+    quantize_dct8::<R>(
+        client,
+        h_dct.clone(),
+        weights.clone(),
+        qac_qm,
+        thresholds,
+        h_quant.clone(),
+        num_blocks,
+    );
+    dequant_simple_dct8::<R>(client, h_quant, weights, h_dequant.clone(), num_blocks);
+    dct2x2_inverse::<R>(client, h_dequant, h_recon.clone(), num_blocks);
+
+    let n_pixels = nb * 64;
+    let h_mask = client.create_from_slice(f32::as_bytes(&vec![1.0f32; n_pixels]));
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb]));
+    block_l2::<R>(
+        client,
+        original.clone(),
+        original.clone(),
+        original,
+        h_recon.clone(),
+        h_recon.clone(),
+        h_recon,
+        h_mask,
+        h_costs.clone(),
+        xsize_blocks,
+        ysize_blocks,
+        xsize_blocks * 8,
     );
     CostGrid { costs: h_costs, xsize_blocks, ysize_blocks }
 }

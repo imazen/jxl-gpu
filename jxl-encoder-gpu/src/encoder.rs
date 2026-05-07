@@ -41,9 +41,11 @@ use crate::launch::dct4::{
     dct_4x4_full, dct_4x8_full, dct_8x4_full, idct_4x4_full, idct_4x8_full, idct_8x4_full,
 };
 use crate::launch::dct8::{dct_8x8, idct_8x8};
+use crate::launch::identity::{identity_forward, identity_inverse};
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
+use crate::launch::dct2x2::{dct2x2_forward, dct2x2_inverse};
 use crate::launch::denoise::denoise as denoise_launch;
 use crate::launch::dequant::dequant_dct8;
 use crate::launch::entropy::entropy_coeffs_pixel;
@@ -289,6 +291,68 @@ impl<R: Runtime> GpuEncoder<R> {
             .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
         dct_8x8::<R>(&self.client, h_in, h_out.clone(), num_blocks);
         let bytes = self.client.read_one(h_out).expect("read dct");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// IDENTITY transform on a contiguous batch of 8×8 blocks. Mirrors
+    /// `jxl_encoder::vardct::dct::special::identity_transform` exactly
+    /// (bit-exact parity).
+    pub fn identity_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        let n = blocks.len();
+        assert!(n.is_multiple_of(64), "blocks length must be multiple of 64");
+        let num_blocks = (n / 64) as u32;
+        let h_in = self.client.create_from_slice(f32::as_bytes(blocks));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        identity_forward::<R>(&self.client, h_in, h_out.clone(), num_blocks);
+        let bytes = self.client.read_one(h_out).expect("read identity");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Inverse IDENTITY transform (counterpart to
+    /// [`identity_blocks`](Self::identity_blocks)).
+    pub fn inverse_identity_blocks(&self, coeffs: &[f32]) -> Vec<f32> {
+        let n = coeffs.len();
+        assert!(n.is_multiple_of(64));
+        let num_blocks = (n / 64) as u32;
+        let h_in = self.client.create_from_slice(f32::as_bytes(coeffs));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        identity_inverse::<R>(&self.client, h_in, h_out.clone(), num_blocks);
+        let bytes = self.client.read_one(h_out).expect("read inv identity");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// DCT2X2 transform on a contiguous batch of 8×8 blocks. Mirrors
+    /// `jxl_encoder::vardct::dct::special::dct2x2_transform` exactly
+    /// (bit-exact parity, 3 hierarchical Hadamard passes at S=8/4/2).
+    pub fn dct2x2_blocks(&self, blocks: &[f32]) -> Vec<f32> {
+        let n = blocks.len();
+        assert!(n.is_multiple_of(64));
+        let num_blocks = (n / 64) as u32;
+        let h_in = self.client.create_from_slice(f32::as_bytes(blocks));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        dct2x2_forward::<R>(&self.client, h_in, h_out.clone(), num_blocks);
+        let bytes = self.client.read_one(h_out).expect("read dct2x2");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Inverse DCT2X2 transform (counterpart to
+    /// [`dct2x2_blocks`](Self::dct2x2_blocks)).
+    pub fn inverse_dct2x2_blocks(&self, coeffs: &[f32]) -> Vec<f32> {
+        let n = coeffs.len();
+        assert!(n.is_multiple_of(64));
+        let num_blocks = (n / 64) as u32;
+        let h_in = self.client.create_from_slice(f32::as_bytes(coeffs));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        dct2x2_inverse::<R>(&self.client, h_in, h_out.clone(), num_blocks);
+        let bytes = self.client.read_one(h_out).expect("read inv dct2x2");
         f32::from_bytes(&bytes).to_vec()
     }
 
