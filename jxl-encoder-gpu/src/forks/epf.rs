@@ -56,6 +56,33 @@ pub const EPF_SHARP_LUT: [f32; 8] = [
 
 /// Pure-scalar copy of upstream `compute_inv_sigma_map`. Returns one
 /// inv_sigma per 8×8 block.
+///
+/// Computes `sigma = (EPF_QUANT_MUL / (quant_scale * raw_quant *
+/// K_INV_SIGMA_NUM)) * EPF_SHARP_LUT[sharpness]` per block, then
+/// returns `1 / sigma` (or 0 when sigma underflows).
+///
+/// Two guard cases produce zero output:
+/// 1. `raw_quant == 0` (would divide by zero in sigma).
+/// 2. `EPF_SHARP_LUT[sharpness] == 0` (i.e., `sharpness == 0`).
+///
+/// ```
+/// use jxl_encoder_gpu::forks::epf::compute_inv_sigma_map;
+///
+/// // raw_quant=0 → guarded, output 0.
+/// // sharpness=0 → EPF_SHARP_LUT[0]=0 → sigma=0 → guarded, output 0.
+/// // raw_quant>0 + sharpness>0 → finite negative inv_sigma
+/// // (K_INV_SIGMA_NUM is negative).
+/// let qf = vec![0_u8, 128, 128];
+/// let sm = vec![0_u8, 0, 4];
+/// let inv = compute_inv_sigma_map(&qf, &sm, 1.0, 3, 1);
+/// assert_eq!(inv[0], 0.0);  // raw_quant=0 → guarded
+/// assert_eq!(inv[1], 0.0);  // sharpness=0 → sigma=0 → guarded
+/// assert!(inv[2].is_finite() && inv[2] != 0.0);  // non-trivial
+/// // Sharpness clamped at 7 (LUT length).
+/// let inv7 = compute_inv_sigma_map(&[128_u8], &[7_u8], 1.0, 1, 1);
+/// let inv99 = compute_inv_sigma_map(&[128_u8], &[99_u8], 1.0, 1, 1);
+/// assert_eq!(inv7[0], inv99[0]);
+/// ```
 pub fn compute_inv_sigma_map(
     quant_field: &[u8],
     sharpness_map: &[u8],
