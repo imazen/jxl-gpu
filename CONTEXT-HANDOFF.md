@@ -1,9 +1,36 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-07 (session 4 — LossyEncoder polish)
+**Last updated:** 2026-05-07 (session 5 — content-driven AQ + corpus validation)
 **Repo:** https://github.com/imazen/jxl-gpu (live, public)
-**Local:** ~/work/zen/jxl-encoder-gpu/ (111 commits on main, in sync with origin)
+**Local:** ~/work/zen/jxl-encoder-gpu/ (124 commits on main, in sync with origin)
 **Hardware verified:** RTX 5070, CUDA 13.2, jj 0.40, rustc 1.95
+
+## Session 5 highlight — content-driven AQ validated across CLIC2025
+
+End-to-end content-driven adaptive quantization: `XYB → mask1x1
+(GPU) → per-block reduce → derived qac field → adaptive encode`,
+exposed as a one-call API. Validated on 8 CLIC2025-1024 photos at
+distance ∈ {0.5, 1.0, 2.0, 4.0, 8.0} with **8/8 SSIMULACRA2 wins
+at d ≥ 1.0**, zero perceptual losses across the corpus:
+
+```
+ dist  | uniform µ | AQ µ  | Δssim2 µ | wins/losses
+ 0.5   |   73.45   | 73.91 |  +0.46   |   7 / 0
+ 1.0   |   71.51   | 72.45 |  +0.94   |   8 / 0
+ 2.0   |   67.03   | 69.23 |  +2.19   |   8 / 0
+ 4.0   |   58.21   | 62.46 |  +4.25   |   8 / 0
+ 8.0   |   43.80   | 50.33 |  +6.52   |   8 / 0
+```
+
+(win threshold |Δssim2| > 0.05.) Generalizes — not single-image
+artifact. Validated with fast-ssim2 (path dep, dev-only).
+
+Single-image walkthrough: `quality_sweep_with_aq_demo`.
+Corpus harness: `corpus_aq_sweep_demo`.
+
+10 LossyEncoder entry points (uniform / manual AQ / turnkey AQ ×
+one-shot/batch × f32/sRGB-U8 + composable building blocks) —
+see `crate::lossy_encoder` module docs for the table.
 
 ## Bottom line — GPU now BEATS CPU AVX2 at every measured size
 
