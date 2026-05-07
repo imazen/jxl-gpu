@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added — Adaptive quantization API + content-driven AQ demo (`02d80bef`, `c4225cee`, `4400081a`)
+
+New `LossyEncoder::encode_one_adaptive` accepts a per-block `aq_field:
+&[f32]` (one qac scalar per padded block) instead of broadcasting a
+single value. Enables real adaptive quantization where smooth
+regions get heavier quant and detail regions get lighter quant.
+
+Two demos:
+- `adaptive_quant_demo` — synthetic split (left half qac=1.530,
+  right half qac=0.096); confirms per-half MAE differs by 1.9-3×.
+- `content_driven_aq_demo` — chains XYB → `compute_mask1x1_gpu`
+  (forks::adaptive_quant) → per-block reduce → derived qac field →
+  encode_one_adaptive. Beats uniform encode at midpoint qac by
+  **15-35% lower MAE per channel** on a 1024×1024 CLIC photo.
+
+This demonstrates the natural composition of the three layers:
+`crate::forks` (mask1x1) + `crate::persistent` (chained launches) +
+`crate::lossy_encoder::LossyEncoder::encode_one_adaptive` produce
+end-to-end content-driven AQ.
+
 ### Added — Per-channel dead-zone thresholds + `upload_i32_blocks` (`3fdadf2d`, `3c654bfd`)
 
 Two cleanup additions matching libjxl semantics:
