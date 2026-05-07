@@ -90,7 +90,7 @@ for GPU-friendly batching.
 |---|---|---|---|
 | `forks::xyb` | `vardct::xyb::convert_strip` | ✓ | Whole-image batch instead of per-row strips; planar deinterleave on host; right-edge pad after XYB |
 | `forks::gaborish` | `vardct::gaborish::gaborish_inverse` | ✓ | 3 sequential GPU launches instead of rayon::join; bit-for-bit `K_GABORISH` constants |
-| `forks::adaptive_quant` | `vardct::adaptive_quant::{compute_mask1x1, compute_pre_erosion, per_block_modulations}` | ✓ | mask1x1 = mask1x1_field + Symmetric5 blur via gaborish_5x5 weights; fuzzy_erosion stays CPU |
+| `forks::adaptive_quant` | `vardct::adaptive_quant::{compute_mask1x1, compute_pre_erosion, fuzzy_erosion, per_block_modulations}` | ✓ | full chain on GPU: mask1x1 = mask1x1_field + Symmetric5 blur via gaborish_5x5 weights; fuzzy_erosion = 3×3 min-of-4 weighted sum + 2× downsample (one thread per output pixel, gathers 4 input contributions to avoid the unsynchronized += race) |
 | `forks::reconstruct` | `vardct::reconstruct::{gab_smooth, xyb_to_linear_rgb_planar, xyb_to_linear_rgb}` | ✓ | 3 sequential GPU launches; planar GPU output then host re-interleave |
 | `forks::transform` | `vardct::transform::Transform::apply_dct` | ✓ | Per-strategy batched: gather all blocks of one strategy into one Vec<f32>, single GPU launch covers all of them. 13 strategies (DCT8/4/16/32/64 family + rectangulars). Inverse symmetric. |
 | `forks::cfl` | `vardct::chroma_from_luma::find_best_multiplier` | ✓ | Single-tile drop-in API + multi-tile batched (one launch covers all tiles); LS + Newton variants |
@@ -104,7 +104,7 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
-**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, fuzzy_erosion, AdjustQuantBlockAC heuristics, non-DCT8 strategies for quantize/dequant, `estimate_entropy_full` orchestration, `apply_dct` for IDENTITY/DCT2X2/AFV0-3.
+**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, AdjustQuantBlockAC heuristics, non-DCT8 strategies for quantize/dequant, `estimate_entropy_full` orchestration, `apply_dct` for AFV0-3 (IDENTITY + DCT2X2 now on GPU).
 
 ## Coverage summary
 
@@ -119,18 +119,20 @@ for GPU-friendly batching.
   partition selector (7-strategy 16×16 + recursive 32×32/64×64);
   ⛔ refactor of jxl-encoder ac_strategy_search.rs awaits permission
 - Phase 4: 2 of 4 (encoder facade ✓, jxl-encoder dep ✓)
-- Phase 5: 10 of ~12 fork modules ✓ (xyb, gaborish, adaptive_quant,
-  reconstruct, transform [now incl. IDENTITY+DCT2X2], cfl, epf,
-  dequant, quantize, noise; remaining: fuzzy_erosion, EPF Step 0,
-  full estimate_entropy_full)
+- Phase 5: 10 of ~12 fork modules ✓ (xyb, gaborish, adaptive_quant
+  [full chain incl. fuzzy_erosion], reconstruct, transform [incl.
+  IDENTITY+DCT2X2], cfl, epf, dequant, quantize, noise; remaining
+  CPU bits inside existing forks: EPF Step 0, full
+  estimate_entropy_full, AdjustQuantBlockAC heuristics)
 
 **Grand total: 56 of ~65 deliverables verified (~86%)**
 
 DCT/IDCT family complete. CfL complete. EPF Steps 1+2 complete.
-9 fork modules verified composing through GpuEncoder. Remaining
-work concentrates in (a) fuzzy_erosion + EPF Step 0 GPU kernels,
-(b) full estimate_entropy_full orchestration, (c) GPU kernels for
-non-DCT8 strategies' quantize/dequant.
+10 fork modules verified composing through GpuEncoder. Remaining
+work concentrates in (a) EPF Step 0 GPU kernel (12-tap), (b) full
+estimate_entropy_full orchestration, (c) GPU kernels for non-DCT8
+strategies' quantize/dequant, (d) AFV0-3 forward + inverse + cost
+grid integration.
 
 ### Note on AC strategy search (Phase 3)
 
