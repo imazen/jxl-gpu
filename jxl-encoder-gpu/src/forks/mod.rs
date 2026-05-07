@@ -21,6 +21,7 @@
 
 pub mod adaptive_quant;
 pub mod cfl;
+pub mod epf;
 pub mod gaborish;
 pub mod reconstruct;
 pub mod transform;
