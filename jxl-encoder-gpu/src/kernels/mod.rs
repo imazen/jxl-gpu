@@ -8,6 +8,7 @@ pub mod adaptive_quant;
 pub mod block_l2;
 pub mod cfl;
 pub mod dc_restore;
+pub mod denoise;
 pub mod dct16;
 pub mod dct32;
 pub mod dct4;
