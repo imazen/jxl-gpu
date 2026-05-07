@@ -26,6 +26,7 @@ fn main() {
     use jxl_encoder_gpu::pipeline::{
         compute_cost_grid_dct8x16_single_channel, compute_cost_grid_dct16x8_single_channel,
         compute_cost_grid_dct16x32_single_channel, compute_cost_grid_dct32x16_single_channel,
+        compute_cost_grid_dct32x64_single_channel, compute_cost_grid_dct64x32_single_channel,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -187,5 +188,78 @@ fn main() {
         std::process::exit(1);
     }
 
-    println!("\n✓ All four rectangular DCT16/32 cost grids produced finite non-negative costs.");
+    // ---- DCT64×32 / DCT32×64 ----
+    // 2048 floats per rect block, 8x4 (or 4x8) sub-cells.
+    const XB64: usize = 2;
+    const YB64: usize = 2;
+    const NB64: usize = XB64 * YB64;
+    const N_COEF_64: usize = NB64 * 2048;
+    let mut input64 = vec![0.0f32; N_COEF_64];
+    for b in 0..NB64 {
+        for i in 0..2048 {
+            let v = ((b * 17 + i * 23).wrapping_mul(31) % 251) as f32 / 251.0 - 0.5;
+            input64[b * 2048 + i] = 0.3 + 0.04 * v;
+        }
+    }
+    let mut weights64_per = vec![1.0f32; 2048];
+    for i in 0..2048 {
+        weights64_per[i] = 1.0 + 0.5 * (i as f32 / 2048.0);
+    }
+    let mut weights64 = vec![0.0f32; N_COEF_64];
+    for b in 0..NB64 {
+        weights64[b * 2048..b * 2048 + 2048].copy_from_slice(&weights64_per);
+    }
+    let qac64 = vec![1.7f32; NB64];
+    let h_in64 = client.create_from_slice(f32::as_bytes(&input64));
+    let h_w64 = client.create_from_slice(f32::as_bytes(&weights64));
+    let h_qac64 = client.create_from_slice(f32::as_bytes(&qac64));
+    let h_thr64 = client.create_from_slice(f32::as_bytes(&thresholds[..]));
+
+    let cg64x32 = compute_cost_grid_dct64x32_single_channel::<Backend>(
+        &client,
+        h_in64.clone(),
+        h_w64.clone(),
+        h_qac64.clone(),
+        h_thr64.clone(),
+        XB64 as u32,
+        YB64 as u32,
+    );
+    let bytes = client.read_one(cg64x32.costs).expect("read 64x32");
+    let costs_64x32: &[f32] = f32::from_bytes(&bytes);
+    let mean_64x32 = costs_64x32.iter().sum::<f32>() / (costs_64x32.len() as f32);
+    let max_64x32 = costs_64x32.iter().fold(0.0f32, |a, &b| a.max(b));
+    println!(
+        "DCT64×32 cost grid: {} per-8×8 costs (= {} 64×32 rect blocks × 32 sub-cells), mean={:.4} max={:.4}",
+        costs_64x32.len(),
+        cg64x32.xsize_blocks * cg64x32.ysize_blocks,
+        mean_64x32,
+        max_64x32,
+    );
+    let ok_64x32 = costs_64x32.iter().all(|&c| c >= 0.0 && c.is_finite());
+    if !ok_64x32 {
+        eprintln!("✗ DCT64×32 produced negative or non-finite costs");
+        std::process::exit(1);
+    }
+
+    let cg32x64 = compute_cost_grid_dct32x64_single_channel::<Backend>(
+        &client, h_in64, h_w64, h_qac64, h_thr64, XB64 as u32, YB64 as u32,
+    );
+    let bytes = client.read_one(cg32x64.costs).expect("read 32x64");
+    let costs_32x64: &[f32] = f32::from_bytes(&bytes);
+    let mean_32x64 = costs_32x64.iter().sum::<f32>() / (costs_32x64.len() as f32);
+    let max_32x64 = costs_32x64.iter().fold(0.0f32, |a, &b| a.max(b));
+    println!(
+        "DCT32×64 cost grid: {} per-8×8 costs (= {} 32×64 rect blocks × 32 sub-cells), mean={:.4} max={:.4}",
+        costs_32x64.len(),
+        cg32x64.xsize_blocks * cg32x64.ysize_blocks,
+        mean_32x64,
+        max_32x64,
+    );
+    let ok_32x64 = costs_32x64.iter().all(|&c| c >= 0.0 && c.is_finite());
+    if !ok_32x64 {
+        eprintln!("✗ DCT32×64 produced negative or non-finite costs");
+        std::process::exit(1);
+    }
+
+    println!("\n✓ All six rectangular DCT16/32/64 cost grids produced finite non-negative costs.");
 }
