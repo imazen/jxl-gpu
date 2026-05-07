@@ -40,6 +40,34 @@ fn clamp_to_i8(v: i32) -> i8 {
     v.clamp(i8::MIN as i32, i8::MAX as i32) as i8
 }
 
+/// Inverse color factor for CfL ratio conversion. Bit-for-bit from
+/// upstream `jxl_encoder::vardct::chroma_from_luma::K_INV_COLOR_FACTOR`.
+pub const K_INV_COLOR_FACTOR: f32 = 1.0 / 84.0;
+
+/// Convert a `ytox` `i8` value to the ratio used for CfL subtraction
+/// on the X channel. Mirrors upstream
+/// `jxl_encoder::vardct::chroma_from_luma::ytox_ratio`.
+///
+/// `x_factor = ytox * K_INV_COLOR_FACTOR`. The decoder applies
+/// `X[k] += x_factor * Y[k]` per AC coefficient.
+#[inline]
+pub fn ytox_ratio(x: i8) -> f32 {
+    x as f32 * K_INV_COLOR_FACTOR
+}
+
+/// Convert a `ytob` `i8` value to the ratio used for CfL subtraction
+/// on the B channel. Mirrors upstream
+/// `jxl_encoder::vardct::chroma_from_luma::ytob_ratio`.
+///
+/// `b_factor = 1.0 + ytob * K_INV_COLOR_FACTOR`. The 1.0 baseline
+/// reflects that B has a strong CfL prior on the Y signal even
+/// without any per-tile adjustment. The decoder applies
+/// `B[k] += b_factor * Y[k]` per AC coefficient.
+#[inline]
+pub fn ytob_ratio(b: i8) -> f32 {
+    1.0 + b as f32 * K_INV_COLOR_FACTOR
+}
+
 /// Single-tile CfL multiplier via regularized least-squares on GPU.
 /// Mirrors upstream `jxl_encoder::vardct::chroma_from_luma::find_best_multiplier`
 /// (use_newton=false branch).
@@ -148,6 +176,31 @@ pub fn find_best_multipliers_newton_batch_gpu<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ytox_ratio_zero_is_zero() {
+        assert_eq!(ytox_ratio(0), 0.0);
+    }
+
+    #[test]
+    fn test_ytox_ratio_linear() {
+        // Each unit of ytox = 1/84 ≈ 0.01190.
+        assert!((ytox_ratio(1) - K_INV_COLOR_FACTOR).abs() < 1e-9);
+        assert!((ytox_ratio(-42) - (-42.0 * K_INV_COLOR_FACTOR)).abs() < 1e-6);
+        assert!((ytox_ratio(127) - (127.0 * K_INV_COLOR_FACTOR)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ytob_ratio_zero_is_one() {
+        // baseline 1.0 means B = Y when no per-tile adjustment
+        assert_eq!(ytob_ratio(0), 1.0);
+    }
+
+    #[test]
+    fn test_ytob_ratio_linear_around_one() {
+        assert!((ytob_ratio(1) - (1.0 + K_INV_COLOR_FACTOR)).abs() < 1e-9);
+        assert!((ytob_ratio(-1) - (1.0 - K_INV_COLOR_FACTOR)).abs() < 1e-9);
+    }
 
     #[cfg(feature = "cuda")]
     #[test]
