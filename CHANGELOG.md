@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Added — Per-channel dead-zone thresholds + `upload_i32_blocks` (`3fdadf2d`, `3c654bfd`)
+
+Two cleanup additions matching libjxl semantics:
+
+- `LossyEncoder` now uses per-channel `thresholds_x/y/b` arrays
+  matching `jxl_encoder::vardct::quantize::default_thresholds`:
+  Y has tightest TL (0.56), X/B share 0.58. Combined with the
+  per-channel quant weights, LossyEncoder is now bit-equivalent
+  to libjxl's DCT8 lossy path at single-block coverage.
+- `GpuEncoder::upload_i32_blocks` — public API for uploading
+  per-block i32 data (matches `upload_blocks` for f32). Removes
+  the test-only `client_ref_for_test` accessor that was a hack
+  workaround when this method didn't exist.
+
+### Added — `distance_to_qac` + `K_AC_QUANT` public (`c77a41a7`)
+
+Direct libjxl-style distance interface:
+  - `pub const K_AC_QUANT: f32 = 0.765` (libjxl AC scale at d=1)
+  - `pub fn distance_to_qac(distance) -> f32` = `K_AC_QUANT/distance`
+
+`quality_to_qac` now delegates to `distance_to_qac(50/q)`.
+README quick-start + lossy_encoder demo updated to use the new
+distance interface.
+
 ### Fixed — `quality_to_qac` direction was inverted vs libjxl (`1fa03c76`)
 
 The kernel uses `val = coef * inv_weight * qac`, so SMALLER qac
