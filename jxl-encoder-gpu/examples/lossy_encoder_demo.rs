@@ -30,12 +30,14 @@ fn main() {
     // quant matrix) across all encodes that follow.
     let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, side, side);
 
-    // ── One-shot encode ────────────────────────────────────────────
+    // ── One-shot encode using the libjxl distance interface ───────
+    use jxl_encoder_gpu::lossy_encoder::distance_to_qac;
+    let qac = distance_to_qac(1.0); // libjxl reference quality
     let t0 = std::time::Instant::now();
-    let (rec_r, rec_g, rec_b) = lossy.encode_one(&enc, &r, &g, &b, 4.0);
+    let (rec_r, _rec_g, _rec_b) = lossy.encode_one(&enc, &r, &g, &b, qac);
     let dt0 = t0.elapsed();
     println!(
-        "one-shot encode @ {side}×{side}, qac=4.0: {:.2} ms",
+        "one-shot encode @ {side}×{side}, distance=1.0 (qac={qac:.3}): {:.2} ms",
         dt0.as_secs_f64() * 1000.0
     );
     assert_eq!(rec_r.len(), n);
@@ -46,26 +48,27 @@ fn main() {
         .fold(0.0_f32, f32::max);
     println!("  R channel max abs reconstruction error: {max_err:.4e}");
 
-    // ── Batch encode — 5 quality settings on the same input ────────
-    let qac_settings = [1.0_f32, 2.0, 4.0, 8.0, 16.0];
+    // ── Batch encode — distance sweep on the same input ────────────
+    // distances 0.5 → 5.0 cover the practical libjxl range.
+    let distances = [0.5_f32, 1.0, 2.0, 5.0];
+    let qac_settings: Vec<f32> = distances.iter().copied().map(distance_to_qac).collect();
     let t1 = std::time::Instant::now();
     let outputs = lossy.encode_many(&enc, &r, &g, &b, &qac_settings);
     let dt1 = t1.elapsed();
     println!(
-        "\nbatch encode @ {side}×{side} × {} settings: {:.2} ms total ({:.2} ms/encode)",
-        qac_settings.len(),
+        "\nbatch encode @ {side}×{side} × {} distances: {:.2} ms total ({:.2} ms/encode)",
+        distances.len(),
         dt1.as_secs_f64() * 1000.0,
-        dt1.as_secs_f64() * 1000.0 / qac_settings.len() as f64,
+        dt1.as_secs_f64() * 1000.0 / distances.len() as f64,
     );
-    for (i, &qac) in qac_settings.iter().enumerate() {
-        let (rec_r_i, _, _) = &outputs[i];
+    for ((d, qac), (rec_r_i, _, _)) in distances.iter().zip(&qac_settings).zip(&outputs) {
         let mae: f64 = r
             .iter()
             .zip(rec_r_i)
             .map(|(a, b)| (a - b).abs() as f64)
             .sum::<f64>()
             / n as f64;
-        println!("  qac={qac:>5.1}: R MAE = {mae:.4e}");
+        println!("  distance={d:>4.1}  qac={qac:.3}  R MAE={mae:.4e}");
     }
 
     println!(
