@@ -2348,6 +2348,15 @@ pub struct CostGrids16x16<'a> {
     pub dct_16x8: Option<&'a [f32]>,
     /// Per-8×16-block costs, shape `(xsize_blocks_8 / 2, ysize_blocks_8)`.
     pub dct_8x16: Option<&'a [f32]>,
+    /// Per-cell 8×8-tier alternative cost grids (DCT4x4, DCT4x8,
+    /// DCT8x4, IDENTITY, DCT2X2). Pass any subset; the picker
+    /// considers DCT8 + whichever sub-block grids are present and
+    /// emits [`Partition16x16::FourSubBlocks`] when the per-cell
+    /// total beats the other 3 partition strategies.
+    ///
+    /// Each grid is per-8×8-cell, shape
+    /// `(xsize_blocks_8, ysize_blocks_8)` row-major.
+    pub sub_blocks: SubBlockCostGrids<'a>,
 }
 
 /// Pick the lower-cost partition for each 16×16 region. Considers up to
@@ -2430,6 +2439,26 @@ pub fn select_partitions_16x16_full(
                 g[2 * ry * xsize_blocks_8x16 + rx] + g[(2 * ry + 1) * xsize_blocks_8x16 + rx]
             });
 
+            // If any sub-block alternative grids are provided, also
+            // compute a per-cell strategy choice. The picker may then
+            // emit FourSubBlocks instead of FourDct8x8.
+            let any_sub = extra.sub_blocks.dct4x4.is_some()
+                || extra.sub_blocks.dct4x8.is_some()
+                || extra.sub_blocks.dct8x4.is_some()
+                || extra.sub_blocks.identity.is_some()
+                || extra.sub_blocks.dct2x2.is_some();
+            let cost_sub = if any_sub {
+                Some(pick_subblock_strategies(
+                    cost_dct8,
+                    extra.sub_blocks,
+                    xsize_blocks_8,
+                    bx0,
+                    by0,
+                ))
+            } else {
+                None
+            };
+
             // Pick the strategy with lowest cost. Tie-break: prefer larger
             // transform (DCT16x16 > rectangular > four DCT8x8) to minimize
             // AC-strategy encoding overhead.
@@ -2446,6 +2475,18 @@ pub fn select_partitions_16x16_full(
             }
             if cost_4_dct8 < best.0 {
                 best = (cost_4_dct8, Partition16x16::FourDct8x8);
+            }
+            // Sub-block per-cell pick. Note: when cost_sub.0 == cost_4_dct8
+            // (i.e., all 4 cells picked DCT8 anyway), the picker collapses
+            // to FourDct8x8 — saving the AC-strategy bits per cell.
+            if let Some((c, subs)) = cost_sub {
+                if c < best.0 {
+                    if subs.iter().all(|&s| s == SubStrategy::Dct8) {
+                        best = (c, Partition16x16::FourDct8x8);
+                    } else {
+                        best = (c, Partition16x16::FourSubBlocks(subs));
+                    }
+                }
             }
             partitions.push(best.1);
         }
