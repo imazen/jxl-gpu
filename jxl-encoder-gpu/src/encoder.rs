@@ -50,7 +50,7 @@ use crate::launch::denoise::denoise as denoise_launch;
 use crate::launch::fuzzy_erosion::{fuzzy_erosion as fuzzy_erosion_launch, fuzzy_erosion_kmul};
 use crate::launch::dequant::dequant_dct8;
 use crate::launch::entropy::entropy_coeffs_pixel;
-use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
+use crate::launch::epf::{epf_step0, epf_step1, epf_step2, pad_plane};
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::mask1x1::mask1x1;
@@ -681,6 +681,66 @@ impl<R: Runtime> GpuEncoder<R> {
         pad_plane::<R>(&self.client, h_in, h_out.clone(), width, height, pad);
         let bytes = self.client.read_one(h_out).expect("read pad");
         f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// EPF Step 0 — 5×5 plus kernel with 3×3-plus SAD weights over 12 neighbors.
+    /// The heaviest of the three EPF passes. Inputs are PADDED
+    /// (`stride = width + 2*pad`, `pad >= 3`); output is unpadded.
+    /// Returns `(out_x, out_y, out_b)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn epf_step0_channels(
+        &self,
+        in_x: &[f32],
+        in_y: &[f32],
+        in_b: &[f32],
+        inv_sigma: &[f32],
+        width: u32,
+        height: u32,
+        xsize_blocks: u32,
+        ysize_blocks: u32,
+        pad: u32,
+        sigma_scale: f32,
+        border_sigma_mul: f32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let n_out = (width as usize) * (height as usize);
+        let h_ix = self.client.create_from_slice(f32::as_bytes(in_x));
+        let h_iy = self.client.create_from_slice(f32::as_bytes(in_y));
+        let h_ib = self.client.create_from_slice(f32::as_bytes(in_b));
+        let h_is = self.client.create_from_slice(f32::as_bytes(inv_sigma));
+        let h_ox = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_out]));
+        let h_oy = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_out]));
+        let h_ob = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_out]));
+        epf_step0::<R>(
+            &self.client,
+            h_ix,
+            h_iy,
+            h_ib,
+            h_ox.clone(),
+            h_oy.clone(),
+            h_ob.clone(),
+            h_is,
+            width,
+            height,
+            xsize_blocks,
+            ysize_blocks,
+            pad,
+            sigma_scale,
+            border_sigma_mul,
+        );
+        let xb = self.client.read_one(h_ox).expect("x");
+        let yb = self.client.read_one(h_oy).expect("y");
+        let bb = self.client.read_one(h_ob).expect("b");
+        (
+            f32::from_bytes(&xb).to_vec(),
+            f32::from_bytes(&yb).to_vec(),
+            f32::from_bytes(&bb).to_vec(),
+        )
     }
 
     /// EPF Step 1 — 3×3 cross kernel with 3×3-plus SAD weights.
