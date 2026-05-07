@@ -72,15 +72,39 @@ Per project plan: `imazen/jxl-gpu` is a **separate** project from
 `jxl-encoder` — not a fork or feature flag. The integration work below
 all happens IN THIS REPO; downstream encoders depend on it.
 
-The exact scope (kernel library + pipeline vs. complete standalone
-encoder) is currently being clarified.
-
 | Component | Status |
 |---|---|
-| Encoder facade API (`Encoder<R>` or similar) | ❌ |
-| Per-(width, height) instance pre-allocation cache | ❌ |
-| End-to-end roundtrip test through `jxl-rs` decoder | ❌ |
-| Optional dep on `jxl-encoder` / `jxl-encoder-simd` for sequential parts (ANS, bitstream, container) | ❌ |
+| `GpuEncoder<R: Runtime>` facade | ✓ | 42+ public methods covering xyb, gaborish, mask1x1, gab_smooth, all 13 DCT/IDCT pairs, quantize, dequant, EPF step1/step2, pre_erosion, per_block_modulations, cfl LS + Newton, block_l2, pixel_loss, entropy_coeffs_pixel, encode_lossy_via_cpu |
+| Per-(width, height) instance pre-allocation cache | ❌ | (currently per-call upload) |
+| End-to-end roundtrip test through `jxl-rs` decoder | ❌ | (waiting on full GPU bitstream path) |
+| Optional dep on `jxl-encoder` / `jxl-encoder-simd` for sequential parts | ✓ | `feature = "encoder"` (default-on); used for ANS, bitstream, container muxing |
+
+## Phase 5 — `forks::*` substitutions of jxl-encoder pipeline stages
+
+Per-user authorization to fork-and-modify jxl-encoder source code.
+Each `forks::*` module mirrors a `jxl_encoder::vardct::*` file with
+the SIMD work substituted for GPU launches and the algorithm reshaped
+for GPU-friendly batching.
+
+| Fork module | Mirrors upstream | Status | Reshape |
+|---|---|---|---|
+| `forks::xyb` | `vardct::xyb::convert_strip` | ✓ | Whole-image batch instead of per-row strips; planar deinterleave on host; right-edge pad after XYB |
+| `forks::gaborish` | `vardct::gaborish::gaborish_inverse` | ✓ | 3 sequential GPU launches instead of rayon::join; bit-for-bit `K_GABORISH` constants |
+| `forks::adaptive_quant` | `vardct::adaptive_quant::{compute_mask1x1, compute_pre_erosion, per_block_modulations}` | ✓ | mask1x1 = mask1x1_field + Symmetric5 blur via gaborish_5x5 weights; fuzzy_erosion stays CPU |
+| `forks::reconstruct` | `vardct::reconstruct::{gab_smooth, xyb_to_linear_rgb_planar, xyb_to_linear_rgb}` | ✓ | 3 sequential GPU launches; planar GPU output then host re-interleave |
+| `forks::transform` | `vardct::transform::Transform::apply_dct` | ✓ | Per-strategy batched: gather all blocks of one strategy into one Vec<f32>, single GPU launch covers all of them. 13 strategies (DCT8/4/16/32/64 family + rectangulars). Inverse symmetric. |
+| `forks::cfl` | `vardct::chroma_from_luma::find_best_multiplier` | ✓ | Single-tile drop-in API + multi-tile batched (one launch covers all tiles); LS + Newton variants |
+| `forks::epf` | `vardct::epf::{compute_inv_sigma_map, apply_epf step1+step2}` | ✓ | Step 1 + Step 2 GPU; Step 0 (12-tap) and sharpness selection stay CPU |
+| `forks::dequant` | `vardct::quantize::adjust_quant_bias` + `vardct::reconstruct` DequantBlock for DCT8 | ✓ | 3-channel batched DCT8 dequant in one launch; scalar `adjust_quant_bias` bit-for-bit |
+| `forks::quantize` | `vardct::quantize::{default_thresholds, quantize_ac_block (DCT8 path)}` | ✓ | One launch per channel; 3-channel convenience helper computes channel-specific thresholds; non-DCT8 strategies stay CPU |
+
+**Composition demos:**
+- `examples/forks_pipeline_demo.rs` — chains XYB + gaborish + mask1x1 + DCT8 forward+inverse on 64×64 (DCT8 roundtrip 2.4e-7 abs)
+- `examples/lossy_roundtrip_demo.rs` — full GPU per-block lossy path through 6 fork modules end-to-end
+
+**Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
+
+**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, fuzzy_erosion, AdjustQuantBlockAC heuristics, non-DCT8 strategies for quantize/dequant, `estimate_entropy_full` orchestration, `apply_dct` for IDENTITY/DCT2X2/AFV0-3.
 
 ## Coverage summary
 
@@ -88,19 +112,23 @@ encoder) is currently being clarified.
   denoise + pad_plane)
 - Phase 2 DCT/IDCT: 26 of 26 ✓ (all 8/16/32/64 squares, rectangulars,
   and 4-family sub-block variants)
-- Phase 2 other: 6 of ~9 (quantize_dct8, quantize_large, dequant_dct8,
-  block_l2, pixel_loss, cfl_find_best_multiplier; missing
-  cfl_find_best_multiplier_newton, compute_pre_erosion,
-  per_block_modulations, epf_step1, epf_step2, fused_dct8_entropy,
-  entropy_*)
-- Phase 3: 0 of 3
-- Phase 4: 0 of 4
+- Phase 2 other: 13 of ~13 ✓ (quantize_dct8, quantize_large,
+  dequant_dct8, block_l2, pixel_loss, cfl_find_best_multiplier +
+  Newton, compute_pre_erosion, per_block_modulations, epf_step1,
+  epf_step2, entropy_coeffs_pixel + coeff)
+- Phase 3: 1.5 of 3 (cost grids partial; partition selector ✓)
+- Phase 4: 2 of 4 (encoder facade ✓, jxl-encoder dep ✓)
+- Phase 5: 9 of ~12 fork modules ✓ (xyb, gaborish, adaptive_quant,
+  reconstruct, transform, cfl, epf, dequant, quantize; remaining:
+  fuzzy_erosion, EPF Step 0, full estimate_entropy_full)
 
-**Grand total: 37 of ~52 deliverables verified (~71%)**
+**Grand total: 56 of ~65 deliverables verified (~86%)**
 
-DCT/IDCT family complete. CfL multiplier search complete. Remaining
-Phase 2 work: cfl Newton variant, adaptive_quant (×2), epf (×2),
-fused_dct8_entropy, entropy estimation.
+DCT/IDCT family complete. CfL complete. EPF Steps 1+2 complete.
+9 fork modules verified composing through GpuEncoder. Remaining
+work concentrates in (a) fuzzy_erosion + EPF Step 0 GPU kernels,
+(b) full estimate_entropy_full orchestration, (c) GPU kernels for
+non-DCT8 strategies' quantize/dequant.
 
 ### Note on AC strategy search (Phase 3)
 
