@@ -62,7 +62,7 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 
 | Component | Status |
 |---|---|
-| Per-strategy whole-image cost grid kernels | ⚙ | Single-channel cost grids for DCT4x4, DCT4x8, DCT8x4, DCT8, DCT16x8, DCT8x16, DCT16x16, DCT32x16, DCT16x32, DCT32x32, DCT64x32, DCT32x64, DCT64x64 (DCT4/8/16/32/64 family — square + rect — complete). 3-channel XYB-weighted + mask1x1 cost grids for the full DCT4/8/16/32/64 family — 4 squares + 6 rect + 3 DCT4 sub-block (DCT4x4, DCT4x8, DCT8x4) = 13 strategies (`compute_cost_grid_*_xyb`). Single-channel cost grids for IDENTITY + DCT2X2 (`compute_cost_grid_{identity,dct2x2}_single_channel`); needs 3-channel for IDENTITY/DCT2X2 + CfL + AFV variants |
+| Per-strategy whole-image cost grid kernels | ⚙ | Single-channel cost grids for DCT4x4, DCT4x8, DCT8x4, DCT8, DCT16x8, DCT8x16, DCT16x16, DCT32x16, DCT16x32, DCT32x32, DCT64x32, DCT32x64, DCT64x64 (DCT4/8/16/32/64 family — square + rect — complete). 3-channel XYB-weighted + mask1x1 cost grids for full DCT4/8/16/32/64 + IDENTITY + DCT2X2 (15 strategies). Single-channel grids match the same 15. All standard JXL AC strategies except AFV0-3 are now covered in both flavors. Remaining: CfL-aware variants + AFV (kernel exists but no cost grid integration yet) |
 | Host-side partition selector | ✓ | Full coverage of standard rectangular family across 16/32/64 region tiers (12 variants). 12 unit tests passing. End-to-end integration demo verifies algorithmic correctness on synthetic smooth+noisy input |
 | Refactor `ac_strategy_search.rs` to consume cost grids | ⛔ | requires touching `jxl-encoder` crate (separate repo) — needs user permission |
 
