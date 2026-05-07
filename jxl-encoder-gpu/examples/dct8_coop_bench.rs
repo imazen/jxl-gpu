@@ -168,7 +168,7 @@ fn main() {
         );
     }
     println!(
-        "\n  naive× / coop× / wide× = CPU_time / GPU_time. >1.0 = GPU faster.\n  naive: cube_dim=1, one block per cube.\n  coop:  cube_dim=8, one block per cube, one thread per row, sync_cube barriers.\n  wide:  cube_dim=32, ONE block per thread, 32 blocks per cube, no sync.\n  All three produce identical output to CPU within sub-ulp tolerance."
+        "\n  naive× / coop× / wide× = CPU_time / GPU_time. >1.0 = GPU faster.\n  naive: cube_dim=1, one block per cube.\n  coop:  cube_dim=8, one block per cube, one thread per row, sync_cube barriers.\n  wide:  cube_dim=64, ONE block per thread, 64 blocks per cube, no sync.\n  All three produce identical output to CPU within sub-ulp tolerance."
     );
 }
 

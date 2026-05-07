@@ -260,7 +260,14 @@ pub fn dct_8x8_kernel(input: &Array<f32>, output: &mut Array<f32>) {
 ///
 /// Trades cube_dim=1's private-shared-memory simplicity for better
 /// launch amortization and warp utilization.
-const WIDE_CUBE_DIM: u32 = 32;
+///
+/// Tuned via dct8_coop_bench sweep on RTX 5070 (sizes 256²-4096²,
+/// 16/32/64 cube_dim variants):
+///   16  →  4.25 ms at 1024² (limited by cube count)
+///   32  →  3.76 ms at 1024²
+///   64  →  3.67 ms at 1024² ← best at sweet-spot, also best at 4096²
+/// 64 wins on aggregate but only by margin; 32 is also reasonable.
+const WIDE_CUBE_DIM: u32 = 64;
 
 #[cube(launch_unchecked)]
 pub fn dct_8x8_wide_kernel(input: &Array<f32>, output: &mut Array<f32>) {

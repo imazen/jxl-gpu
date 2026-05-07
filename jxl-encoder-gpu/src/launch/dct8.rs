@@ -39,12 +39,12 @@ pub fn dct_8x8_wide<R: Runtime>(
     num_blocks: u32,
 ) {
     let n = (num_blocks as usize) * 64;
-    let cubes = num_blocks.div_ceil(32).max(1);
+    let cubes = num_blocks.div_ceil(64).max(1);
     unsafe {
         crate::kernels::dct8::dct_8x8_wide_kernel::launch_unchecked::<R>(
             client,
             CubeCount::Static(cubes, 1, 1),
-            CubeDim::new_1d(32),
+            CubeDim::new_1d(64),
             ArrayArg::from_raw_parts(input, n),
             ArrayArg::from_raw_parts(output, n),
         );
