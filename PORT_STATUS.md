@@ -62,8 +62,8 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 
 | Component | Status |
 |---|---|
-| Per-strategy whole-image cost grid kernels | ⚙ | Single-channel cost grids for DCT4x4, DCT4x8, DCT8x4, DCT8, DCT16x8, DCT8x16, DCT16x16, DCT32x16, DCT16x32, DCT32x32, DCT64x32, DCT32x64, DCT64x64 (DCT4/8/16/32/64 family — square + rect — complete). 3-channel XYB-weighted + mask1x1 cost grids for full DCT4/8/16/32/64 + IDENTITY + DCT2X2 (15 strategies). Single-channel grids match the same 15. All standard JXL AC strategies except AFV0-3 are now covered in both flavors. Remaining: CfL-aware variants + AFV (kernel exists but no cost grid integration yet) |
-| Host-side partition selector | ✓ | Full coverage of standard rectangular family across 16/32/64 region tiers (12 variants). 12 unit tests passing. End-to-end integration demo verifies algorithmic correctness on synthetic smooth+noisy input |
+| Per-strategy whole-image cost grid kernels | ✓ | 15 strategies × 2 flavors = 30 cost-grid functions: full DCT4/8/16/32/64 family (squares + rects) + IDENTITY + DCT2X2, in both single-channel proxy and 3-channel XYB-weighted + mask1x1-modulated forms. Validated end-to-end on real CLIC2025 photos (`phase3_xyb_real_image_demo`, `corpus_subblock_picks_demo`). Remaining: AFV0-3 (kernels not ported) + CfL-aware variants (chroma-from-luma decorrelation in coefficient space) |
+| Host-side partition selector | ✓ | Full 7-strategy coverage at 16×16 tier: DCT16×16 + 2× DCT16×8 + 2× DCT8×16 + Four DCT8×8 + per-cell `FourSubBlocks([SubStrategy; 4])` choosing from {DCT8, DCT4×4, DCT4×8, DCT8×4, IDENTITY, DCT2X2}. Recursive composition through 32×32 + 64×64 tiers. Corpus validation: pure 4-DCT8 essentially dies (0.1% of 32k regions) when sub-block alternatives offered |
 | Refactor `ac_strategy_search.rs` to consume cost grids | ⛔ | requires touching `jxl-encoder` crate (separate repo) — needs user permission |
 
 ## Phase 4 — encoder facade (in THIS repo)
@@ -115,11 +115,14 @@ for GPU-friendly batching.
   dequant_dct8, block_l2, pixel_loss, cfl_find_best_multiplier +
   Newton, compute_pre_erosion, per_block_modulations, epf_step1,
   epf_step2, entropy_coeffs_pixel + coeff)
-- Phase 3: 1.5 of 3 (cost grids partial; partition selector ✓)
+- Phase 3: 2.5 of 3 ✓ cost grids (15 strategies × 2 flavors), ✓
+  partition selector (7-strategy 16×16 + recursive 32×32/64×64);
+  ⛔ refactor of jxl-encoder ac_strategy_search.rs awaits permission
 - Phase 4: 2 of 4 (encoder facade ✓, jxl-encoder dep ✓)
-- Phase 5: 9 of ~12 fork modules ✓ (xyb, gaborish, adaptive_quant,
-  reconstruct, transform, cfl, epf, dequant, quantize; remaining:
-  fuzzy_erosion, EPF Step 0, full estimate_entropy_full)
+- Phase 5: 10 of ~12 fork modules ✓ (xyb, gaborish, adaptive_quant,
+  reconstruct, transform [now incl. IDENTITY+DCT2X2], cfl, epf,
+  dequant, quantize, noise; remaining: fuzzy_erosion, EPF Step 0,
+  full estimate_entropy_full)
 
 **Grand total: 56 of ~65 deliverables verified (~86%)**
 
