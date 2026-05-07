@@ -128,6 +128,127 @@ pub fn restore_dct8_dc_override_batched(
     }
 }
 
+/// Reconstruct XYB pixel planes from quantized DC + AC coefficients,
+/// for an image where every block is DCT8. Mirrors the DCT8 fast path
+/// of upstream `reconstruct_xyb_impl` (reconstruct.rs lines 268-344)
+/// composed end-to-end on GPU.
+///
+/// Pipeline (host-orchestrated, 4 GPU launches per image):
+/// 1. `dequant_dct8_blocks_gpu` — batched 3-channel dequant + AC-level
+///    CfL fold (one launch).
+/// 2. host: `restore_dct8_dc_override_batched` — DC override with the
+///    fixed 0.5× Y→B DC-level CfL.
+/// 3. `apply_idct_batch_gpu(DCT8)` per channel — three launches.
+/// 4. host: scatter the per-block 8×8 outputs into padded
+///    `(xsize_blocks * 8) × (ysize_blocks * 8)` planes.
+///
+/// Inputs are all flat block-major slices (`n_blocks * 64` for AC,
+/// `n_blocks` for per-block scalars). Per-block CfL factors must
+/// already be resolved from the per-tile CfL map by the caller.
+///
+/// Returns `[plane_x, plane_y, plane_b]` of length
+/// `xsize_blocks * ysize_blocks * 64` (= padded width × padded height).
+///
+/// **Note**: this is the all-blocks-are-DCT8 path. Real images use a
+/// mix of strategies via the AC strategy map; supporting that
+/// requires the per-strategy IDCT dispatch + scatter for non-DCT8
+/// blocks, which is a separate piece of `reconstruct_xyb_impl`.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_xyb_dct8_only_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    quant_dc_x: &[f32],
+    quant_dc_y: &[f32],
+    quant_dc_b: &[f32],
+    quant_ac_x: &[i32],
+    quant_ac_y: &[i32],
+    quant_ac_b: &[i32],
+    weights_x_per_block: &[f32; 64],
+    weights_y_per_block: &[f32; 64],
+    weights_b_per_block: &[f32; 64],
+    qac_qm_x: &[f32],
+    qac_qm_y: &[f32],
+    qac_qm_b: &[f32],
+    x_factor: &[f32],
+    b_factor: &[f32],
+    scale_dc: f32,
+    xsize_blocks: usize,
+    ysize_blocks: usize,
+) -> [Vec<f32>; 3] {
+    use crate::forks::dequant::dequant_dct8_blocks_gpu;
+    use crate::forks::transform::{apply_idct_batch_gpu, RAW_STRATEGY_DCT};
+
+    let n_blocks = xsize_blocks * ysize_blocks;
+    debug_assert_eq!(quant_dc_x.len(), n_blocks);
+    debug_assert_eq!(quant_dc_y.len(), n_blocks);
+    debug_assert_eq!(quant_dc_b.len(), n_blocks);
+    debug_assert_eq!(quant_ac_x.len(), n_blocks * 64);
+    debug_assert_eq!(quant_ac_y.len(), n_blocks * 64);
+    debug_assert_eq!(quant_ac_b.len(), n_blocks * 64);
+    debug_assert_eq!(qac_qm_x.len(), n_blocks);
+    debug_assert_eq!(qac_qm_y.len(), n_blocks);
+    debug_assert_eq!(qac_qm_b.len(), n_blocks);
+    debug_assert_eq!(x_factor.len(), n_blocks);
+    debug_assert_eq!(b_factor.len(), n_blocks);
+
+    // Replicate per-block weight tables for every block (the GPU dequant
+    // kernel takes per-coefficient weights matching the quantized layout).
+    let mut weights_x = Vec::with_capacity(n_blocks * 64);
+    let mut weights_y = Vec::with_capacity(n_blocks * 64);
+    let mut weights_b = Vec::with_capacity(n_blocks * 64);
+    for _ in 0..n_blocks {
+        weights_x.extend_from_slice(weights_x_per_block);
+        weights_y.extend_from_slice(weights_y_per_block);
+        weights_b.extend_from_slice(weights_b_per_block);
+    }
+
+    // Step 1: GPU dequant (one launch, three channels).
+    let (mut dq_x, mut dq_y, mut dq_b) = dequant_dct8_blocks_gpu(
+        enc, quant_ac_x, quant_ac_y, quant_ac_b, &weights_x, &weights_y, &weights_b,
+        qac_qm_x, qac_qm_y, qac_qm_b, x_factor, b_factor,
+    );
+
+    // Step 2: host DC override (overwrites position [b * 64] of each plane).
+    restore_dct8_dc_override_batched(
+        &mut dq_x,
+        &mut dq_y,
+        &mut dq_b,
+        quant_dc_x,
+        quant_dc_y,
+        quant_dc_b,
+        scale_dc,
+    );
+
+    // Step 3: per-channel IDCT 8x8 (three launches).
+    let pix_x = apply_idct_batch_gpu(enc, &dq_x, RAW_STRATEGY_DCT);
+    let pix_y = apply_idct_batch_gpu(enc, &dq_y, RAW_STRATEGY_DCT);
+    let pix_b = apply_idct_batch_gpu(enc, &dq_b, RAW_STRATEGY_DCT);
+
+    // Step 4: scatter block-major pixels into padded planes.
+    let padded_w = xsize_blocks * 8;
+    let padded_h = ysize_blocks * 8;
+    let n_pix = padded_w * padded_h;
+    let mut plane_x = vec![0.0_f32; n_pix];
+    let mut plane_y = vec![0.0_f32; n_pix];
+    let mut plane_b = vec![0.0_f32; n_pix];
+    for by in 0..ysize_blocks {
+        for bx in 0..xsize_blocks {
+            let b = by * xsize_blocks + bx;
+            let src = b * 64;
+            let dst_y0 = by * 8;
+            let dst_x0 = bx * 8;
+            for row in 0..8 {
+                let s = src + row * 8;
+                let d = (dst_y0 + row) * padded_w + dst_x0;
+                plane_x[d..d + 8].copy_from_slice(&pix_x[s..s + 8]);
+                plane_y[d..d + 8].copy_from_slice(&pix_y[s..s + 8]);
+                plane_b[d..d + 8].copy_from_slice(&pix_b[s..s + 8]);
+            }
+        }
+    }
+
+    [plane_x, plane_y, plane_b]
+}
+
 /// Decoder-side gab smoothing weights from libjxl epf.cc / loop_filter.h.
 /// Duplicated bit-for-bit from upstream `gab_smooth`.
 fn gab_weights() -> (f32, f32, f32) {
@@ -312,6 +433,85 @@ mod tests {
             assert_eq!(dq_x[i], 0.5);
             assert_eq!(dq_y[i], 0.7);
             assert_eq!(dq_b[i], 0.3);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_reconstruct_xyb_dct8_only_gpu_zero_input() {
+        // All-zero quant + zero CfL → output is all zeros (DC=0, AC=0).
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let xb = 2_usize;
+        let yb = 2_usize;
+        let nb = xb * yb;
+        let zeros_dc = vec![0.0_f32; nb];
+        let zeros_ac_i = vec![0_i32; nb * 64];
+        let weights_one = [1.0_f32; 64];
+        let qac_qm = vec![1.0_f32; nb];
+        let zero_factor = vec![0.0_f32; nb];
+
+        let planes = reconstruct_xyb_dct8_only_gpu(
+            &enc,
+            &zeros_dc, &zeros_dc, &zeros_dc,
+            &zeros_ac_i, &zeros_ac_i, &zeros_ac_i,
+            &weights_one, &weights_one, &weights_one,
+            &qac_qm, &qac_qm, &qac_qm,
+            &zero_factor, &zero_factor,
+            1.0, xb, yb,
+        );
+        for p in &planes {
+            assert_eq!(p.len(), xb * 8 * yb * 8);
+            for &v in p {
+                assert!(v.abs() < 1e-6, "expected ~0, got {v}");
+            }
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_reconstruct_xyb_dct8_only_gpu_constant_dc() {
+        // Constant DC across all blocks → constant output per channel.
+        // Set quant_dc_y = 100, scale_dc = 1.0 → DC = 100/512 = 0.1953
+        // After IDCT (which scales by 1/8 per dim → 1/8 from the DC tap),
+        // each pixel = 0.1953 / 8 = 0.02441 (libjxl IDCT normalization).
+        // We just check that the output is constant per plane and finite.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let xb = 1_usize;
+        let yb = 1_usize;
+        let nb = xb * yb;
+        let dc_y = vec![100.0_f32; nb];
+        let dc_zero = vec![0.0_f32; nb];
+        let zeros_ac_i = vec![0_i32; nb * 64];
+        let weights_one = [1.0_f32; 64];
+        let qac_qm = vec![1.0_f32; nb];
+        let zero_factor = vec![0.0_f32; nb];
+
+        let planes = reconstruct_xyb_dct8_only_gpu(
+            &enc,
+            &dc_zero, &dc_y, &dc_zero,
+            &zeros_ac_i, &zeros_ac_i, &zeros_ac_i,
+            &weights_one, &weights_one, &weights_one,
+            &qac_qm, &qac_qm, &qac_qm,
+            &zero_factor, &zero_factor,
+            1.0, xb, yb,
+        );
+        // Y plane should be constant non-zero; X plane zero; B plane non-zero
+        // due to DC-CfL: dc_b = (0 + 100*0.5)/256 = 0.1953
+        let v0_y = planes[1][0];
+        for &v in &planes[1] {
+            assert!((v - v0_y).abs() < 1e-5, "Y not constant: {v} vs {v0_y}");
+        }
+        assert!(v0_y.abs() > 0.0);
+        for &v in &planes[0] {
+            assert!(v.abs() < 1e-6, "X should be 0, got {v}");
+        }
+        // B is non-zero (Y CfL contribution).
+        let v0_b = planes[2][0];
+        assert!(v0_b.abs() > 0.0);
+        for &v in &planes[2] {
+            assert!((v - v0_b).abs() < 1e-5);
         }
     }
 
