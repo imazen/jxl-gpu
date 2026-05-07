@@ -86,6 +86,48 @@ pub fn restore_dct8_dc_override(
     dq_b[0] = (quant_dc_b + quant_dc_y * DC_CFL_FACTOR_B) / inv_factor[2];
 }
 
+/// Batched form of [`restore_dct8_dc_override`] for `n_blocks` 64-coef
+/// DCT8 blocks. Operates on flat slices in block-major layout —
+/// matches what `dequant_dct8_blocks_gpu` returns.
+///
+/// `quant_dc_*` are per-block DC values (length `n_blocks`, typically
+/// `i16`-stored, passed as `f32` via `as f32` cast). `dq_*` are
+/// dequantized coefficient blocks (length `n_blocks * 64`); only the
+/// `[b * 64]` slot of each block is mutated.
+///
+/// Bit-for-bit equivalent to running [`restore_dct8_dc_override`]
+/// in a per-block loop. Pure scalar — kept on host because the
+/// per-block work is just three scalar divides and an FMA, dwarfed
+/// by GPU-launch overhead at typical batch sizes.
+pub fn restore_dct8_dc_override_batched(
+    dq_x: &mut [f32],
+    dq_y: &mut [f32],
+    dq_b: &mut [f32],
+    quant_dc_x: &[f32],
+    quant_dc_y: &[f32],
+    quant_dc_b: &[f32],
+    scale_dc: f32,
+) {
+    let n_blocks = quant_dc_y.len();
+    debug_assert_eq!(quant_dc_x.len(), n_blocks);
+    debug_assert_eq!(quant_dc_b.len(), n_blocks);
+    debug_assert_eq!(dq_x.len(), n_blocks * 64);
+    debug_assert_eq!(dq_y.len(), n_blocks * 64);
+    debug_assert_eq!(dq_b.len(), n_blocks * 64);
+    let inv_factor = [
+        INV_DC_QUANT[0] * scale_dc,
+        INV_DC_QUANT[1] * scale_dc,
+        INV_DC_QUANT[2] * scale_dc,
+    ];
+    const DC_CFL_FACTOR_B: f32 = 0.5;
+    for b in 0..n_blocks {
+        let dy = quant_dc_y[b];
+        dq_y[b * 64] = dy / inv_factor[1];
+        dq_x[b * 64] = quant_dc_x[b] / inv_factor[0];
+        dq_b[b * 64] = (quant_dc_b[b] + dy * DC_CFL_FACTOR_B) / inv_factor[2];
+    }
+}
+
 /// Decoder-side gab smoothing weights from libjxl epf.cc / loop_filter.h.
 /// Duplicated bit-for-bit from upstream `gab_smooth`.
 fn gab_weights() -> (f32, f32, f32) {
@@ -204,6 +246,59 @@ mod tests {
         assert_eq!(dq_x[0], 0.0);
         // dq_y[0] = 10 / 512 = 0.01953125
         assert!((dq_y[0] - 0.019_531_25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_restore_dct8_dc_override_batched_matches_per_block() {
+        // Run both forms on the same inputs; outputs must agree exactly.
+        const N: usize = 5;
+        let mut dq_x_batch = vec![0.0_f32; N * 64];
+        let mut dq_y_batch = vec![0.0_f32; N * 64];
+        let mut dq_b_batch = vec![0.0_f32; N * 64];
+        // Seed AC slots to ensure we don't touch them.
+        for i in 0..N * 64 {
+            if !i.is_multiple_of(64) {
+                dq_x_batch[i] = (i as f32) * 0.001;
+                dq_y_batch[i] = (i as f32) * 0.002;
+                dq_b_batch[i] = (i as f32) * 0.003;
+            }
+        }
+        let qx: Vec<f32> = (0..N).map(|b| 1.0 + b as f32 * 2.0).collect();
+        let qy: Vec<f32> = (0..N).map(|b| 5.0 + b as f32 * 3.0).collect();
+        let qb: Vec<f32> = (0..N).map(|b| -3.0 + b as f32).collect();
+        let scale_dc = 0.7_f32;
+
+        // Per-block reference.
+        let mut dq_x_ref = dq_x_batch.clone();
+        let mut dq_y_ref = dq_y_batch.clone();
+        let mut dq_b_ref = dq_b_batch.clone();
+        for b in 0..N {
+            let block_x: &mut [f32; 64] = (&mut dq_x_ref[b * 64..b * 64 + 64])
+                .try_into()
+                .unwrap();
+            let block_y: &mut [f32; 64] = (&mut dq_y_ref[b * 64..b * 64 + 64])
+                .try_into()
+                .unwrap();
+            let block_b: &mut [f32; 64] = (&mut dq_b_ref[b * 64..b * 64 + 64])
+                .try_into()
+                .unwrap();
+            restore_dct8_dc_override(
+                block_x, block_y, block_b, qx[b], qy[b], qb[b], scale_dc,
+            );
+        }
+        // Batched.
+        restore_dct8_dc_override_batched(
+            &mut dq_x_batch,
+            &mut dq_y_batch,
+            &mut dq_b_batch,
+            &qx,
+            &qy,
+            &qb,
+            scale_dc,
+        );
+        assert_eq!(dq_x_batch, dq_x_ref);
+        assert_eq!(dq_y_batch, dq_y_ref);
+        assert_eq!(dq_b_batch, dq_b_ref);
     }
 
     #[test]
