@@ -88,21 +88,48 @@ fn main() {
         [sum[0] as f64 / nf, sum[1] as f64 / nf, sum[2] as f64 / nf]
     };
 
-    println!("\nPer-distance sRGB-U8 byte MAE (lower = closer to source):");
+    // SSIMULACRA2 perceptual score (100 = identical, 90+ imperceptible).
+    let ssim2 = |out: &[u8]| -> f64 {
+        let to_rgb3 = |buf: &[u8]| -> Vec<[u8; 3]> {
+            buf.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+        };
+        let src = to_rgb3(&rgb_in);
+        let dst = to_rgb3(out);
+        let src_img =
+            imgref::ImgVec::new(src, w as usize, h as usize);
+        let dst_img =
+            imgref::ImgVec::new(dst, w as usize, h as usize);
+        fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_img.as_ref())
+            .expect("ssimulacra2") as f64
+    };
+
+    println!("\nPer-distance metrics:");
     println!(
-        "  {:>5}  {:>8}  | {:>16} | {:>16}",
-        "dist", "qac_un", "uniform R/G/B", "AQ-centered R/G/B"
+        "  {:>5}  {:>8}  | {:>16}  {:>5}  | {:>16}  {:>5}  | {:>5}",
+        "dist", "qac_un", "uniform R/G/B MAE", "ssim2", "AQ R/G/B MAE", "ssim2", "Δssim2"
     );
     for (i, d) in distances.iter().enumerate() {
         let m_un = mae(&out_uniform[i]);
         let m_aq = mae(&out_aq[i]);
+        let s_un = ssim2(&out_uniform[i]);
+        let s_aq = ssim2(&out_aq[i]);
         println!(
-            "  {:>5.2}  {:>8.3}  | {:>4.2}/{:>4.2}/{:>4.2}    | {:>4.2}/{:>4.2}/{:>4.2}",
-            d, qacs_uniform[i], m_un[0], m_un[1], m_un[2], m_aq[0], m_aq[1], m_aq[2],
+            "  {:>5.2}  {:>8.3}  | {:>4.2}/{:>4.2}/{:>4.2}    {:>5.2}  | {:>4.2}/{:>4.2}/{:>4.2}    {:>5.2}  | {:>+5.2}",
+            d,
+            qacs_uniform[i],
+            m_un[0],
+            m_un[1],
+            m_un[2],
+            s_un,
+            m_aq[0],
+            m_aq[1],
+            m_aq[2],
+            s_aq,
+            s_aq - s_un,
         );
     }
     println!(
-        "\nNote: byte MAE understates AQ benefit (AQ trades smooth-region\nbits for detail bits, which a per-pixel L1 metric averages out).\nFor real quality assessment, decode through SSIMULACRA2 or butteraugli."
+        "\nSSIMULACRA2: 100 = identical, 90+ imperceptible, 70 = noticeable,\n50 = significant degradation. Δssim2 > 0 means AQ wins perceptually.\nByte MAE alone often understates AQ benefit (AQ trades smooth-region\nbits for detail bits, which per-pixel L1 averages out)."
     );
 
     if let Some(dir) = out_dir {

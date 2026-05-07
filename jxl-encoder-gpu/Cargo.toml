@@ -30,3 +30,5 @@ jxl-encoder = { workspace = true, features = ["std"] }
 bytemuck = { workspace = true }
 image = { workspace = true }
 jxl = { workspace = true }
+fast-ssim2 = { workspace = true }
+imgref = { workspace = true }
