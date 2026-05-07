@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### EPF sharpness picker — selection logic ported (`4f49174e`, `a270f002`)
+
+Two host-side additions in `forks::epf`:
+
+1. `apply_epf_step0_gpu` — symmetric wrapper around the new
+   `GpuEncoder::epf_step0_channels` method, matching the shape of
+   `apply_epf_step1_gpu` / `apply_epf_step2_gpu`. The pad ≥ 3
+   contract is documented inline.
+
+2. `select_sharpness_two_pass` — pure-CPU port of the per-block
+   sharpness picker from upstream `compute_epf_sharpness`. Pass 1
+   is greedy with `K_FAVOR_NO_SMOOTHING = 0.99` and a neighbor-
+   preference fallback; Pass 2 is the context-reweighted re-scan
+   with libjxl's exact `size_t / size_t` integer division (which
+   makes the entropy term a no-op for most contexts; only the c3
+   bias on sharpness=0 has real effect).
+
+Once a `forks::reconstruct::reconstruct_xyb_gpu` lands, these two
+plus the existing `apply_epf_step{0,1,2}_gpu` + `block_l2_errors`
+will form the full `compute_epf_sharpness_gpu` orchestrator.
+
 ### EPF Step 0 — all three EPF passes now on GPU (`147e6ffb`, `094ea81f`, `3ec161d1`)
 
 The heaviest EPF pass (5×5 plus pattern, 12 neighbors × 5-position
