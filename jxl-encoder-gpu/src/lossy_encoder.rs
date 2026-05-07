@@ -3,8 +3,13 @@
 
 //! High-level GPU lossy encoder facade.
 //!
-//! Wraps the [`crate::persistent`] API into four user-friendly entry
-//! points and a JPEG-style quality knob:
+//! Wraps the [`crate::persistent`] API into user-friendly entry
+//! points: uniform-quant, manual per-block adaptive, and turnkey
+//! content-driven adaptive (mask1x1 prepass), each in one-shot and
+//! batch (single-input-upload sweep) form, with f32 planar and sRGB
+//! u8 interleaved variants.
+//!
+//! ### Uniform quant (one qac scalar)
 //!
 //! | Method | Input | Output | Use case |
 //! |---|---|---|---|
@@ -12,6 +17,24 @@
 //! | [`LossyEncoder::encode_many`] | `f32` planar | `Vec<(R, G, B)>` | quality sweep, already-linear |
 //! | [`LossyEncoder::encode_one_srgb_u8`] | sRGB `u8` interleaved | sRGB `u8` interleaved | one-shot, image-crate input |
 //! | [`LossyEncoder::encode_many_srgb_u8`] | sRGB `u8` interleaved | `Vec<u8>` per setting | quality sweep, image-crate input |
+//!
+//! ### Adaptive quant (per-block qac field)
+//!
+//! | Method | Input | Field | Use case |
+//! |---|---|---|---|
+//! | [`LossyEncoder::encode_one_adaptive`] | `f32` planar | caller-supplied `&[f32]` | manual AQ |
+//! | [`LossyEncoder::encode_one_with_aq`] | `f32` planar | derived (mask1x1) | turnkey content-driven AQ |
+//! | [`LossyEncoder::encode_many_with_aq`] | `f32` planar | derived per distance | distance sweep, single mask prepass |
+//! | [`LossyEncoder::encode_one_with_aq_srgb_u8`] | sRGB `u8` | derived | turnkey AQ from sRGB U8 |
+//! | [`LossyEncoder::encode_many_with_aq_srgb_u8`] | sRGB `u8` | derived per distance | distance sweep from sRGB U8 |
+//! | [`LossyEncoder::compute_block_mask_means`] | `f32` planar | — | mask prepass (custom mappings) |
+//! | [`LossyEncoder::compute_aq_field`] | `f32` planar | — | derived field (inspection / tweak) |
+//! | [`block_means_to_qac_field`] | `&[f32]`, distance | — | pure-CPU mapping (custom prepass) |
+//!
+//! ### Quality knobs (free fns / consts)
+//!
+//! | Symbol | Input | Output | Use case |
+//! |---|---|---|---|
 //! | [`quality_to_qac`] | quality 1-100 | `qac_qm` scalar | JPEG-style quality knob |
 //! | [`distance_to_qac`] | libjxl distance | `qac_qm` scalar | direct libjxl semantics |
 //! | [`K_AC_QUANT`] | (constant) | 0.765 | libjxl AC scale at distance=1 |
@@ -546,6 +569,73 @@ impl<R: Runtime> LossyEncoder<R> {
             .collect()
     }
 
+    /// sRGB U8 wrapper for [`Self::encode_one_with_aq`] — turnkey
+    /// content-driven AQ from sRGB U8 input to sRGB U8 output.
+    pub fn encode_one_with_aq_srgb_u8(
+        &self,
+        enc: &GpuEncoder<R>,
+        rgb: &[u8],
+        distance: f32,
+    ) -> Vec<u8> {
+        let n = (self.width as usize) * (self.height as usize);
+        assert_eq!(rgb.len(), n * 3);
+        let to_linear = |c: u8| (c as f32 / 255.0).powf(2.4);
+        let mut r = Vec::with_capacity(n);
+        let mut g = Vec::with_capacity(n);
+        let mut b = Vec::with_capacity(n);
+        for chunk in rgb.chunks_exact(3) {
+            r.push(to_linear(chunk[0]));
+            g.push(to_linear(chunk[1]));
+            b.push(to_linear(chunk[2]));
+        }
+        let (rr, gg, bb) = self.encode_one_with_aq(enc, &r, &g, &b, distance);
+        let to_srgb_u8 = |v: f32| (v.clamp(0.0, 1.0).powf(1.0 / 2.4) * 255.0).round() as u8;
+        let mut out = Vec::with_capacity(n * 3);
+        for i in 0..n {
+            out.push(to_srgb_u8(rr[i]));
+            out.push(to_srgb_u8(gg[i]));
+            out.push(to_srgb_u8(bb[i]));
+        }
+        out
+    }
+
+    /// sRGB U8 batch wrapper for [`Self::encode_many_with_aq`] —
+    /// distance sweep over sRGB U8 input with content-driven AQ on
+    /// every iteration. sRGB↔linear and the mask1x1 prepass both
+    /// happen exactly once.
+    pub fn encode_many_with_aq_srgb_u8(
+        &self,
+        enc: &GpuEncoder<R>,
+        rgb: &[u8],
+        distances: &[f32],
+    ) -> Vec<Vec<u8>> {
+        let n = (self.width as usize) * (self.height as usize);
+        assert_eq!(rgb.len(), n * 3);
+        let to_linear = |c: u8| (c as f32 / 255.0).powf(2.4);
+        let mut r = Vec::with_capacity(n);
+        let mut g = Vec::with_capacity(n);
+        let mut b = Vec::with_capacity(n);
+        for chunk in rgb.chunks_exact(3) {
+            r.push(to_linear(chunk[0]));
+            g.push(to_linear(chunk[1]));
+            b.push(to_linear(chunk[2]));
+        }
+        let outputs = self.encode_many_with_aq(enc, &r, &g, &b, distances);
+        let to_srgb_u8 = |v: f32| (v.clamp(0.0, 1.0).powf(1.0 / 2.4) * 255.0).round() as u8;
+        outputs
+            .into_iter()
+            .map(|(rr, gg, bb)| {
+                let mut out = Vec::with_capacity(n * 3);
+                for i in 0..n {
+                    out.push(to_srgb_u8(rr[i]));
+                    out.push(to_srgb_u8(gg[i]));
+                    out.push(to_srgb_u8(bb[i]));
+                }
+                out
+            })
+            .collect()
+    }
+
     /// Internal pipeline body. Operates on pre-uploaded GPU planes;
     /// downloads the reconstructed RGB at the end.
     /// Pipeline body. Operates on already-padded planes (dimensions
@@ -901,6 +991,24 @@ mod tests {
         assert_eq!(outputs.len(), 3);
         for out in &outputs {
             assert_eq!(out.len(), n * 3);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_lossy_encoder_with_aq_srgb_u8() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy = LossyEncoder::new(&enc, 32, 32);
+        let rgb: Vec<u8> = (0..(32 * 32 * 3))
+            .map(|i| ((i * 13 + 7) % 256) as u8)
+            .collect();
+        let one = lossy.encode_one_with_aq_srgb_u8(&enc, &rgb, 1.0);
+        assert_eq!(one.len(), 32 * 32 * 3);
+        let many = lossy.encode_many_with_aq_srgb_u8(&enc, &rgb, &[0.5, 1.0, 2.0]);
+        assert_eq!(many.len(), 3);
+        for buf in &many {
+            assert_eq!(buf.len(), 32 * 32 * 3);
         }
     }
 
