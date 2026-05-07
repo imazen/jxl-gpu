@@ -119,34 +119,45 @@ fn align_up(n: u32, align: u32) -> u32 {
 /// Map a JPEG-style quality value (1..=100) to the per-block `qac_qm`
 /// scale that [`LossyEncoder`] expects.
 ///
-/// Smooth exponential mapping `qac = 0.5 * 10^((100 - q) / 50)`:
+/// In the libjxl convention this kernel follows, **larger qac means
+/// lighter quantization** (`val = coef * inv_weight * qac`; larger
+/// `val` → above the dead-zone threshold → coefficient survives).
+/// So higher quality maps to higher qac.
 ///
-/// - quality=100 → qac=0.5  (very high quality, light quant)
-/// - quality=90  → qac≈0.79
-/// - quality=75  → qac≈1.58
-/// - quality=50  → qac=5.0
-/// - quality=25  → qac≈15.8
-/// - quality=10  → qac≈31.5
-/// - quality=1   → qac≈49.7
+/// libjxl uses `qac = K_AC_QUANT / distance` with `K_AC_QUANT = 0.765`,
+/// where distance≈1 is high quality and distance≥6 is low. We map
+/// JPEG-quality monotonically to libjxl distance via `distance = 50 / q`.
+///
+/// Resulting qac values:
+///
+/// - quality=100 → distance=0.5  → qac=1.530 (very light quant)
+/// - quality=75  → distance=0.667 → qac=1.148
+/// - quality=50  → distance=1.0  → qac=0.765
+/// - quality=25  → distance=2.0  → qac=0.383
+/// - quality=10  → distance=5.0  → qac=0.153
+/// - quality=1   → distance=50.0 → qac=0.0153
 ///
 /// The mapping is approximate — for actual JPEG XL compatibility,
 /// users targeting specific bitrate or quality should drive
 /// `qac_qm` directly via measurement (e.g., via SSIMULACRA2).
-/// This helper exists for "I want a JPEG-quality knob" callers
-/// who don't want to think about quant scales.
 ///
 /// ```
 /// use jxl_encoder_gpu::lossy_encoder::quality_to_qac;
-/// assert!((quality_to_qac(100.0) - 0.5).abs() < 0.01);
-/// assert!((quality_to_qac(50.0) - 5.0).abs() < 0.01);
-/// // Monotonically decreasing with quality.
-/// assert!(quality_to_qac(100.0) < quality_to_qac(50.0));
+/// // Higher quality → higher qac (lighter quant).
+/// assert!(quality_to_qac(100.0) > quality_to_qac(50.0));
+/// assert!(quality_to_qac(50.0) > quality_to_qac(10.0));
 /// // Out-of-range inputs clamp to [1, 100].
 /// assert_eq!(quality_to_qac(150.0), quality_to_qac(100.0));
+/// assert_eq!(quality_to_qac(-10.0), quality_to_qac(1.0));
 /// ```
 pub fn quality_to_qac(quality: f32) -> f32 {
+    const K_AC_QUANT: f32 = 0.765;
     let q = quality.clamp(1.0, 100.0);
-    0.5 * (10.0_f32).powf((100.0 - q) / 50.0)
+    // Simple monotonic mapping: distance = 50 / q.
+    // q=100 → d=0.5 (high quality), q=50 → d=1.0 (libjxl reference),
+    // q=10 → d=5.0, q=1 → d=50 (degraded).
+    let distance = 50.0 / q;
+    K_AC_QUANT / distance
 }
 
 /// Pad a `width × height` plane up to `padded_width × padded_height` with
@@ -593,21 +604,22 @@ mod tests {
 
     #[test]
     fn test_quality_to_qac_monotonic_and_bounded() {
-        // quality_to_qac should monotonically decrease as quality
-        // increases, and produce reasonable values at the endpoints.
+        // libjxl convention: HIGHER quality → HIGHER qac (lighter quant).
+        // val = coef * inv_w * qac; bigger qac → bigger val → survives
+        // dead-zone threshold.
         let qac_100 = quality_to_qac(100.0);
         let qac_75 = quality_to_qac(75.0);
         let qac_50 = quality_to_qac(50.0);
         let qac_25 = quality_to_qac(25.0);
         let qac_10 = quality_to_qac(10.0);
-        // Monotonically decreasing: lower quality -> higher qac.
-        assert!(qac_100 < qac_75);
-        assert!(qac_75 < qac_50);
-        assert!(qac_50 < qac_25);
-        assert!(qac_25 < qac_10);
-        // Endpoint sanity.
-        assert!(qac_100 < 1.0, "quality=100 should be qac<1, got {qac_100}");
-        assert!(qac_10 > 20.0, "quality=10 should be qac>20, got {qac_10}");
+        // Monotonically increasing: higher quality -> higher qac.
+        assert!(qac_100 > qac_75);
+        assert!(qac_75 >= qac_50, "q=75 ({qac_75}) >= q=50 ({qac_50})");
+        assert!(qac_50 > qac_25);
+        assert!(qac_25 > qac_10);
+        // Endpoint sanity: q=100 above K_AC_QUANT=0.765, q=10 well below.
+        assert!(qac_100 > 1.0, "quality=100 should be qac>1, got {qac_100}");
+        assert!(qac_10 < 0.5, "quality=10 should be qac<0.5, got {qac_10}");
         // Clamp behaviour: out-of-range inputs clamped to [1, 100].
         assert_eq!(quality_to_qac(150.0), quality_to_qac(100.0));
         assert_eq!(quality_to_qac(-10.0), quality_to_qac(1.0));
