@@ -43,6 +43,16 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::encoder::GpuEncoder;
+use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
+use crate::launch::dct32::{
+    dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32,
+};
+use crate::launch::dct4::{
+    dct_4x4_full, dct_4x8_full, dct_8x4_full, idct_4x4_full, idct_4x8_full, idct_8x4_full,
+};
+use crate::launch::dct64::{
+    dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64,
+};
 use crate::launch::dct8::{dct_8x8, idct_8x8};
 use crate::launch::epf::pad_plane;
 use crate::launch::gab::gab_smooth;
@@ -457,6 +467,118 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Internal helper: launch a per-block kernel that takes the same
+    /// `(client, in, out, num_blocks)` shape as all DCT/IDCT launchers.
+    fn run_per_block_kernel<F>(
+        &self,
+        blocks: &GpuBlocks<R>,
+        out_coeffs_per_block: u32,
+        expected_in_coeffs: u32,
+        op_name: &str,
+        launch: F,
+    ) -> GpuBlocks<R>
+    where
+        F: FnOnce(&cubecl::prelude::ComputeClient<R>, Handle, Handle, u32),
+    {
+        assert_eq!(
+            blocks.coeffs_per_block, expected_in_coeffs,
+            "{op_name} expects {expected_in_coeffs} floats/block, got {}",
+            blocks.coeffs_per_block
+        );
+        let n = (blocks.num_blocks as usize) * (out_coeffs_per_block as usize);
+        let h_out = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        launch(self.client_ref(), blocks.handle.clone(), h_out.clone(), blocks.num_blocks);
+        GpuBlocks {
+            handle: h_out,
+            num_blocks: blocks.num_blocks,
+            coeffs_per_block: out_coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    // ── DCT/IDCT 4-family (sub-block DCTs operating on 8×8 input,
+    //    producing 64-float output) ──────────────────────────────────
+    pub fn dct_4x4_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 64, 64, "DCT4x4", dct_4x4_full::<R>)
+    }
+    pub fn idct_4x4_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 64, 64, "IDCT4x4", idct_4x4_full::<R>)
+    }
+    pub fn dct_4x8_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 64, 64, "DCT4x8", dct_4x8_full::<R>)
+    }
+    pub fn idct_4x8_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 64, 64, "IDCT4x8", idct_4x8_full::<R>)
+    }
+    pub fn dct_8x4_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 64, 64, "DCT8x4", dct_8x4_full::<R>)
+    }
+    pub fn idct_8x4_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 64, 64, "IDCT8x4", idct_8x4_full::<R>)
+    }
+
+    // ── DCT/IDCT 16 family (16×8, 8×16, 16×16) ─────────────────────
+    pub fn dct_16x8_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 128, 128, "DCT16x8", dct_16x8::<R>)
+    }
+    pub fn idct_16x8_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 128, 128, "IDCT16x8", idct_16x8::<R>)
+    }
+    pub fn dct_8x16_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 128, 128, "DCT8x16", dct_8x16::<R>)
+    }
+    pub fn idct_8x16_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 128, 128, "IDCT8x16", idct_8x16::<R>)
+    }
+    pub fn dct_16x16_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 256, 256, "DCT16x16", dct_16x16::<R>)
+    }
+    pub fn idct_16x16_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 256, 256, "IDCT16x16", idct_16x16::<R>)
+    }
+
+    // ── DCT/IDCT 32 family (32×16, 16×32, 32×32) ───────────────────
+    pub fn dct_32x16_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 512, 512, "DCT32x16", dct_32x16::<R>)
+    }
+    pub fn idct_32x16_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 512, 512, "IDCT32x16", idct_32x16::<R>)
+    }
+    pub fn dct_16x32_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 512, 512, "DCT16x32", dct_16x32::<R>)
+    }
+    pub fn idct_16x32_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 512, 512, "IDCT16x32", idct_16x32::<R>)
+    }
+    pub fn dct_32x32_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 1024, 1024, "DCT32x32", dct_32x32::<R>)
+    }
+    pub fn idct_32x32_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 1024, 1024, "IDCT32x32", idct_32x32::<R>)
+    }
+
+    // ── DCT/IDCT 64 family (64×32, 32×64, 64×64) ───────────────────
+    pub fn dct_64x32_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 2048, 2048, "DCT64x32", dct_64x32::<R>)
+    }
+    pub fn idct_64x32_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 2048, 2048, "IDCT64x32", idct_64x32::<R>)
+    }
+    pub fn dct_32x64_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 2048, 2048, "DCT32x64", dct_32x64::<R>)
+    }
+    pub fn idct_32x64_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 2048, 2048, "IDCT32x64", idct_32x64::<R>)
+    }
+    pub fn dct_64x64_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 4096, 4096, "DCT64x64", dct_64x64::<R>)
+    }
+    pub fn idct_64x64_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 4096, 4096, "IDCT64x64", idct_64x64::<R>)
+    }
+
     /// Persistent-API mask1x1 field on the Y channel.
     pub fn mask1x1_persistent(&self, y: &GpuPlane<R>) -> GpuPlane<R> {
         let n = y.n_pixels();
@@ -567,6 +689,47 @@ mod tests {
         for &v in &host {
             assert!((v - 0.7).abs() < 1e-5);
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dct_16x16_persistent_roundtrip() {
+        // 16x16 forward + inverse should round-trip.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let nb = 4;
+        let n = nb * 256;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.007).cos()).collect();
+        let blocks = enc.upload_blocks(&input, nb as u32, 256);
+        let coeffs = enc.dct_16x16_persistent(&blocks);
+        assert_eq!(coeffs.coeffs_per_block(), 256);
+        let recon = enc.idct_16x16_persistent(&coeffs);
+        let recon_host = enc.download_blocks(&recon);
+        let mut max_err = 0.0_f32;
+        for i in 0..n {
+            max_err = max_err.max((input[i] - recon_host[i]).abs());
+        }
+        assert!(max_err < 1e-4, "DCT16x16 persistent roundtrip drift: {max_err:.3e}");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dct_32x32_persistent_roundtrip() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let nb = 2;
+        let n = nb * 1024;
+        let input: Vec<f32> = (0..n).map(|i| 0.5 + 0.3 * (i as f32 * 0.003).sin()).collect();
+        let blocks = enc.upload_blocks(&input, nb as u32, 1024);
+        let coeffs = enc.dct_32x32_persistent(&blocks);
+        assert_eq!(coeffs.coeffs_per_block(), 1024);
+        let recon = enc.idct_32x32_persistent(&coeffs);
+        let recon_host = enc.download_blocks(&recon);
+        let mut max_err = 0.0_f32;
+        for i in 0..n {
+            max_err = max_err.max((input[i] - recon_host[i]).abs());
+        }
+        assert!(max_err < 5e-4, "DCT32x32 persistent roundtrip drift: {max_err:.3e}");
     }
 
     #[cfg(feature = "cuda")]
