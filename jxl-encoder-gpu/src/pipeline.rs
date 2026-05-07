@@ -44,10 +44,10 @@ fn _unused_vec() -> Vec<f32> {
 
 use crate::launch::{
     block_l2::block_l2,
+    dct8::{dct_8x8, idct_8x8},
     dct16::{dct_16x16, idct_16x16},
     dct32::{dct_32x32, idct_32x32},
     dct64::{dct_64x64, idct_64x64},
-    dct8::{dct_8x8, idct_8x8},
     quantize::{quantize_dct8, quantize_large},
 };
 
@@ -342,7 +342,14 @@ pub fn compute_cost_grid_dct32x32_single_channel<R: Runtime>(
         4,
         4,
     );
-    dequant_simple_generic::<R>(client, h_quant, weights, h_dequant.clone(), num_blocks, 1024);
+    dequant_simple_generic::<R>(
+        client,
+        h_quant,
+        weights,
+        h_dequant.clone(),
+        num_blocks,
+        1024,
+    );
     idct_32x32::<R>(client, h_dequant, h_recon.clone(), num_blocks);
 
     let n_pixels = nb * 1024;
@@ -406,7 +413,14 @@ pub fn compute_cost_grid_dct64x64_single_channel<R: Runtime>(
         8,
         8,
     );
-    dequant_simple_generic::<R>(client, h_quant, weights, h_dequant.clone(), num_blocks, 4096);
+    dequant_simple_generic::<R>(
+        client,
+        h_quant,
+        weights,
+        h_dequant.clone(),
+        num_blocks,
+        4096,
+    );
     idct_64x64::<R>(client, h_dequant, h_recon.clone(), num_blocks);
 
     let n_pixels = nb * 4096;

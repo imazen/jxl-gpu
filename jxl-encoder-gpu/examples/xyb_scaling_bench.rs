@@ -27,7 +27,10 @@ fn main() {
         .unwrap_or(7); // 1 warmup + 6 sampled, take median
 
     println!("=== XYB scaling: GPU vs CPU ===");
-    println!("Iters per size: {iters} (1 warmup + {} sampled)\n", iters - 1);
+    println!(
+        "Iters per size: {iters} (1 warmup + {} sampled)\n",
+        iters - 1
+    );
     println!(
         "{:>6}  {:>9}  {:>10}  {:>10}  {:>10}  {:>8}  {:>10}",
         "side", "MP", "CPU ms", "CPU MP/s", "GPU ms", "GPU MP/s", "ratio"
@@ -91,9 +94,7 @@ fn main() {
             side, mp, cpu_ms, cpu_mps, gpu_ms, gpu_mps, ratio
         );
     }
-    println!(
-        "\n  ratio = CPU_time / GPU_time. >1.0 = GPU faster. \"GPU>\" marker shows GPU wins."
-    );
+    println!("\n  ratio = CPU_time / GPU_time. >1.0 = GPU faster. \"GPU>\" marker shows GPU wins.");
     println!("  GPU column includes upload+download per call (worst case for round-trip API).");
 }
 

@@ -110,9 +110,8 @@ fn main() {
                 enc.scatter_blocks_persistent(&recon_y_b, side as u32, side as u32, 8, 8);
             let recon_b_p =
                 enc.scatter_blocks_persistent(&recon_b_b, side as u32, side as u32, 8, 8);
-            let (rgb_r, rgb_g, rgb_b) = enc.xyb_to_linear_rgb_planar_persistent(
-                &recon_x_p, &recon_y_p, &recon_b_p,
-            );
+            let (rgb_r, rgb_g, rgb_b) =
+                enc.xyb_to_linear_rgb_planar_persistent(&recon_x_p, &recon_y_p, &recon_b_p);
             let _ = enc.download_plane(&rgb_r);
             let _ = enc.download_plane(&rgb_g);
             let _ = enc.download_plane(&rgb_b);
@@ -147,8 +146,7 @@ fn main() {
             let q_y = enc.quantize_dct8_persistent(&coeffs_y, &weights_g, &qac, &thr);
             let q_b = enc.quantize_dct8_persistent(&coeffs_b, &weights_g, &qac, &thr);
             let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
-                &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g,
-                &qac, &qac, &qac, &xf, &bf,
+                &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g, &qac, &qac, &qac, &xf, &bf,
             );
             // No DC restore in split path either, for fair comparison
             let recon_x_b = enc.idct_8x8_wide_persistent(&dq_x);
@@ -160,9 +158,8 @@ fn main() {
                 enc.scatter_blocks_persistent(&recon_y_b, side as u32, side as u32, 8, 8);
             let recon_b_p =
                 enc.scatter_blocks_persistent(&recon_b_b, side as u32, side as u32, 8, 8);
-            let (rgb_r, rgb_g, rgb_b) = enc.xyb_to_linear_rgb_planar_persistent(
-                &recon_x_p, &recon_y_p, &recon_b_p,
-            );
+            let (rgb_r, rgb_g, rgb_b) =
+                enc.xyb_to_linear_rgb_planar_persistent(&recon_x_p, &recon_y_p, &recon_b_p);
             let _ = enc.download_plane(&rgb_r);
             let _ = enc.download_plane(&rgb_g);
             let _ = enc.download_plane(&rgb_b);
@@ -182,9 +179,7 @@ fn main() {
             side, mp, fused_ms, split_ms, speedup
         );
     }
-    println!(
-        "\n  speedup = split_pipeline_time / fused_pipeline_time."
-    );
+    println!("\n  speedup = split_pipeline_time / fused_pipeline_time.");
     println!(
         "  Fused saves 6 launches per pipeline run (3 channels × 2 stages):\n  fwd: 3 DCT + 3 quantize → 3 fused-DCT-quant\n  inv: 3 dequant + 3 IDCT → 3 fused-dequant-IDCT-Y."
     );

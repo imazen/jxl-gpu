@@ -37,9 +37,7 @@ fn main() {
     const H: usize = 64;
     const NB: usize = (W / 8) * (H / 8); // 64 DCT8 blocks
 
-    println!(
-        "=== full-GPU lossy roundtrip (gather/scatter on-GPU): 64×64 ===\n"
-    );
+    println!("=== full-GPU lossy roundtrip (gather/scatter on-GPU): 64×64 ===\n");
 
     // Synthetic input.
     let mut linear_rgb = Vec::with_capacity(W * H * 3);
@@ -176,10 +174,7 @@ fn main() {
         sum_g / n,
         sum_b_acc / n
     );
-    println!(
-        "RGB max: R={:.4e} G={:.4e} B={:.4e}",
-        max_r, max_g, max_b
-    );
+    println!("RGB max: R={:.4e} G={:.4e} B={:.4e}", max_r, max_g, max_b);
     for v in r_out.iter().chain(&g_out).chain(&b_out) {
         assert!(v.is_finite(), "non-finite pixel: {v}");
     }

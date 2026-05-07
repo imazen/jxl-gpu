@@ -21,7 +21,9 @@ fn main() {
     let n = (side * side) as usize;
     let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.7 * (i as f32 / n as f32)).collect();
     let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.6 * (i as f32 / n as f32)).collect();
-    let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.5 * (((i + 7) % 17) as f32 / 17.0)).collect();
+    let b: Vec<f32> = (0..n)
+        .map(|i| 0.3 + 0.5 * (((i + 7) % 17) as f32 / 17.0))
+        .collect();
 
     // Construct one LossyEncoder per (width, height) — amortizes the
     // static-input upload (gaborish weights, dead-zone thresholds, unit
@@ -57,7 +59,12 @@ fn main() {
     );
     for (i, &qac) in qac_settings.iter().enumerate() {
         let (rec_r_i, _, _) = &outputs[i];
-        let mae: f64 = r.iter().zip(rec_r_i).map(|(a, b)| (a - b).abs() as f64).sum::<f64>() / n as f64;
+        let mae: f64 = r
+            .iter()
+            .zip(rec_r_i)
+            .map(|(a, b)| (a - b).abs() as f64)
+            .sum::<f64>()
+            / n as f64;
         println!("  qac={qac:>5.1}: R MAE = {mae:.4e}");
     }
 

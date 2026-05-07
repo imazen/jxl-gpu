@@ -63,9 +63,7 @@ fn main() {
     let mut cpu_times = Vec::with_capacity(iters);
     for i in 0..iters {
         let t = std::time::Instant::now();
-        jxl_encoder_simd::linear_rgb_to_xyb_batch(
-            &r, &g, &b, &mut cpu_x, &mut cpu_y, &mut cpu_b,
-        );
+        jxl_encoder_simd::linear_rgb_to_xyb_batch(&r, &g, &b, &mut cpu_x, &mut cpu_y, &mut cpu_b);
         let dt = t.elapsed();
         if i > 0 {
             cpu_times.push(dt);
@@ -109,12 +107,22 @@ fn main() {
     );
 
     // ── Parity ─────────────────────────────────────────────────────
-    let max_dx = cpu_x.iter().zip(&gpu_x).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-    let max_dy = cpu_y.iter().zip(&gpu_y).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-    let max_db = cpu_b.iter().zip(&gpu_b_out).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
-    println!(
-        "\nParity:  max|Δ| X={max_dx:.3e}, Y={max_dy:.3e}, B={max_db:.3e}"
-    );
+    let max_dx = cpu_x
+        .iter()
+        .zip(&gpu_x)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    let max_dy = cpu_y
+        .iter()
+        .zip(&gpu_y)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    let max_db = cpu_b
+        .iter()
+        .zip(&gpu_b_out)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    println!("\nParity:  max|Δ| X={max_dx:.3e}, Y={max_dy:.3e}, B={max_db:.3e}");
 
     let ratio = cpu_median.as_secs_f64() / gpu_median.as_secs_f64();
     if ratio > 1.0 {

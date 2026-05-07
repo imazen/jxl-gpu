@@ -48,7 +48,10 @@ fn main() {
     };
 
     println!("=== lossy pipeline throughput: with-IO vs no-IO vs CPU ===");
-    println!("Iters per size: {iters} (1 warmup + {} sampled)\n", iters - 1);
+    println!(
+        "Iters per size: {iters} (1 warmup + {} sampled)\n",
+        iters - 1
+    );
     println!(
         "{:>6}  {:>9}  {:>10}  {:>10}  {:>10}  {:>10}",
         "side", "MP", "with-IO", "no-IO", "vs IO", "vs CPU"
@@ -102,8 +105,7 @@ fn main() {
             let q_y = enc.quantize_dct8_persistent(&coeffs_y, &weights_g, &qac, &thr);
             let q_b = enc.quantize_dct8_persistent(&coeffs_b, &weights_g, &qac, &thr);
             let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
-                &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g,
-                &qac, &qac, &qac, &xf, &bf,
+                &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g, &qac, &qac, &qac, &xf, &bf,
             );
             enc.restore_dc_persistent(&coeffs_x, &dq_x);
             enc.restore_dc_persistent(&coeffs_y, &dq_y);
@@ -117,9 +119,8 @@ fn main() {
                 enc.scatter_blocks_persistent(&recon_y_b, side as u32, side as u32, 8, 8);
             let recon_b_p =
                 enc.scatter_blocks_persistent(&recon_b_b, side as u32, side as u32, 8, 8);
-            let (rgb_r, rgb_g, rgb_b) = enc.xyb_to_linear_rgb_planar_persistent(
-                &recon_x_p, &recon_y_p, &recon_b_p,
-            );
+            let (rgb_r, rgb_g, rgb_b) =
+                enc.xyb_to_linear_rgb_planar_persistent(&recon_x_p, &recon_y_p, &recon_b_p);
             let _ = enc.download_plane(&rgb_r);
             let _ = enc.download_plane(&rgb_g);
             let _ = enc.download_plane(&rgb_b);
@@ -149,8 +150,7 @@ fn main() {
             let q_y = enc.quantize_dct8_persistent(&coeffs_y, &weights_g, &qac, &thr);
             let q_b = enc.quantize_dct8_persistent(&coeffs_b, &weights_g, &qac, &thr);
             let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
-                &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g,
-                &qac, &qac, &qac, &xf, &bf,
+                &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g, &qac, &qac, &qac, &xf, &bf,
             );
             enc.restore_dc_persistent(&coeffs_x, &dq_x);
             enc.restore_dc_persistent(&coeffs_y, &dq_y);
@@ -194,19 +194,48 @@ fn main() {
         for it in 0..iters {
             let t = std::time::Instant::now();
             jxl_encoder_simd::linear_rgb_to_xyb_batch(
-                &r_plane, &g_plane, &b_plane, &mut cpu_xx, &mut cpu_xy, &mut cpu_xb,
+                &r_plane,
+                &g_plane,
+                &b_plane,
+                &mut cpu_xx,
+                &mut cpu_xy,
+                &mut cpu_xb,
             );
             jxl_encoder_simd::gaborish_5x5_channel(
-                &mut cpu_xx, &mut cpu_sx, side, side, weights.wc, weights.wr, weights.wd,
-                weights.w_big_r, weights.wl, weights.w_big_d,
+                &mut cpu_xx,
+                &mut cpu_sx,
+                side,
+                side,
+                weights.wc,
+                weights.wr,
+                weights.wd,
+                weights.w_big_r,
+                weights.wl,
+                weights.w_big_d,
             );
             jxl_encoder_simd::gaborish_5x5_channel(
-                &mut cpu_xy, &mut cpu_sy, side, side, weights.wc, weights.wr, weights.wd,
-                weights.w_big_r, weights.wl, weights.w_big_d,
+                &mut cpu_xy,
+                &mut cpu_sy,
+                side,
+                side,
+                weights.wc,
+                weights.wr,
+                weights.wd,
+                weights.w_big_r,
+                weights.wl,
+                weights.w_big_d,
             );
             jxl_encoder_simd::gaborish_5x5_channel(
-                &mut cpu_xb, &mut cpu_sb, side, side, weights.wc, weights.wr, weights.wd,
-                weights.w_big_r, weights.wl, weights.w_big_d,
+                &mut cpu_xb,
+                &mut cpu_sb,
+                side,
+                side,
+                weights.wc,
+                weights.wr,
+                weights.wd,
+                weights.w_big_r,
+                weights.wl,
+                weights.w_big_d,
             );
             // Block loop for forward+roundtrip
             for by in 0..(side / 8) {
@@ -231,17 +260,43 @@ fn main() {
                     let mut qy = [0_i32; 64];
                     let mut qb = [0_i32; 64];
                     let thr_arr = [0.56_f32, 0.62, 0.62, 0.62];
-                    jxl_encoder_simd::quantize_block_dct8(&cx, &weights_unit, qac_qm_scalar, &thr_arr, &mut qx);
-                    jxl_encoder_simd::quantize_block_dct8(&cy, &weights_unit, qac_qm_scalar, &thr_arr, &mut qy);
-                    jxl_encoder_simd::quantize_block_dct8(&cb, &weights_unit, qac_qm_scalar, &thr_arr, &mut qb);
+                    jxl_encoder_simd::quantize_block_dct8(
+                        &cx,
+                        &weights_unit,
+                        qac_qm_scalar,
+                        &thr_arr,
+                        &mut qx,
+                    );
+                    jxl_encoder_simd::quantize_block_dct8(
+                        &cy,
+                        &weights_unit,
+                        qac_qm_scalar,
+                        &thr_arr,
+                        &mut qy,
+                    );
+                    jxl_encoder_simd::quantize_block_dct8(
+                        &cb,
+                        &weights_unit,
+                        qac_qm_scalar,
+                        &thr_arr,
+                        &mut qb,
+                    );
                     let mut dx = [0.0_f32; 64];
                     let mut dy = [0.0_f32; 64];
                     let mut db = [0.0_f32; 64];
                     jxl_encoder_simd::dequant_block_dct8(
-                        &qx, &qy, &qb, &weights_unit, &weights_unit, &weights_unit,
+                        &qx,
+                        &qy,
+                        &qb,
+                        &weights_unit,
+                        &weights_unit,
+                        &weights_unit,
                         [qac_qm_scalar, qac_qm_scalar, qac_qm_scalar],
-                        0.0, 0.0,
-                        &mut dx, &mut dy, &mut db,
+                        0.0,
+                        0.0,
+                        &mut dx,
+                        &mut dy,
+                        &mut db,
                     );
                     dx[0] = cx[0];
                     dy[0] = cy[0];
@@ -262,7 +317,13 @@ fn main() {
                 }
             }
             jxl_encoder_simd::xyb_to_linear_rgb_planar(
-                &cpu_xx, &cpu_xy, &cpu_xb, &mut cpu_r_out, &mut cpu_g_out, &mut cpu_b_out, n,
+                &cpu_xx,
+                &cpu_xy,
+                &cpu_xb,
+                &mut cpu_r_out,
+                &mut cpu_g_out,
+                &mut cpu_b_out,
+                n,
             );
             let dt = t.elapsed();
             if it > 0 {

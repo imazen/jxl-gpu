@@ -42,26 +42,22 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::encoder::GpuEncoder;
-use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
 use crate::launch::dc_restore::restore_dc;
-use crate::launch::dequant::dequant_dct8;
-use crate::launch::fused_dct_quant::{dct8_quantize_fused_wide, dequant_idct8_fused_y_wide};
-use crate::launch::gather::{gather_blocks, scatter_blocks};
-use crate::launch::quantize::quantize_dct8;
-use crate::launch::dct32::{
-    dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32,
-};
 use crate::launch::dct4::{
     dct_4x4_full, dct_4x8_full, dct_8x4_full, idct_4x4_full, idct_4x8_full, idct_8x4_full,
 };
-use crate::launch::dct64::{
-    dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64,
-};
 use crate::launch::dct8::{dct_8x8, dct_8x8_wide, idct_8x8, idct_8x8_wide};
+use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
+use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
+use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
+use crate::launch::dequant::dequant_dct8;
 use crate::launch::epf::pad_plane;
+use crate::launch::fused_dct_quant::{dct8_quantize_fused_wide, dequant_idct8_fused_y_wide};
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
+use crate::launch::gather::{gather_blocks, scatter_blocks};
 use crate::launch::mask1x1::mask1x1;
+use crate::launch::quantize::quantize_dct8;
 use crate::launch::xyb::{xyb_forward, xyb_inverse};
 
 /// Typed handle to a GPU-resident `f32` plane. Owns the underlying
@@ -175,7 +171,12 @@ impl<R: Runtime> GpuEncoder<R> {
     /// Upload a host `f32` plane to GPU, returning a `GpuPlane`.
     pub fn upload_plane(&self, data: &[f32], width: u32, height: u32) -> GpuPlane<R> {
         let n = (width as usize) * (height as usize);
-        assert_eq!(data.len(), n, "data length {} != width*height {n}", data.len());
+        assert_eq!(
+            data.len(),
+            n,
+            "data length {} != width*height {n}",
+            data.len()
+        );
         let handle = self.client_ref().create_from_slice(f32::as_bytes(data));
         GpuPlane {
             handle,
@@ -189,9 +190,7 @@ impl<R: Runtime> GpuEncoder<R> {
     /// a destination for kernels that take pre-allocated outputs.
     pub fn alloc_plane(&self, width: u32, height: u32) -> GpuPlane<R> {
         let n = (width as usize) * (height as usize);
-        let handle = self
-            .client_ref()
-            .empty(n * 4);
+        let handle = self.client_ref().empty(n * 4);
         GpuPlane {
             handle,
             width,
@@ -202,7 +201,10 @@ impl<R: Runtime> GpuEncoder<R> {
 
     /// Download a GPU plane back to host memory.
     pub fn download_plane(&self, plane: &GpuPlane<R>) -> Vec<f32> {
-        let bytes = self.client_ref().read_one(plane.handle.clone()).expect("download");
+        let bytes = self
+            .client_ref()
+            .read_one(plane.handle.clone())
+            .expect("download");
         f32::from_bytes(&bytes).to_vec()
     }
 
@@ -221,15 +223,9 @@ impl<R: Runtime> GpuEncoder<R> {
         let w = r.width;
         let h = r.height;
         let n = r.n_pixels();
-        let h_x = self
-            .client_ref()
-            .empty(n * 4);
-        let h_y = self
-            .client_ref()
-            .empty(n * 4);
-        let h_b_out = self
-            .client_ref()
-            .empty(n * 4);
+        let h_x = self.client_ref().empty(n * 4);
+        let h_y = self.client_ref().empty(n * 4);
+        let h_b_out = self.client_ref().empty(n * 4);
         xyb_forward::<R>(
             self.client_ref(),
             r.handle.clone(),
@@ -272,15 +268,9 @@ impl<R: Runtime> GpuEncoder<R> {
         let w = x.width;
         let h = x.height;
         let n = x.n_pixels();
-        let h_r = self
-            .client_ref()
-            .empty(n * 4);
-        let h_g = self
-            .client_ref()
-            .empty(n * 4);
-        let h_b = self
-            .client_ref()
-            .empty(n * 4);
+        let h_r = self.client_ref().empty(n * 4);
+        let h_g = self.client_ref().empty(n * 4);
+        let h_b = self.client_ref().empty(n * 4);
         xyb_inverse::<R>(
             self.client_ref(),
             x.handle.clone(),
@@ -321,9 +311,7 @@ impl<R: Runtime> GpuEncoder<R> {
         weights: &GaborishWeights,
     ) -> GpuPlane<R> {
         let n = plane.n_pixels();
-        let h_out = self
-            .client_ref()
-            .empty(n * 4);
+        let h_out = self.client_ref().empty(n * 4);
         gaborish_5x5::<R>(
             self.client_ref(),
             plane.handle.clone(),
@@ -355,9 +343,7 @@ impl<R: Runtime> GpuEncoder<R> {
         w2: f32,
     ) -> GpuPlane<R> {
         let n = plane.n_pixels();
-        let h_out = self
-            .client_ref()
-            .empty(n * 4);
+        let h_out = self.client_ref().empty(n * 4);
         gab_smooth::<R>(
             self.client_ref(),
             plane.handle.clone(),
@@ -382,9 +368,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let dst_w = plane.width + 2 * pad;
         let dst_h = plane.height + 2 * pad;
         let dst_n = (dst_w as usize) * (dst_h as usize);
-        let h_out = self
-            .client_ref()
-            .empty(dst_n * 4);
+        let h_out = self.client_ref().empty(dst_n * 4);
         pad_plane::<R>(
             self.client_ref(),
             plane.handle.clone(),
@@ -429,9 +413,7 @@ impl<R: Runtime> GpuEncoder<R> {
     /// Allocate zero-filled per-block GPU buffer.
     pub fn alloc_blocks(&self, num_blocks: u32, coeffs_per_block: u32) -> GpuBlocks<R> {
         let n = (num_blocks as usize) * (coeffs_per_block as usize);
-        let handle = self
-            .client_ref()
-            .empty(n * 4);
+        let handle = self.client_ref().empty(n * 4);
         GpuBlocks {
             handle,
             num_blocks,
@@ -442,7 +424,10 @@ impl<R: Runtime> GpuEncoder<R> {
 
     /// Download a `GpuBlocks` back to host memory.
     pub fn download_blocks(&self, blocks: &GpuBlocks<R>) -> Vec<f32> {
-        let bytes = self.client_ref().read_one(blocks.handle.clone()).expect("download");
+        let bytes = self
+            .client_ref()
+            .read_one(blocks.handle.clone())
+            .expect("download");
         f32::from_bytes(&bytes).to_vec()
     }
 
@@ -455,9 +440,7 @@ impl<R: Runtime> GpuEncoder<R> {
             blocks.coeffs_per_block
         );
         let n = blocks.total_floats();
-        let h_out = self
-            .client_ref()
-            .empty(n * 4);
+        let h_out = self.client_ref().empty(n * 4);
         dct_8x8::<R>(
             self.client_ref(),
             blocks.handle.clone(),
@@ -480,9 +463,7 @@ impl<R: Runtime> GpuEncoder<R> {
             coeffs.coeffs_per_block
         );
         let n = coeffs.total_floats();
-        let h_out = self
-            .client_ref()
-            .empty(n * 4);
+        let h_out = self.client_ref().empty(n * 4);
         idct_8x8::<R>(
             self.client_ref(),
             coeffs.handle.clone(),
@@ -503,9 +484,7 @@ impl<R: Runtime> GpuEncoder<R> {
     pub fn dct_8x8_wide_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
         assert_eq!(blocks.coeffs_per_block, 64);
         let n = blocks.total_floats();
-        let h_out = self
-            .client_ref()
-            .empty(n * 4);
+        let h_out = self.client_ref().empty(n * 4);
         dct_8x8_wide::<R>(
             self.client_ref(),
             blocks.handle.clone(),
@@ -524,9 +503,7 @@ impl<R: Runtime> GpuEncoder<R> {
     pub fn idct_8x8_wide_persistent(&self, coeffs: &GpuBlocks<R>) -> GpuBlocks<R> {
         assert_eq!(coeffs.coeffs_per_block, 64);
         let n = coeffs.total_floats();
-        let h_out = self
-            .client_ref()
-            .empty(n * 4);
+        let h_out = self.client_ref().empty(n * 4);
         idct_8x8_wide::<R>(
             self.client_ref(),
             coeffs.handle.clone(),
@@ -567,10 +544,10 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(qac_qm.len() as u32, pixels.num_blocks);
         let n = pixels.total_floats();
         let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
-        let h_thr = self.client_ref().create_from_slice(f32::as_bytes(thresholds));
-        let h_out = self
+        let h_thr = self
             .client_ref()
-            .empty(n * 4);
+            .create_from_slice(f32::as_bytes(thresholds));
+        let h_out = self.client_ref().empty(n * 4);
         dct8_quantize_fused_wide::<R>(
             self.client_ref(),
             pixels.handle.clone(),
@@ -610,9 +587,7 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(qac_qm.len() as u32, quant.num_blocks);
         let n = (quant.num_blocks as usize) * 64;
         let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
-        let h_out = self
-            .client_ref()
-            .empty(n * 4);
+        let h_out = self.client_ref().empty(n * 4);
         dequant_idct8_fused_y_wide::<R>(
             self.client_ref(),
             quant.handle.clone(),
@@ -648,10 +623,13 @@ impl<R: Runtime> GpuEncoder<R> {
             blocks.coeffs_per_block
         );
         let n = (blocks.num_blocks as usize) * (out_coeffs_per_block as usize);
-        let h_out = self
-            .client_ref()
-            .empty(n * 4);
-        launch(self.client_ref(), blocks.handle.clone(), h_out.clone(), blocks.num_blocks);
+        let h_out = self.client_ref().empty(n * 4);
+        launch(
+            self.client_ref(),
+            blocks.handle.clone(),
+            h_out.clone(),
+            blocks.num_blocks,
+        );
         GpuBlocks {
             handle: h_out,
             num_blocks: blocks.num_blocks,
@@ -744,9 +722,7 @@ impl<R: Runtime> GpuEncoder<R> {
     /// Allocate zero-filled per-block `i32` GPU buffer.
     pub fn alloc_i32_blocks(&self, num_blocks: u32, coeffs_per_block: u32) -> GpuI32Blocks<R> {
         let n = (num_blocks as usize) * (coeffs_per_block as usize);
-        let handle = self
-            .client_ref()
-            .empty(n * 4);
+        let handle = self.client_ref().empty(n * 4);
         GpuI32Blocks {
             handle,
             num_blocks,
@@ -757,7 +733,10 @@ impl<R: Runtime> GpuEncoder<R> {
 
     /// Download a `GpuI32Blocks` back to host memory.
     pub fn download_i32_blocks(&self, blocks: &GpuI32Blocks<R>) -> Vec<i32> {
-        let bytes = self.client_ref().read_one(blocks.handle.clone()).expect("download");
+        let bytes = self
+            .client_ref()
+            .read_one(blocks.handle.clone())
+            .expect("download");
         i32::from_bytes(&bytes).to_vec()
     }
 
@@ -783,10 +762,10 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(qac_qm.len() as u32, coeffs.num_blocks);
         let n = coeffs.total_floats();
         let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
-        let h_thr = self.client_ref().create_from_slice(f32::as_bytes(thresholds));
-        let h_out = self
+        let h_thr = self
             .client_ref()
-            .empty(n * 4);
+            .create_from_slice(f32::as_bytes(thresholds));
+        let h_out = self.client_ref().empty(n * 4);
         quantize_dct8::<R>(
             self.client_ref(),
             coeffs.handle.clone(),
@@ -846,15 +825,9 @@ impl<R: Runtime> GpuEncoder<R> {
         let h_qmb = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_b));
         let h_xf = self.client_ref().create_from_slice(f32::as_bytes(x_factor));
         let h_bf = self.client_ref().create_from_slice(f32::as_bytes(b_factor));
-        let h_ox = self
-            .client_ref()
-            .empty(n * 4);
-        let h_oy = self
-            .client_ref()
-            .empty(n * 4);
-        let h_ob = self
-            .client_ref()
-            .empty(n * 4);
+        let h_ox = self.client_ref().empty(n * 4);
+        let h_oy = self.client_ref().empty(n * 4);
+        let h_ob = self.client_ref().empty(n * 4);
         dequant_dct8::<R>(
             self.client_ref(),
             quant_x.handle.clone(),
@@ -900,16 +873,22 @@ impl<R: Runtime> GpuEncoder<R> {
         tile_w: u32,
         tile_h: u32,
     ) -> GpuBlocks<R> {
-        assert!(plane.width % tile_w == 0, "plane width {} not multiple of tile_w {tile_w}", plane.width);
-        assert!(plane.height % tile_h == 0, "plane height {} not multiple of tile_h {tile_h}", plane.height);
+        assert!(
+            plane.width % tile_w == 0,
+            "plane width {} not multiple of tile_w {tile_w}",
+            plane.width
+        );
+        assert!(
+            plane.height % tile_h == 0,
+            "plane height {} not multiple of tile_h {tile_h}",
+            plane.height
+        );
         let blocks_per_row = plane.width / tile_w;
         let blocks_per_col = plane.height / tile_h;
         let num_blocks = blocks_per_row * blocks_per_col;
         let coeffs_per_block = tile_w * tile_h;
         let n_out = (num_blocks as usize) * (coeffs_per_block as usize);
-        let h_out = self
-            .client_ref()
-            .empty(n_out * 4);
+        let h_out = self.client_ref().empty(n_out * 4);
         gather_blocks::<R>(
             self.client_ref(),
             plane.handle.clone(),
@@ -948,9 +927,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let blocks_per_col = height / tile_h;
         assert_eq!(blocks.num_blocks, blocks_per_row * blocks_per_col);
         let n_plane = (width as usize) * (height as usize);
-        let h_out = self
-            .client_ref()
-            .empty(n_plane * 4);
+        let h_out = self.client_ref().empty(n_plane * 4);
         scatter_blocks::<R>(
             self.client_ref(),
             blocks.handle.clone(),
@@ -998,9 +975,7 @@ impl<R: Runtime> GpuEncoder<R> {
     /// Persistent-API mask1x1 field on the Y channel.
     pub fn mask1x1_persistent(&self, y: &GpuPlane<R>) -> GpuPlane<R> {
         let n = y.n_pixels();
-        let h_out = self
-            .client_ref()
-            .empty(n * 4);
+        let h_out = self.client_ref().empty(n * 4);
         mask1x1::<R>(
             self.client_ref(),
             y.handle.clone(),
@@ -1131,7 +1106,10 @@ mod tests {
         let q_split = enc.quantize_dct8_persistent(&coeffs, &w_blocks, &qac, &thr);
         let q_split_host = enc.download_i32_blocks(&q_split);
 
-        assert_eq!(q_fused_host, q_split_host, "fused DCT+quant must match split");
+        assert_eq!(
+            q_fused_host, q_split_host,
+            "fused DCT+quant must match split"
+        );
     }
 
     #[cfg(feature = "cuda")]
@@ -1152,7 +1130,9 @@ mod tests {
         let _ = q_blocks;
 
         // Fused
-        let q_handle = enc.client_ref_for_test().create_from_slice(i32::as_bytes(&quant));
+        let q_handle = enc
+            .client_ref_for_test()
+            .create_from_slice(i32::as_bytes(&quant));
         let _ = q_handle;
         let q_input = jxl_encoder_gpu_test_helpers_no_op();
 
@@ -1185,7 +1165,9 @@ mod tests {
         num_blocks: u32,
     ) -> GpuI32Blocks<R> {
         use cubecl::prelude::*;
-        let handle = enc.client_ref_for_test().create_from_slice(i32::as_bytes(data));
+        let handle = enc
+            .client_ref_for_test()
+            .create_from_slice(i32::as_bytes(data));
         GpuI32Blocks {
             handle,
             num_blocks,
@@ -1211,7 +1193,10 @@ mod tests {
         for i in 0..n {
             max_err = max_err.max((input[i] - recon_host[i]).abs());
         }
-        assert!(max_err < 5e-5, "wide DCT8 persistent roundtrip drift: {max_err:.3e}");
+        assert!(
+            max_err < 5e-5,
+            "wide DCT8 persistent roundtrip drift: {max_err:.3e}"
+        );
     }
 
     #[cfg(feature = "cuda")]
@@ -1232,7 +1217,10 @@ mod tests {
         for i in 0..n {
             max_err = max_err.max((input[i] - recon_host[i]).abs());
         }
-        assert!(max_err < 1e-4, "DCT16x16 persistent roundtrip drift: {max_err:.3e}");
+        assert!(
+            max_err < 1e-4,
+            "DCT16x16 persistent roundtrip drift: {max_err:.3e}"
+        );
     }
 
     #[cfg(feature = "cuda")]
@@ -1242,7 +1230,9 @@ mod tests {
         let enc: GpuEncoder<B> = GpuEncoder::new();
         let nb = 2;
         let n = nb * 1024;
-        let input: Vec<f32> = (0..n).map(|i| 0.5 + 0.3 * (i as f32 * 0.003).sin()).collect();
+        let input: Vec<f32> = (0..n)
+            .map(|i| 0.5 + 0.3 * (i as f32 * 0.003).sin())
+            .collect();
         let blocks = enc.upload_blocks(&input, nb as u32, 1024);
         let coeffs = enc.dct_32x32_persistent(&blocks);
         assert_eq!(coeffs.coeffs_per_block(), 1024);
@@ -1252,7 +1242,10 @@ mod tests {
         for i in 0..n {
             max_err = max_err.max((input[i] - recon_host[i]).abs());
         }
-        assert!(max_err < 5e-4, "DCT32x32 persistent roundtrip drift: {max_err:.3e}");
+        assert!(
+            max_err < 5e-4,
+            "DCT32x32 persistent roundtrip drift: {max_err:.3e}"
+        );
     }
 
     #[cfg(feature = "cuda")]
@@ -1347,7 +1340,7 @@ mod tests {
             src_data[b * 64] = 42.0; // DC
             for k in 1..64 {
                 src_data[b * 64 + k] = 99.0; // AC (should NOT propagate)
-                dst_data[b * 64 + k] = 7.0;  // dst AC (must remain)
+                dst_data[b * 64 + k] = 7.0; // dst AC (must remain)
             }
         }
         let src = enc.upload_blocks(&src_data, nb, cpb);
@@ -1357,7 +1350,11 @@ mod tests {
         for b in 0..nb as usize {
             assert_eq!(dst_after[b * 64], 42.0, "DC not restored at block {b}");
             for k in 1..64 {
-                assert_eq!(dst_after[b * 64 + k], 7.0, "AC drifted at block {b} slot {k}");
+                assert_eq!(
+                    dst_after[b * 64 + k],
+                    7.0,
+                    "AC drifted at block {b} slot {k}"
+                );
             }
         }
     }
@@ -1455,6 +1452,9 @@ mod tests {
             max_err = max_err.max((g[i] - g2[i]).abs());
             max_err = max_err.max((b[i] - b2[i]).abs());
         }
-        assert!(max_err < 5e-4, "XYB roundtrip via persistent API drift: {max_err:.3e}");
+        assert!(
+            max_err < 5e-4,
+            "XYB roundtrip via persistent API drift: {max_err:.3e}"
+        );
     }
 }

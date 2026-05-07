@@ -50,10 +50,20 @@ fn main() {
         (norm * K_GABORISH[3]) as f32,
         (norm * K_GABORISH[4]) as f32,
     );
-    let weights = GaborishWeights { wc, wr, wd, w_big_r, wl, w_big_d };
+    let weights = GaborishWeights {
+        wc,
+        wr,
+        wd,
+        w_big_r,
+        wl,
+        w_big_d,
+    };
 
     println!("=== full lossy pipeline throughput: CPU vs full-GPU ===");
-    println!("Iters per size: {iters} (1 warmup + {} sampled)\n", iters - 1);
+    println!(
+        "Iters per size: {iters} (1 warmup + {} sampled)\n",
+        iters - 1
+    );
     println!(
         "{:>6}  {:>9}  {:>10}  {:>10}  {:>10}  {:>8}  {:>10}",
         "side", "MP", "CPU ms", "GPU ms", "ratio", "max|Δ|R", "throughput"
@@ -122,12 +132,9 @@ fn main() {
                     for dy in 0..8 {
                         let src_off = (by * 8 + dy) * side + bx * 8;
                         let dst_off = dy * 8;
-                        bx_block[dst_off..dst_off + 8]
-                            .copy_from_slice(&xx[src_off..src_off + 8]);
-                        by_block[dst_off..dst_off + 8]
-                            .copy_from_slice(&xy[src_off..src_off + 8]);
-                        bb_block[dst_off..dst_off + 8]
-                            .copy_from_slice(&xb[src_off..src_off + 8]);
+                        bx_block[dst_off..dst_off + 8].copy_from_slice(&xx[src_off..src_off + 8]);
+                        by_block[dst_off..dst_off + 8].copy_from_slice(&xy[src_off..src_off + 8]);
+                        bb_block[dst_off..dst_off + 8].copy_from_slice(&xb[src_off..src_off + 8]);
                     }
                     let mut cx = [0.0_f32; 64];
                     let mut cy = [0.0_f32; 64];
@@ -139,16 +146,43 @@ fn main() {
                     let mut qx = [0_i32; 64];
                     let mut qy = [0_i32; 64];
                     let mut qb = [0_i32; 64];
-                    jxl_encoder_simd::quantize_block_dct8(&cx, &weights_unit, qac_qm, &thr, &mut qx);
-                    jxl_encoder_simd::quantize_block_dct8(&cy, &weights_unit, qac_qm, &thr, &mut qy);
-                    jxl_encoder_simd::quantize_block_dct8(&cb, &weights_unit, qac_qm, &thr, &mut qb);
+                    jxl_encoder_simd::quantize_block_dct8(
+                        &cx,
+                        &weights_unit,
+                        qac_qm,
+                        &thr,
+                        &mut qx,
+                    );
+                    jxl_encoder_simd::quantize_block_dct8(
+                        &cy,
+                        &weights_unit,
+                        qac_qm,
+                        &thr,
+                        &mut qy,
+                    );
+                    jxl_encoder_simd::quantize_block_dct8(
+                        &cb,
+                        &weights_unit,
+                        qac_qm,
+                        &thr,
+                        &mut qb,
+                    );
                     let mut dx = [0.0_f32; 64];
                     let mut dy = [0.0_f32; 64];
                     let mut db = [0.0_f32; 64];
                     jxl_encoder_simd::dequant_block_dct8(
-                        &qx, &qy, &qb, &weights_unit, &weights_unit, &weights_unit,
-                        [qac_qm, qac_qm, qac_qm], 0.0, 0.0,
-                        &mut dx, &mut dy, &mut db,
+                        &qx,
+                        &qy,
+                        &qb,
+                        &weights_unit,
+                        &weights_unit,
+                        &weights_unit,
+                        [qac_qm, qac_qm, qac_qm],
+                        0.0,
+                        0.0,
+                        &mut dx,
+                        &mut dy,
+                        &mut db,
                     );
                     // DC restore (encoder dc_coding equivalent: passthrough).
                     dx[0] = cx[0];
@@ -171,7 +205,13 @@ fn main() {
             }
             // 4. XYB → linear RGB
             jxl_encoder_simd::xyb_to_linear_rgb_planar(
-                &xx, &xy, &xb, &mut cpu_r_out, &mut cpu_g_out, &mut cpu_b_out, n,
+                &xx,
+                &xy,
+                &xb,
+                &mut cpu_r_out,
+                &mut cpu_g_out,
+                &mut cpu_b_out,
+                n,
             );
 
             let dt = t.elapsed();
@@ -221,8 +261,8 @@ fn main() {
             let q_b = enc.quantize_dct8_persistent(&coeffs_b, &weights_g, &qac_vec, &thr);
             // Dequant
             let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
-                &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g,
-                &qac_vec, &qac_vec, &qac_vec, &xf, &bf,
+                &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g, &qac_vec, &qac_vec, &qac_vec,
+                &xf, &bf,
             );
             // DC restore on-GPU
             enc.restore_dc_persistent(&coeffs_x, &dq_x);

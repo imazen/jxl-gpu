@@ -110,7 +110,10 @@ fn main() {
         (w as f64 * h as f64 / 1e6),
         dt_gpu.as_secs_f64() * 1000.0
     );
-    println!("  Sample: X[0]={:.4}, Y[0]={:.4}, B[0]={:.4}", xx[0], xy[0], xb[0]);
+    println!(
+        "  Sample: X[0]={:.4}, Y[0]={:.4}, B[0]={:.4}",
+        xx[0], xy[0], xb[0]
+    );
 }
 
 #[cfg(not(all(feature = "cuda", feature = "encoder")))]

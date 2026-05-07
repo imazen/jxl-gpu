@@ -7,11 +7,11 @@
 pub mod adaptive_quant;
 pub mod block_l2;
 pub mod cfl;
+pub mod dc_restore;
 pub mod dct16;
 pub mod dct32;
 pub mod dct4;
 pub mod dct64;
-pub mod dc_restore;
 pub mod dct8;
 pub mod dequant;
 pub mod entropy;

@@ -28,7 +28,10 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(2048);
-    let n_settings: usize = std::env::var("SETTINGS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let n_settings: usize = std::env::var("SETTINGS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
     let iters: usize = std::env::var("ITERS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -73,9 +76,7 @@ fn main() {
     let weights_g = enc.upload_blocks(&vec![1.0_f32; nb * 64], nb as u32, 64);
     // 5 different qac settings simulating a quality sweep (lower = higher
     // quality / less aggressive quant).
-    let qac_settings: Vec<f32> = (0..n_settings)
-        .map(|i| 1.0 + (i as f32) * 0.75)
-        .collect();
+    let qac_settings: Vec<f32> = (0..n_settings).map(|i| 1.0 + (i as f32) * 0.75).collect();
     let xf = vec![0.0_f32; nb];
     let bf = vec![0.0_f32; nb];
     let thr = [0.56_f32, 0.62, 0.62, 0.62];
@@ -99,8 +100,8 @@ fn main() {
         let q_y = enc.quantize_dct8_persistent(&coeffs_y, &weights_g, &qac_vec, &thr);
         let q_b = enc.quantize_dct8_persistent(&coeffs_b, &weights_g, &qac_vec, &thr);
         let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
-            &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g,
-            &qac_vec, &qac_vec, &qac_vec, &xf, &bf,
+            &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g, &qac_vec, &qac_vec, &qac_vec,
+            &xf, &bf,
         );
         enc.restore_dc_persistent(&coeffs_x, &dq_x);
         enc.restore_dc_persistent(&coeffs_y, &dq_y);
@@ -108,12 +109,9 @@ fn main() {
         let recon_x_b = enc.idct_8x8_wide_persistent(&dq_x);
         let recon_y_b = enc.idct_8x8_wide_persistent(&dq_y);
         let recon_b_b = enc.idct_8x8_wide_persistent(&dq_b);
-        let recon_x_p =
-            enc.scatter_blocks_persistent(&recon_x_b, side as u32, side as u32, 8, 8);
-        let recon_y_p =
-            enc.scatter_blocks_persistent(&recon_y_b, side as u32, side as u32, 8, 8);
-        let recon_b_p =
-            enc.scatter_blocks_persistent(&recon_b_b, side as u32, side as u32, 8, 8);
+        let recon_x_p = enc.scatter_blocks_persistent(&recon_x_b, side as u32, side as u32, 8, 8);
+        let recon_y_p = enc.scatter_blocks_persistent(&recon_y_b, side as u32, side as u32, 8, 8);
+        let recon_b_p = enc.scatter_blocks_persistent(&recon_b_b, side as u32, side as u32, 8, 8);
         let (rgb_r, rgb_g, rgb_b) =
             enc.xyb_to_linear_rgb_planar_persistent(&recon_x_p, &recon_y_p, &recon_b_p);
         let _ = enc.download_plane(&rgb_r);

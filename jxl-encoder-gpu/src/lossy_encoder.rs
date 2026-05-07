@@ -87,16 +87,16 @@ impl<R: Runtime> LossyEncoder<R> {
     /// Construct a lossy encoder for a given image size.
     /// Width and height must be multiples of 8.
     pub fn new(enc: &GpuEncoder<R>, width: u32, height: u32) -> Self {
-        assert!(width % 8 == 0 && height % 8 == 0, "width/height must be multiples of 8");
+        assert!(
+            width % 8 == 0 && height % 8 == 0,
+            "width/height must be multiples of 8"
+        );
         let num_blocks = (width / 8) * (height / 8);
         // Unit weights — one float per coefficient. Real encoder would
         // upload per-strategy quant matrix; for the demo path unit
         // weights × per-block scale suffices.
-        let weights_g = enc.upload_blocks(
-            &vec![1.0_f32; (num_blocks as usize) * 64],
-            num_blocks,
-            64,
-        );
+        let weights_g =
+            enc.upload_blocks(&vec![1.0_f32; (num_blocks as usize) * 64], num_blocks, 64);
         Self {
             width,
             height,

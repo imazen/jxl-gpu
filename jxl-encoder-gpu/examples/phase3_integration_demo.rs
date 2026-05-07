@@ -28,9 +28,9 @@ fn main() {
 fn main() {
     use cubecl::prelude::*;
     use jxl_encoder_gpu::pipeline::{
-        Partition32x32, compute_cost_grid_dct16x16_single_channel,
-        compute_cost_grid_dct32x32_single_channel,
-        compute_cost_grid_dct8_single_channel, select_partitions_32x32,
+        Partition32x32, compute_cost_grid_dct8_single_channel,
+        compute_cost_grid_dct16x16_single_channel, compute_cost_grid_dct32x32_single_channel,
+        select_partitions_32x32,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -231,9 +231,19 @@ fn main() {
     );
 
     println!("Phase 3 end-to-end demo:");
-    println!("  Image: {}x{} pixels = {}x{} 32x32 regions", XB8 * 8, YB8 * 8, XB32, YB32);
-    println!("  Cost grids: DCT8={} entries, DCT16x16={}, DCT32x32={}",
-        cost_dct8.len(), cost_dct16x16.len(), cost_dct32x32.len());
+    println!(
+        "  Image: {}x{} pixels = {}x{} 32x32 regions",
+        XB8 * 8,
+        YB8 * 8,
+        XB32,
+        YB32
+    );
+    println!(
+        "  Cost grids: DCT8={} entries, DCT16x16={}, DCT32x32={}",
+        cost_dct8.len(),
+        cost_dct16x16.len(),
+        cost_dct32x32.len()
+    );
     println!("  Partition decisions per 32x32 region:");
     for (i, p) in partitions.iter().enumerate() {
         let rx = i % (XB32 as usize);

@@ -37,17 +37,13 @@ use jxl_encoder::api::{LossyConfig, PixelLayout};
 use crate::launch::adaptive_quant::{compute_pre_erosion, per_block_modulations};
 use crate::launch::block_l2::block_l2;
 use crate::launch::cfl::{find_best_multiplier, find_best_multiplier_newton};
-use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
-use crate::launch::dct32::{
-    dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32,
-};
 use crate::launch::dct4::{
     dct_4x4_full, dct_4x8_full, dct_8x4_full, idct_4x4_full, idct_4x8_full, idct_8x4_full,
 };
-use crate::launch::dct64::{
-    dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64,
-};
 use crate::launch::dct8::{dct_8x8, idct_8x8};
+use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
+use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
+use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
 use crate::launch::dequant::dequant_dct8;
 use crate::launch::entropy::entropy_coeffs_pixel;
 use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
@@ -363,17 +359,13 @@ impl<R: Runtime> GpuEncoder<R> {
         let h_c = self.client.create_from_slice(f32::as_bytes(coeffs));
         let h_w = self.client.create_from_slice(f32::as_bytes(weights));
         let h_q = self.client.create_from_slice(f32::as_bytes(qac_qm));
-        let h_t = self.client.create_from_slice(f32::as_bytes(&thresholds[..]));
-        let h_o = self.client.create_from_slice(i32::as_bytes(&vec![0_i32; n]));
-        quantize_dct8::<R>(
-            &self.client,
-            h_c,
-            h_w,
-            h_q,
-            h_t,
-            h_o.clone(),
-            num_blocks,
-        );
+        let h_t = self
+            .client
+            .create_from_slice(f32::as_bytes(&thresholds[..]));
+        let h_o = self
+            .client
+            .create_from_slice(i32::as_bytes(&vec![0_i32; n]));
+        quantize_dct8::<R>(&self.client, h_c, h_w, h_q, h_t, h_o.clone(), num_blocks);
         let bytes = self.client.read_one(h_o).expect("read quant");
         i32::from_bytes(&bytes).to_vec()
     }

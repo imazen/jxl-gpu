@@ -60,10 +60,7 @@ fn main() {
 
     // Stage 2: gaborish-inverse 5×5 sharpen on all 3 channels.
     gaborish_inverse_gpu(&enc, &mut xyb_x, &mut xyb_y, &mut xyb_b, W, H);
-    println!(
-        "2. gaborish:   Y[0]={:.4} (after sharpen)",
-        xyb_y[0]
-    );
+    println!("2. gaborish:   Y[0]={:.4} (after sharpen)", xyb_y[0]);
 
     // Stage 3: mask1x1 field on the Y channel (post-gaborish).
     let mask = compute_mask1x1_gpu(&enc, &xyb_y, W, H);
@@ -107,18 +104,14 @@ fn main() {
             }
         }
     }
-    println!(
-        "5. roundtrip:  DCT8 forward + inverse on Y, max|Δ|={max_err:.3e}\n"
-    );
+    println!("5. roundtrip:  DCT8 forward + inverse on Y, max|Δ|={max_err:.3e}\n");
     assert!(
         max_err < 1e-4,
         "DCT8 batch roundtrip drift too large: {max_err:.3e}"
     );
 
     println!("✓ All 4 fork modules composed successfully through GpuEncoder.");
-    println!(
-        "✓ DCT8 batch round-trip consistent (single GPU launch of 64 blocks)."
-    );
+    println!("✓ DCT8 batch round-trip consistent (single GPU launch of 64 blocks).");
 }
 
 #[cfg(not(all(feature = "cuda", feature = "encoder")))]

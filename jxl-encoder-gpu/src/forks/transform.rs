@@ -81,10 +81,7 @@ pub const RAW_STRATEGY_DCT32X64: u8 = 14;
 /// Number of coefficient floats produced per block by each strategy.
 pub fn coeff_count_per_strategy(raw_strategy: u8) -> usize {
     match raw_strategy {
-        RAW_STRATEGY_DCT
-        | RAW_STRATEGY_DCT4X8
-        | RAW_STRATEGY_DCT8X4
-        | RAW_STRATEGY_DCT4X4 => 64,
+        RAW_STRATEGY_DCT | RAW_STRATEGY_DCT4X8 | RAW_STRATEGY_DCT8X4 | RAW_STRATEGY_DCT4X4 => 64,
         RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => 128,
         RAW_STRATEGY_DCT16X16 => 256,
         RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => 512,
@@ -102,18 +99,17 @@ pub fn coeff_count_per_strategy(raw_strategy: u8) -> usize {
 fn tile_dims(raw_strategy: u8) -> (usize, usize) {
     match raw_strategy {
         // 8×8 extraction; transform sub-divides internally
-        RAW_STRATEGY_DCT
-        | RAW_STRATEGY_DCT4X8
-        | RAW_STRATEGY_DCT8X4
-        | RAW_STRATEGY_DCT4X4 => (8, 8),
-        RAW_STRATEGY_DCT16X8 => (8, 16),    // 8 wide × 16 tall
-        RAW_STRATEGY_DCT8X16 => (16, 8),    // 16 wide × 8 tall
+        RAW_STRATEGY_DCT | RAW_STRATEGY_DCT4X8 | RAW_STRATEGY_DCT8X4 | RAW_STRATEGY_DCT4X4 => {
+            (8, 8)
+        }
+        RAW_STRATEGY_DCT16X8 => (8, 16), // 8 wide × 16 tall
+        RAW_STRATEGY_DCT8X16 => (16, 8), // 16 wide × 8 tall
         RAW_STRATEGY_DCT16X16 => (16, 16),
-        RAW_STRATEGY_DCT32X16 => (16, 32),  // 16 wide × 32 tall
-        RAW_STRATEGY_DCT16X32 => (32, 16),  // 32 wide × 16 tall
+        RAW_STRATEGY_DCT32X16 => (16, 32), // 16 wide × 32 tall
+        RAW_STRATEGY_DCT16X32 => (32, 16), // 32 wide × 16 tall
         RAW_STRATEGY_DCT32X32 => (32, 32),
-        RAW_STRATEGY_DCT64X32 => (32, 64),  // 32 wide × 64 tall
-        RAW_STRATEGY_DCT32X64 => (64, 32),  // 64 wide × 32 tall
+        RAW_STRATEGY_DCT64X32 => (32, 64), // 32 wide × 64 tall
+        RAW_STRATEGY_DCT32X64 => (64, 32), // 64 wide × 32 tall
         RAW_STRATEGY_DCT64X64 => (64, 64),
         _ => panic!("unsupported strategy {raw_strategy} (TODO: extend dispatcher)"),
     }
@@ -326,8 +322,9 @@ mod tests {
         let enc: GpuEncoder<B> = GpuEncoder::new();
         let stride = 64;
         let height = 64;
-        let plane: Vec<f32> =
-            (0..stride * height).map(|i| (i as f32 * 0.017).sin()).collect();
+        let plane: Vec<f32> = (0..stride * height)
+            .map(|i| (i as f32 * 0.017).sin())
+            .collect();
         let mut block_coords = Vec::new();
         for by in 0..8 {
             for bx in 0..8 {

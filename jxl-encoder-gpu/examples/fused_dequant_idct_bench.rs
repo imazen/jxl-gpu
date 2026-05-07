@@ -34,7 +34,10 @@ fn main() {
         .unwrap_or(7);
 
     println!("=== fused dequant+IDCT8 (Y) vs separate-stage ===");
-    println!("Iters per size: {iters} (1 warmup + {} sampled)\n", iters - 1);
+    println!(
+        "Iters per size: {iters} (1 warmup + {} sampled)\n",
+        iters - 1
+    );
     println!(
         "{:>6}  {:>9}  {:>10}  {:>10}  {:>8}  {:>10}",
         "side", "blocks", "split ms", "fused ms", "ratio", "max|Δ|"
@@ -110,7 +113,12 @@ fn main() {
             let h_qm = client.create_from_slice(f32::as_bytes(&qac));
             let h_ry = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
             dequant_idct8_fused_y_wide::<Backend>(
-                &client, h_qy, h_w, h_qm, h_ry.clone(), nb as u32,
+                &client,
+                h_qy,
+                h_w,
+                h_qm,
+                h_ry.clone(),
+                nb as u32,
             );
             let bytes = client.read_one(h_ry).expect("read");
             let result: &[f32] = f32::from_bytes(&bytes);

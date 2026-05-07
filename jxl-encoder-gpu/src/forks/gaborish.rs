@@ -67,7 +67,15 @@ pub fn apply_channel_gpu<R: Runtime>(
     assert_eq!(data.len(), width * height);
     let (wc, wr, wd, w_big_r, wl, w_big_d) = compute_weights(mul);
     let out = enc.gaborish_5x5_channel(
-        data, width as u32, height as u32, wc, wr, wd, w_big_r, wl, w_big_d,
+        data,
+        width as u32,
+        height as u32,
+        wc,
+        wr,
+        wd,
+        w_big_r,
+        wl,
+        w_big_d,
     );
     data.copy_from_slice(&out);
 }

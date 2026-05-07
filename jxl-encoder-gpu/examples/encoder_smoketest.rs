@@ -51,7 +51,9 @@ fn main() {
     let n = (W * H) as usize;
     let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
     let g: Vec<f32> = (0..n).map(|i| 0.5 - 0.4 * (i as f32 / n as f32)).collect();
-    let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * ((i % 17) as f32 / 17.0)).collect();
+    let b: Vec<f32> = (0..n)
+        .map(|i| 0.3 + 0.4 * ((i % 17) as f32 / 17.0))
+        .collect();
     let (x, y, b_out) = enc.xyb_from_linear_rgb(&r, &g, &b);
     println!(
         "GPU XYB on {} pixels: X[0]={:.4}, Y[0]={:.4}, B[0]={:.4}",
@@ -69,7 +71,10 @@ fn main() {
     let mask = enc.mask1x1_field(&y, W, H);
     assert_eq!(mask.len(), n);
     assert!(mask.iter().all(|v| v.is_finite() && *v > 0.0));
-    println!("✓ GpuEncoder::mask1x1_field produced {} positive finite values.", mask.len());
+    println!(
+        "✓ GpuEncoder::mask1x1_field produced {} positive finite values.",
+        mask.len()
+    );
 
     // DCT8 on a 4-block batch of synthetic 8x8 inputs.
     let blocks: Vec<f32> = (0..(4 * 64))
@@ -78,7 +83,10 @@ fn main() {
     let dct = enc.dct_8x8_blocks(&blocks);
     assert_eq!(dct.len(), 4 * 64);
     assert!(dct.iter().all(|v| v.is_finite()));
-    println!("✓ GpuEncoder::dct_8x8_blocks produced {} finite coefficients.", dct.len());
+    println!(
+        "✓ GpuEncoder::dct_8x8_blocks produced {} finite coefficients.",
+        dct.len()
+    );
 
     // Equivalence test: GPU XYB vs jxl-encoder-simd CPU XYB on 256x256 random.
     {
@@ -101,9 +109,21 @@ fn main() {
         let mut cpu_b = vec![0.0f32; N2];
         jxl_encoder_simd::forward_xyb_scalar(&r2, &g2, &b2, &mut cpu_x, &mut cpu_y, &mut cpu_b, N2);
 
-        let max_x = gpu_x.iter().zip(&cpu_x).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        let max_y = gpu_y.iter().zip(&cpu_y).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        let max_b = gpu_b.iter().zip(&cpu_b).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let max_x = gpu_x
+            .iter()
+            .zip(&cpu_x)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let max_y = gpu_y
+            .iter()
+            .zip(&cpu_y)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let max_b = gpu_b
+            .iter()
+            .zip(&cpu_b)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
         println!(
             "GPU vs CPU XYB on 256x256 random: max|Δ| X={max_x:.3e}, Y={max_y:.3e}, B={max_b:.3e}"
         );

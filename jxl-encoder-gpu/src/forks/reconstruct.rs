@@ -128,10 +128,11 @@ mod tests {
         let w = 16;
         let h = 16;
         // Uniform image stays uniform under symmetric blur.
-        let mut planes = [vec![0.5_f32; w * h], vec![0.3_f32; w * h], vec![
-            0.7_f32;
-            w * h
-        ]];
+        let mut planes = [
+            vec![0.5_f32; w * h],
+            vec![0.3_f32; w * h],
+            vec![0.7_f32; w * h],
+        ];
         gab_smooth_gpu(&enc, &mut planes, w, h);
         for &v in &planes[0] {
             assert!((v - 0.5).abs() < 1e-4);
@@ -172,8 +173,12 @@ mod tests {
         let enc: GpuEncoder<B> = GpuEncoder::new();
         let n = 256;
         let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
-        let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.5 * ((i + 7) as f32 / n as f32)).collect();
-        let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * ((i + 13) as f32 / n as f32)).collect();
+        let g: Vec<f32> = (0..n)
+            .map(|i| 0.2 + 0.5 * ((i + 7) as f32 / n as f32))
+            .collect();
+        let b: Vec<f32> = (0..n)
+            .map(|i| 0.3 + 0.4 * ((i + 13) as f32 / n as f32))
+            .collect();
         let (xx, xy, xb) = enc.xyb_from_linear_rgb(&r, &g, &b);
         let (r2, g2, b2) = enc.xyb_to_linear_rgb_planar(&xx, &xy, &xb);
         let mut max_err = 0.0_f32;

@@ -30,7 +30,9 @@ fn main() {
     // Synthetic linear-RGB
     let r: Vec<f32> = (0..N).map(|i| 0.1 + 0.5 * (i as f32 / N as f32)).collect();
     let g: Vec<f32> = (0..N).map(|i| 0.5 - 0.3 * (i as f32 / N as f32)).collect();
-    let b: Vec<f32> = (0..N).map(|i| 0.3 + 0.4 * ((i % 17) as f32 / 17.0)).collect();
+    let b: Vec<f32> = (0..N)
+        .map(|i| 0.3 + 0.4 * ((i % 17) as f32 / 17.0))
+        .collect();
 
     // Step 2: XYB
     let (_x, y_plane, _b_xyb) = enc.xyb_from_linear_rgb(&r, &g, &b);

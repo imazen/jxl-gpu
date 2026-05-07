@@ -25,7 +25,10 @@ fn main() {
     let n = side * side;
     let nb = (side / 8) * (side / 8);
     println!("=== fused pipeline breakdown @ {side}×{side} ({n} px, {nb} blocks) ===");
-    println!("Iters: {iters} (1 warmup + {} sampled, median per stage)\n", iters - 1);
+    println!(
+        "Iters: {iters} (1 warmup + {} sampled, median per stage)\n",
+        iters - 1
+    );
 
     let mut r_plane = Vec::with_capacity(n);
     let mut g_plane = Vec::with_capacity(n);
@@ -99,12 +102,9 @@ fn main() {
         let recon_y_b = enc.dequant_idct8_fused_y_persistent(&q_y, &weights_g, &qac);
         let recon_b_b = enc.dequant_idct8_fused_y_persistent(&q_b, &weights_g, &qac);
         let t6 = std::time::Instant::now();
-        let recon_x_p =
-            enc.scatter_blocks_persistent(&recon_x_b, side as u32, side as u32, 8, 8);
-        let recon_y_p =
-            enc.scatter_blocks_persistent(&recon_y_b, side as u32, side as u32, 8, 8);
-        let recon_b_p =
-            enc.scatter_blocks_persistent(&recon_b_b, side as u32, side as u32, 8, 8);
+        let recon_x_p = enc.scatter_blocks_persistent(&recon_x_b, side as u32, side as u32, 8, 8);
+        let recon_y_p = enc.scatter_blocks_persistent(&recon_y_b, side as u32, side as u32, 8, 8);
+        let recon_b_p = enc.scatter_blocks_persistent(&recon_b_b, side as u32, side as u32, 8, 8);
         let t7 = std::time::Instant::now();
         let (rgb_r, rgb_g, rgb_b) =
             enc.xyb_to_linear_rgb_planar_persistent(&recon_x_p, &recon_y_p, &recon_b_p);

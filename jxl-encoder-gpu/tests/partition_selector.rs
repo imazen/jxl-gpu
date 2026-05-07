@@ -7,9 +7,9 @@
 #![allow(clippy::useless_vec)]
 
 use jxl_encoder_gpu::pipeline::{
-    CostGrids16x16, CostGrids32x32, CostGrids64x64, Partition16x16, Partition32x32,
-    Partition64x64, select_partitions_16x16, select_partitions_16x16_full,
-    select_partitions_32x32, select_partitions_32x32_full, select_partitions_64x64,
+    CostGrids16x16, CostGrids32x32, CostGrids64x64, Partition16x16, Partition32x32, Partition64x64,
+    select_partitions_16x16, select_partitions_16x16_full, select_partitions_32x32,
+    select_partitions_32x32_full, select_partitions_64x64,
 };
 
 #[test]
@@ -101,9 +101,14 @@ fn picks_dct64x64_when_cheapest() {
     let cost_dct32x32 = vec![80.0; 4];
     let cost_dct64x64 = vec![100.0]; // < 4 * 80 = 320, < 16 * 30 = 480
     let p = select_partitions_64x64(
-        &cost_dct8, &cost_dct16x16, &cost_dct32x32, &cost_dct64x64,
-        CostGrids32x32::default(), CostGrids64x64::default(),
-        8, 8,
+        &cost_dct8,
+        &cost_dct16x16,
+        &cost_dct32x32,
+        &cost_dct64x64,
+        CostGrids32x32::default(),
+        CostGrids64x64::default(),
+        8,
+        8,
     );
     assert_eq!(p.len(), 1);
     assert_eq!(p[0], Partition64x64::Dct64x64);
@@ -122,9 +127,14 @@ fn picks_two_dct64x32_horizontal() {
         dct_32x64: None,
     };
     let p = select_partitions_64x64(
-        &cost_dct8, &cost_dct16x16, &cost_dct32x32, &cost_dct64x64,
-        CostGrids32x32::default(), extra64,
-        8, 8,
+        &cost_dct8,
+        &cost_dct16x16,
+        &cost_dct32x32,
+        &cost_dct64x64,
+        CostGrids32x32::default(),
+        extra64,
+        8,
+        8,
     );
     assert_eq!(p.len(), 1);
     assert_eq!(p[0], Partition64x64::TwoDct64x32Horizontal);
@@ -137,9 +147,14 @@ fn picks_sub_32x32_when_cheaper() {
     let cost_dct32x32 = vec![100.0; 4]; // each 32x32 sub picks 4*16x16 = 16
     let cost_dct64x64 = vec![1000.0];
     let p = select_partitions_64x64(
-        &cost_dct8, &cost_dct16x16, &cost_dct32x32, &cost_dct64x64,
-        CostGrids32x32::default(), CostGrids64x64::default(),
-        8, 8,
+        &cost_dct8,
+        &cost_dct16x16,
+        &cost_dct32x32,
+        &cost_dct64x64,
+        CostGrids32x32::default(),
+        CostGrids64x64::default(),
+        8,
+        8,
     );
     assert_eq!(p.len(), 1);
     if let Partition64x64::Sub32x32(_) = p[0] {
@@ -175,9 +190,7 @@ fn picks_two_dct32x16_horizontal() {
         dct_32x16: Some(&cost_32x16),
         dct_16x32: None,
     };
-    let p = select_partitions_32x32_full(
-        &cost_dct8, &cost_dct16x16, &cost_dct32x32, extra, 4, 4,
-    );
+    let p = select_partitions_32x32_full(&cost_dct8, &cost_dct16x16, &cost_dct32x32, extra, 4, 4);
     assert_eq!(p.len(), 1);
     assert_eq!(p[0], Partition32x32::TwoDct32x16Horizontal);
 }
@@ -193,9 +206,7 @@ fn picks_two_dct16x32_vertical() {
         dct_32x16: None,
         dct_16x32: Some(&cost_16x32),
     };
-    let p = select_partitions_32x32_full(
-        &cost_dct8, &cost_dct16x16, &cost_dct32x32, extra, 4, 4,
-    );
+    let p = select_partitions_32x32_full(&cost_dct8, &cost_dct16x16, &cost_dct32x32, extra, 4, 4);
     assert_eq!(p.len(), 1);
     assert_eq!(p[0], Partition32x32::TwoDct16x32Vertical);
 }

@@ -187,7 +187,9 @@ mod tests {
         let n_per_tile = 64;
         let m1: Vec<f32> = (0..n_per_tile).map(|i| (i as f32 * 0.07).sin()).collect();
         let s1: Vec<f32> = m1.iter().map(|x| 0.3 * x).collect();
-        let m2: Vec<f32> = (0..n_per_tile).map(|i| ((i + 5) as f32 * 0.11).cos()).collect();
+        let m2: Vec<f32> = (0..n_per_tile)
+            .map(|i| ((i + 5) as f32 * 0.11).cos())
+            .collect();
         let s2: Vec<f32> = m2.iter().map(|x| -0.2 * x).collect();
         let m3 = vec![0.5_f32; n_per_tile];
         let s3 = vec![0.5_f32; n_per_tile];

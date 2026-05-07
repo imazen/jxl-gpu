@@ -110,31 +110,31 @@ fn main() {
     let buffer_h = basic_info.size.1;
 
     // Allocate the output buffer (interleaved channels, single planar f32 image).
-    let mut color_buf = Image::<f32>::new_with_value(
-        (buffer_w * num_channels, buffer_h),
-        f32::NAN,
-    )
-    .expect("alloc color buf");
+    let mut color_buf = Image::<f32>::new_with_value((buffer_w * num_channels, buffer_h), f32::NAN)
+        .expect("alloc color buf");
     let extra_buf_count = pixel_format
         .extra_channel_format
         .iter()
         .filter(|x| x.is_some())
         .count();
     let mut extra_bufs: Vec<Image<f32>> = (0..extra_buf_count)
-        .map(|_| {
-            Image::<f32>::new_with_value((buffer_w, buffer_h), f32::NAN).expect("alloc extra")
-        })
+        .map(|_| Image::<f32>::new_with_value((buffer_w, buffer_h), f32::NAN).expect("alloc extra"))
         .collect();
 
     // Build the API output buffers.
-    let mut all_imgs: Vec<&mut Image<f32>> =
-        std::iter::once(&mut color_buf).chain(extra_bufs.iter_mut()).collect();
+    let mut all_imgs: Vec<&mut Image<f32>> = std::iter::once(&mut color_buf)
+        .chain(extra_bufs.iter_mut())
+        .collect();
     let mut api_buffers: Vec<JxlOutputBuffer<'_>> = all_imgs
         .iter_mut()
         .map(|b| {
             let size = b.size();
             JxlOutputBuffer::from_image_rect_mut(
-                b.get_rect_mut(Rect { origin: (0, 0), size }).into_raw(),
+                b.get_rect_mut(Rect {
+                    origin: (0, 0),
+                    size,
+                })
+                .into_raw(),
             )
         })
         .collect();

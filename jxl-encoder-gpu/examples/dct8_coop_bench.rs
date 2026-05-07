@@ -34,7 +34,10 @@ fn main() {
         .unwrap_or(7);
 
     println!("=== DCT8 throughput: CPU vs naive-GPU vs cooperative-GPU vs wide-GPU ===");
-    println!("Iters per size: {iters} (1 warmup + {} sampled)\n", iters - 1);
+    println!(
+        "Iters per size: {iters} (1 warmup + {} sampled)\n",
+        iters - 1
+    );
     println!(
         "{:>6}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>7}  {:>7}  {:>7}",
         "side", "blocks", "CPU ms", "naive ms", "coop ms", "wide ms", "naive×", "coop×", "wide×"

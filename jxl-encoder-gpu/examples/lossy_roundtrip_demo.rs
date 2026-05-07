@@ -99,18 +99,8 @@ fn main() {
     let qac_qm = vec![4.0_f32; NB];
 
     let (q_x, q_y, q_b) = quantize_dct8_xyb_gpu(
-        &enc,
-        &coeffs_x,
-        &coeffs_y,
-        &coeffs_b,
-        &weights,
-        &weights,
-        &weights,
-        &qac_qm,
-        &qac_qm,
-        &qac_qm,
-        1,
-        1, // covered_x, covered_y for plain DCT8
+        &enc, &coeffs_x, &coeffs_y, &coeffs_b, &weights, &weights, &weights, &qac_qm, &qac_qm,
+        &qac_qm, 1, 1, // covered_x, covered_y for plain DCT8
     );
     let n_zero_y = q_y.iter().filter(|&&v| v == 0).count();
     println!(

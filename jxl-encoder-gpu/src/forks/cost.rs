@@ -206,17 +206,7 @@ mod tests {
         let recon = vec![0.6_f32; n]; // offset by 0.1
         let mask = vec![1.0_f32; (xb * yb) as usize];
         let l2 = block_l2_errors_gpu(
-            &enc,
-            &orig,
-            &orig,
-            &orig,
-            &recon,
-            &recon,
-            &recon,
-            &mask,
-            xb,
-            yb,
-            pw as u32,
+            &enc, &orig, &orig, &orig, &recon, &recon, &recon, &mask, xb, yb, pw as u32,
         );
         assert_eq!(l2.len(), 1);
         assert!(l2[0] > 0.0, "L2 should be positive on nonzero error");

@@ -21,12 +21,12 @@ extern crate alloc;
 pub mod encoder;
 #[cfg(feature = "encoder")]
 pub mod forks;
+pub mod kernels;
+pub mod launch;
 #[cfg(feature = "encoder")]
 pub mod lossy_encoder;
 #[cfg(feature = "encoder")]
 pub mod persistent;
-pub mod kernels;
-pub mod launch;
 pub mod pipeline;
 
 pub use cubecl;

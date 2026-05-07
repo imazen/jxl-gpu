@@ -132,7 +132,10 @@ mod tests {
         let q = 5_i32;
         let expected = 5.0 - 0.145 / 5.0;
         let got = adjust_quant_bias(q, 0);
-        assert!((got - expected).abs() < 1e-6, "got={got}, expected={expected}");
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "got={got}, expected={expected}"
+        );
 
         let qn = -10_i32;
         let expected_n = -10.0 - 0.145 / -10.0;
@@ -156,8 +159,7 @@ mod tests {
         let xf = alloc::vec![0.0_f32; nb];
         let bf = alloc::vec![0.0_f32; nb];
         let (ox, oy, ob) = dequant_dct8_blocks_gpu(
-            &enc, &qx, &qy, &qb, &weights, &weights, &weights, &qac_qm, &qac_qm, &qac_qm, &xf,
-            &bf,
+            &enc, &qx, &qy, &qb, &weights, &weights, &weights, &qac_qm, &qac_qm, &qac_qm, &xf, &bf,
         );
         assert!(ox.iter().all(|&v| v == 0.0));
         assert!(oy.iter().all(|&v| v == 0.0));
@@ -174,13 +176,14 @@ mod tests {
         let qx: Vec<i32> = (0..nb * 64).map(|i| (i as i32 % 7) - 3).collect();
         let qy = qx.clone();
         let qb = qx.clone();
-        let weights: Vec<f32> = (0..nb * 64).map(|i| 1.0 + (i as f32 * 0.013).sin()).collect();
+        let weights: Vec<f32> = (0..nb * 64)
+            .map(|i| 1.0 + (i as f32 * 0.013).sin())
+            .collect();
         let qac_qm: Vec<f32> = (0..nb).map(|i| 1.0 + i as f32 * 0.1).collect();
         let xf = alloc::vec![0.0_f32; nb];
         let bf = alloc::vec![0.0_f32; nb];
         let (ox, oy, ob) = dequant_dct8_blocks_gpu(
-            &enc, &qx, &qy, &qb, &weights, &weights, &weights, &qac_qm, &qac_qm, &qac_qm, &xf,
-            &bf,
+            &enc, &qx, &qy, &qb, &weights, &weights, &weights, &qac_qm, &qac_qm, &qac_qm, &xf, &bf,
         );
         assert!(ox.iter().all(|v| v.is_finite()));
         assert!(oy.iter().all(|v| v.is_finite()));

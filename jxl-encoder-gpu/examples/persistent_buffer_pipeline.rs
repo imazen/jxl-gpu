@@ -59,10 +59,20 @@ fn main() {
         (norm * K_GABORISH[4]) as f32,
     );
     let (wc, wr, wd, w_big_r, wl, w_big_d) = weights_scalar;
-    let weights = GaborishWeights { wc, wr, wd, w_big_r, wl, w_big_d };
+    let weights = GaborishWeights {
+        wc,
+        wr,
+        wd,
+        w_big_r,
+        wl,
+        w_big_d,
+    };
 
     println!("=== persistent-buffer pipeline: XYB + gaborish + mask1x1 ===");
-    println!("Iters per size: {iters} (1 warmup + {} sampled)\n", iters - 1);
+    println!(
+        "Iters per size: {iters} (1 warmup + {} sampled)\n",
+        iters - 1
+    );
     println!(
         "{:>6}  {:>9}  {:>10}  {:>10}  {:>10}  {:>8}  {:>8}",
         "side", "MP", "CPU ms", "GPU rt ms", "GPU pers ms", "vs CPU", "vs rt"
@@ -120,13 +130,37 @@ fn main() {
             let t = std::time::Instant::now();
             let (xyb_x, xyb_y, xyb_b) = enc.xyb_from_linear_rgb(&r, &g, &b);
             let _gx = enc.gaborish_5x5_channel(
-                &xyb_x, side as u32, side as u32, wc, wr, wd, w_big_r, wl, w_big_d,
+                &xyb_x,
+                side as u32,
+                side as u32,
+                wc,
+                wr,
+                wd,
+                w_big_r,
+                wl,
+                w_big_d,
             );
             let gy = enc.gaborish_5x5_channel(
-                &xyb_y, side as u32, side as u32, wc, wr, wd, w_big_r, wl, w_big_d,
+                &xyb_y,
+                side as u32,
+                side as u32,
+                wc,
+                wr,
+                wd,
+                w_big_r,
+                wl,
+                w_big_d,
             );
             let _gb = enc.gaborish_5x5_channel(
-                &xyb_b, side as u32, side as u32, wc, wr, wd, w_big_r, wl, w_big_d,
+                &xyb_b,
+                side as u32,
+                side as u32,
+                wc,
+                wr,
+                wd,
+                w_big_r,
+                wl,
+                w_big_d,
             );
             let _ = enc.mask1x1_field(&gy, side as u32, side as u32);
             let dt = t.elapsed();

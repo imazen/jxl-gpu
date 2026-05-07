@@ -26,7 +26,10 @@ fn main() {
         .unwrap_or(7);
 
     println!("=== fused DCT+quantize vs separate-stage ===");
-    println!("Iters per size: {iters} (1 warmup + {} sampled)\n", iters - 1);
+    println!(
+        "Iters per size: {iters} (1 warmup + {} sampled)\n",
+        iters - 1
+    );
     println!(
         "{:>6}  {:>9}  {:>10}  {:>10}  {:>8}  {:>10}",
         "side", "blocks", "split ms", "fused ms", "ratio", "max|Δ|"
@@ -54,9 +57,7 @@ fn main() {
             let h_coef = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
             let h_out = client.create_from_slice(i32::as_bytes(&vec![0_i32; n]));
             dct_8x8_wide::<Backend>(&client, h_in, h_coef.clone(), nb as u32);
-            quantize_dct8::<Backend>(
-                &client, h_coef, h_w, h_qac, h_thr, h_out.clone(), nb as u32,
-            );
+            quantize_dct8::<Backend>(&client, h_coef, h_w, h_qac, h_thr, h_out.clone(), nb as u32);
             let bytes = client.read_one(h_out).expect("read");
             let result: &[i32] = i32::from_bytes(&bytes);
             let dt = t.elapsed();
@@ -81,7 +82,13 @@ fn main() {
             let h_thr = client.create_from_slice(f32::as_bytes(&thr));
             let h_out = client.create_from_slice(i32::as_bytes(&vec![0_i32; n]));
             dct8_quantize_fused_wide::<Backend>(
-                &client, h_in, h_w, h_qac, h_thr, h_out.clone(), nb as u32,
+                &client,
+                h_in,
+                h_w,
+                h_qac,
+                h_thr,
+                h_out.clone(),
+                nb as u32,
             );
             let bytes = client.read_one(h_out).expect("read");
             let result: &[i32] = i32::from_bytes(&bytes);
