@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### AdjustQuantBlockAC pre-scan helper (`20318810`)
+
+`forks::quantize::adjust_quant_prescan` ports the per-block
+coefficient pre-scan loop from upstream
+`jxl_encoder::vardct::quantize::adjust_quant_block_ac` (lines
+178-220). Computes the 5 statistics consumed by heuristics B-F:
+`sum_of_highest_freq`, `sum_of_error`, `sum_of_vals`,
+`hf_nonzeros[4]`, `hf_max_error[4]` — indexed by `hfix = 2 *
+(y >= h/2) + (x >= w/2)` (the high-frequency quadrant).
+
+Returns `None` for the 5 "partial block kinds" upstream skips
+(IDENTITY, DCT2X2, DCT4X4, DCT4X8, DCT8X4); AFV strategies are
+routed through `forks::afv` and never reach this path.
+
+This is the most GPU-amenable piece of AdjustQuantBlockAC — the
+pre-scan loop is ~150 ops per block (DCT16x16) and would benefit
+from batching across all blocks. The 6 heuristics A-F that consume
+these stats are small CPU code that can stay on the host.
+
 ### EPF sharpness picker — selection logic ported (`4f49174e`, `a270f002`)
 
 Two host-side additions in `forks::epf`:

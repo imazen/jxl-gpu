@@ -105,7 +105,7 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
-**Not yet covered (CPU path stays):** `compute_epf_sharpness` orchestrator (selection logic ported as `forks::epf::select_sharpness_two_pass`; awaits a `forks::reconstruct::reconstruct_xyb_gpu` to compose with the existing apply_epf_step{0,1,2}_gpu + block_l2_errors), AdjustQuantBlockAC heuristics, `estimate_entropy_full` orchestration. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
+**Not yet covered (CPU path stays):** `compute_epf_sharpness` orchestrator (selection logic ported as `forks::epf::select_sharpness_two_pass`; awaits a `forks::reconstruct::reconstruct_xyb_gpu` to compose with the existing apply_epf_step{0,1,2}_gpu + block_l2_errors), AdjustQuantBlockAC heuristics A-F (pre-scan stats helper landed as `forks::quantize::adjust_quant_prescan` — most GPU-amenable piece is now portable; the 6 heuristics that consume them are small host-CPU code), `estimate_entropy_full` orchestration. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
 
 ## Coverage summary
 
@@ -136,11 +136,12 @@ complete** (Step 0 ported and parity-verified at FP32 floor on
 integration complete (host-side wrappers in `forks::afv` consuming
 `afv_weights()` + the existing batched AFV transforms). 11 fork
 modules verified composing through GpuEncoder. Sharpness picker
-two-pass selection logic ported as a pure-CPU helper. Remaining
-work concentrates in (a) `forks::reconstruct::reconstruct_xyb_gpu`
-(unblocks the compute_epf_sharpness orchestrator), (b) full
-estimate_entropy_full orchestration, (c) AdjustQuantBlockAC
-heuristics.
+two-pass selection logic + AdjustQuantBlockAC pre-scan stats
+ported as pure-CPU helpers. Remaining work concentrates in
+(a) `forks::reconstruct::reconstruct_xyb_gpu` (unblocks the
+compute_epf_sharpness orchestrator), (b) full estimate_entropy_full
+orchestration, (c) AdjustQuantBlockAC heuristics B-F + their
+quant-adjustment wrappers (pre-scan stats helper is in place).
 
 ### Note on AC strategy search (Phase 3)
 
