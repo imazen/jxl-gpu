@@ -201,6 +201,92 @@ pub fn afv_dct_4x4_one<R: Runtime>(
     out
 }
 
+/// Batched forward AFV transform for many 8×8 blocks of the SAME
+/// `afv_kind`. One launch per sub-transform (3 launches total) instead
+/// of 3 launches per block.
+///
+/// Inputs/outputs are flat `Vec<f32>` of length `n_blocks * 64`.
+/// Output coefficients are in the libjxl AFV layout matching
+/// upstream `afv_transform_from_pixels`.
+pub fn afv_transform_batch_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    basis_t: &[f32; 256],
+    pixel_blocks: &[f32],
+    afv_kind: AfvKind,
+) -> Vec<f32> {
+    use cubecl::prelude::*;
+
+    assert!(pixel_blocks.len().is_multiple_of(64));
+    let n_blocks = pixel_blocks.len() / 64;
+    let mut afv_corners = vec![0.0_f32; n_blocks * 16];
+    let mut dct4_corners = vec![0.0_f32; n_blocks * 16];
+    let mut dct4x8_halves = vec![0.0_f32; n_blocks * 32];
+
+    // Per-block extraction.
+    for b in 0..n_blocks {
+        let pix: &[f32; 64] =
+            (&pixel_blocks[b * 64..b * 64 + 64]).try_into().unwrap();
+        let a = extract_afv_corner(pix, afv_kind);
+        let d = extract_dct4_corner(pix, afv_kind);
+        let h = extract_dct4x8_half(pix, afv_kind);
+        afv_corners[b * 16..b * 16 + 16].copy_from_slice(&a);
+        dct4_corners[b * 16..b * 16 + 16].copy_from_slice(&d);
+        dct4x8_halves[b * 32..b * 32 + 32].copy_from_slice(&h);
+    }
+
+    let client = enc.client_ref();
+    // 1. AFV 4×4 batched.
+    let h_in_a = client.create_from_slice(f32::as_bytes(&afv_corners));
+    let h_basis = client.create_from_slice(f32::as_bytes(basis_t));
+    let h_out_a = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks * 16]));
+    crate::launch::afv::afv_dct_4x4::<R>(
+        client, h_in_a, h_basis, h_out_a.clone(), n_blocks as u32,
+    );
+    // 2. Raw DCT 4×4 batched.
+    let h_in_d = client.create_from_slice(f32::as_bytes(&dct4_corners));
+    let h_out_d = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks * 16]));
+    crate::launch::dct4_raw::dct_4x4_raw::<R>(
+        client, h_in_d, h_out_d.clone(), n_blocks as u32,
+    );
+    // 3. Raw DCT 4×8 batched.
+    let h_in_8 = client.create_from_slice(f32::as_bytes(&dct4x8_halves));
+    let h_out_8 = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks * 32]));
+    crate::launch::dct4_raw::dct_4x8_raw::<R>(
+        client, h_in_8, h_out_8.clone(), n_blocks as u32,
+    );
+
+    let bytes_a = client.read_one(h_out_a).expect("afv batch");
+    let bytes_d = client.read_one(h_out_d).expect("dct4 batch");
+    let bytes_8 = client.read_one(h_out_8).expect("dct4x8 batch");
+    let afv_coeffs: &[f32] = f32::from_bytes(&bytes_a);
+    let dct4_coeffs: &[f32] = f32::from_bytes(&bytes_d);
+    let dct4x8_coeffs: &[f32] = f32::from_bytes(&bytes_8);
+
+    // Host-side per-block composition + DC packing.
+    let mut out = vec![0.0_f32; n_blocks * 64];
+    for b in 0..n_blocks {
+        let dst = &mut out[b * 64..b * 64 + 64];
+        for iy in 0..4 {
+            for ix in 0..4 {
+                dst[iy * 2 * 8 + ix * 2] = afv_coeffs[b * 16 + iy * 4 + ix];
+            }
+        }
+        for iy in 0..4 {
+            for ix in 0..4 {
+                dst[iy * 2 * 8 + ix * 2 + 1] = dct4_coeffs[b * 16 + iy * 4 + ix];
+            }
+        }
+        for iy in 0..4 {
+            for ix in 0..8 {
+                dst[(1 + iy * 2) * 8 + ix] = dct4x8_coeffs[b * 32 + iy * 8 + ix];
+            }
+        }
+        let block: &mut [f32; 64] = dst.try_into().unwrap();
+        pack_afv_dcs(block);
+    }
+    out
+}
+
 /// Inverse AFV transform on a single 8×8 coefficient block.
 ///
 /// Mirrors upstream `inverse_afv_transform`. Three GPU launches (AFV
@@ -343,6 +429,47 @@ mod tests {
         // We just check the values are finite + the new c[0] is != original.
         assert!(c.iter().all(|v| v.is_finite()));
         assert!((c[0] - 4.0).abs() > 1e-3);
+    }
+
+    #[test]
+    fn test_afv_transform_batch_matches_per_block() {
+        // Run batched AFV on 8 synthetic 8×8 blocks; verify output
+        // matches per-block afv_transform_gpu calls.
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        const N: usize = 8;
+        let mut pixel_blocks = vec![0.0_f32; N * 64];
+        for b in 0..N {
+            for i in 0..64 {
+                let v = ((b * 7 + i * 11).wrapping_mul(31) % 251) as f32 / 251.0 - 0.5;
+                pixel_blocks[b * 64 + i] = 0.3 + 0.4 * v;
+            }
+        }
+        for kind in 0..4 {
+            let batched = afv_transform_batch_gpu(
+                &enc,
+                &AFV4X4_BASIS_TRANSPOSE,
+                &pixel_blocks,
+                kind,
+            );
+            assert_eq!(batched.len(), N * 64);
+            // Per-block reference using afv_transform_gpu.
+            for b in 0..N {
+                let pix: &[f32; 64] =
+                    (&pixel_blocks[b * 64..b * 64 + 64]).try_into().unwrap();
+                let single = afv_transform_gpu(
+                    &enc,
+                    &AFV4X4_BASIS_TRANSPOSE,
+                    pix,
+                    kind,
+                );
+                let batch_block = &batched[b * 64..b * 64 + 64];
+                for i in 0..64 {
+                    let d = (single[i] - batch_block[i]).abs();
+                    assert!(d < 1e-5,
+                        "kind={kind} block={b} pos={i}: batch differs from per-block (d={d:.3e})");
+                }
+            }
+        }
     }
 
     #[test]
