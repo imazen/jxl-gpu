@@ -1,22 +1,19 @@
 //! Content-driven adaptive quantization on a real image.
 //!
-//! Derives a per-block qac field from the image's mask1x1 field
-//! (a per-pixel masking signal that's high in smooth regions and
-//! low at edges). Smooth blocks get heavier quant (smaller files),
-//! detail blocks get lighter quant (preserved edges).
+//! Uses [`LossyEncoder::encode_one_with_aq`] — the turnkey API that
+//! runs the full content-driven AQ chain (XYB → mask1x1 → per-block
+//! reduce → derived qac field → adaptive encode) in one call.
 //!
-//! Pipeline:
-//!   linear-RGB → XYB → mask1x1 (per pixel, GPU) → per-block reduce
-//!   (CPU mean over each 8×8 block) → scale to qac range
-//!   → LossyEncoder::encode_one_adaptive with the derived field
+//! For comparison this demo also calls [`LossyEncoder::compute_aq_field`]
+//! directly so we can print the qac range, then a uniform-qac baseline
+//! (single scalar) to show what AQ buys you.
 //!
-//! Compares against a uniform-quant baseline (single qac scalar)
-//! and reports per-half MAE plus written-PNG size for both.
+//! See `adaptive_quant_demo` for a walkthrough of
+//! `encode_one_adaptive` with a manually-built qac field.
 
 #[cfg(all(feature = "cuda", feature = "encoder"))]
 fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
-    use jxl_encoder_gpu::forks::adaptive_quant::compute_mask1x1_gpu;
     use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
     type Backend = cubecl::cuda::CudaRuntime;
@@ -46,76 +43,30 @@ fn main() {
 
     let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, w, h);
     let (pw, ph) = lossy.padded_dimensions();
-    let blocks_per_row = (pw / 8) as usize;
-    let blocks_per_col = (ph / 8) as usize;
-    let nb = blocks_per_row * blocks_per_col;
+    let nb = ((pw / 8) * (ph / 8)) as usize;
 
     println!("=== content_driven_aq_demo ===");
     println!("Image: {image_path}");
     println!("Size: {w}×{h}, padded {pw}×{ph}, {nb} blocks\n");
 
-    // ── Step 1: derive per-block qac field from mask1x1 ──────────
-    // 1a. compute XYB Y plane on GPU (just for the mask1x1 input).
-    let (_xyb_x, xyb_y, _xyb_b) = enc.xyb_from_linear_rgb(&r, &g, &b);
-    // 1b. compute mask1x1 field (one f32 per pixel) on GPU.
-    let mask = compute_mask1x1_gpu(&enc, &xyb_y, w as usize, h as usize);
-    // 1c. per-block mean of the mask, normalized to qac range.
-    //     Mask is HIGH in smooth regions (low gradient) and LOW at edges.
-    //     Smooth → heavier quant (smaller qac); detail → lighter quant
-    //     (larger qac). So qac inversely correlates with mask intensity.
-    let mut block_means = vec![0.0_f32; nb];
-    for by in 0..blocks_per_col {
-        for bx in 0..blocks_per_row {
-            // Average mask over the 8×8 block (clamped to image bounds).
-            let mut sum = 0.0_f64;
-            let mut count = 0_usize;
-            for dy in 0..8 {
-                let y = by * 8 + dy;
-                if y >= h as usize {
-                    break;
-                }
-                for dx in 0..8 {
-                    let x = bx * 8 + dx;
-                    if x >= w as usize {
-                        break;
-                    }
-                    sum += mask[y * w as usize + x] as f64;
-                    count += 1;
-                }
-            }
-            block_means[by * blocks_per_row + bx] =
-                if count > 0 { (sum / count as f64) as f32 } else { 1.0 };
-        }
-    }
-    // Normalize: map block_means' range to [qac_min, qac_max].
-    let mean_min = block_means.iter().copied().fold(f32::INFINITY, f32::min);
-    let mean_max = block_means.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let qac_max = distance_to_qac(0.5); // detail → light quant
-    let qac_min = distance_to_qac(4.0); // smooth → heavy quant
-    println!(
-        "Mask range: [{mean_min:.3}, {mean_max:.3}]  →  qac range [{qac_min:.3}, {qac_max:.3}]"
-    );
-    let aq_field: Vec<f32> = block_means
-        .iter()
-        .map(|&m| {
-            let t = if mean_max > mean_min {
-                (m - mean_min) / (mean_max - mean_min)
-            } else {
-                0.5
-            };
-            // Inverse: high mask (smooth) → low qac (heavy quant).
-            qac_max + (qac_min - qac_max) * t
-        })
-        .collect();
+    let distance = 2.0_f32;
 
-    // ── Step 2: encode_one_adaptive with the content-driven field ──
+    // Inspect the field that encode_one_with_aq will use internally.
+    let aq_field = lossy.compute_aq_field(&enc, &r, &g, &b, distance);
+    let qac_min = aq_field.iter().copied().fold(f32::INFINITY, f32::min);
+    let qac_max = aq_field.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    println!(
+        "Derived qac field: [{qac_min:.3}, {qac_max:.3}]  (centered on distance={distance})\n"
+    );
+
+    // Turnkey content-driven AQ.
     let t0 = std::time::Instant::now();
     let (rec_r_aq, rec_g_aq, rec_b_aq) =
-        lossy.encode_one_adaptive(&enc, &r, &g, &b, &aq_field);
+        lossy.encode_one_with_aq(&enc, &r, &g, &b, distance);
     let dt_aq = t0.elapsed();
 
-    // ── Step 3: encode with uniform qac at midpoint distance for comparison ──
-    let qac_uniform = distance_to_qac(2.0);
+    // Uniform baseline at the same central distance.
+    let qac_uniform = distance_to_qac(distance);
     let t1 = std::time::Instant::now();
     let (rec_r_un, rec_g_un, rec_b_un) =
         lossy.encode_one(&enc, &r, &g, &b, qac_uniform);
@@ -133,7 +84,7 @@ fn main() {
     }
     let nf = n as f64;
     println!(
-        "\nencode_one_adaptive (content-driven AQ): {:.2} ms",
+        "encode_one_with_aq (content-driven AQ): {:.2} ms",
         dt_aq.as_secs_f64() * 1000.0
     );
     println!(
@@ -143,7 +94,7 @@ fn main() {
         mae_aq[2] / nf
     );
     println!(
-        "\nencode_one (uniform qac=distance_to_qac(2.0)): {:.2} ms",
+        "\nencode_one (uniform qac=distance_to_qac({distance})): {:.2} ms",
         dt_un.as_secs_f64() * 1000.0
     );
     println!(
