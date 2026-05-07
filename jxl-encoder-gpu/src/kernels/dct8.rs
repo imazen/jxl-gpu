@@ -251,6 +251,129 @@ pub fn dct_8x8_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     }
 }
 
+/// Cooperative forward 8×8 DCT: 8 threads per block, one per row.
+///
+/// Each cube processes one block. Within a cube, thread `r` (UNIT_POS)
+/// owns row `r` — performs row load, dct1d_8 on its row, then column
+/// pass on row `r` of the transposed buffer, then writes its row out.
+///
+/// Throughput target: 8× more block-parallelism than the cube_dim=1
+/// kernel for the same num_blocks, so SMs stay busy at smaller image
+/// sizes (where cube_dim=1 starves with too few cubes).
+///
+/// Launch: cube_dim = 8, cube_count = num_blocks.
+#[cube(launch_unchecked)]
+pub fn dct_8x8_coop_kernel(input: &Array<f32>, output: &mut Array<f32>) {
+    let block_idx = CUBE_POS;
+    let row_idx = UNIT_POS;
+    let n_blocks = input.len() / 64usize;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+    let row_off = row_idx * 8u32;
+    let row_off_us = row_off as usize;
+
+    let mut scratch = SharedMemory::<f32>::new(64usize);
+    let mut transposed = SharedMemory::<f32>::new(64usize);
+
+    // ── Row pass ────────────────────────────────────────────────
+    let mut c: u32 = 0u32;
+    while c < 8u32 {
+        let cu = c as usize;
+        scratch[row_off_us + cu] = input[off + row_off_us + cu];
+        c += 1u32;
+    }
+    sync_cube();
+    dct1d_8(&mut scratch, row_off);
+    let mut c: u32 = 0u32;
+    while c < 8u32 {
+        let cu = c as usize;
+        scratch[row_off_us + cu] = scratch[row_off_us + cu] * ONE_OVER_8;
+        c += 1u32;
+    }
+    sync_cube();
+
+    // ── Transpose: thread r writes column r of `transposed`
+    //    (= reads row r of `scratch` slot-by-slot into transposed[c, r]) ──
+    let mut c: u32 = 0u32;
+    while c < 8u32 {
+        let cu = c as usize;
+        let ru = row_idx as usize;
+        transposed[cu * 8usize + ru] = scratch[ru * 8usize + cu];
+        c += 1u32;
+    }
+    sync_cube();
+
+    // ── Column pass (now row pass on transposed) ───────────────
+    dct1d_8(&mut transposed, row_off);
+    let mut c: u32 = 0u32;
+    while c < 8u32 {
+        let cu = c as usize;
+        transposed[row_off_us + cu] = transposed[row_off_us + cu] * ONE_OVER_8;
+        c += 1u32;
+    }
+    sync_cube();
+
+    // ── Write out: thread r writes row r ───────────────────────
+    let mut c: u32 = 0u32;
+    while c < 8u32 {
+        let cu = c as usize;
+        output[off + row_off_us + cu] = transposed[row_off_us + cu];
+        c += 1u32;
+    }
+}
+
+/// Cooperative inverse 8×8 DCT — 8 threads per block, one per row.
+/// Mirrors `dct_8x8_coop_kernel` for the inverse direction.
+#[cube(launch_unchecked)]
+pub fn idct_8x8_coop_kernel(input: &Array<f32>, output: &mut Array<f32>) {
+    let block_idx = CUBE_POS;
+    let row_idx = UNIT_POS;
+    let n_blocks = input.len() / 64usize;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+    let row_off = row_idx * 8u32;
+    let row_off_us = row_off as usize;
+
+    let mut scratch = SharedMemory::<f32>::new(64usize);
+    let mut transposed = SharedMemory::<f32>::new(64usize);
+
+    // Load row into scratch.
+    let mut c: u32 = 0u32;
+    while c < 8u32 {
+        let cu = c as usize;
+        scratch[row_off_us + cu] = input[off + row_off_us + cu];
+        c += 1u32;
+    }
+    sync_cube();
+    idct1d_8(&mut scratch, row_off);
+    sync_cube();
+
+    // Transpose.
+    let mut c: u32 = 0u32;
+    while c < 8u32 {
+        let cu = c as usize;
+        let ru = row_idx as usize;
+        transposed[cu * 8usize + ru] = scratch[ru * 8usize + cu];
+        c += 1u32;
+    }
+    sync_cube();
+
+    // Column pass (= row pass on transposed).
+    idct1d_8(&mut transposed, row_off);
+    sync_cube();
+
+    let mut c: u32 = 0u32;
+    while c < 8u32 {
+        let cu = c as usize;
+        output[off + row_off_us + cu] = transposed[row_off_us + cu];
+        c += 1u32;
+    }
+}
+
 /// Inverse 8x8 DCT for `num_blocks` contiguous blocks.
 #[cube(launch_unchecked)]
 pub fn idct_8x8_kernel(input: &Array<f32>, output: &mut Array<f32>) {
