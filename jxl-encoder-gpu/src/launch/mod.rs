@@ -21,6 +21,7 @@ pub mod fused_dct_quant;
 pub mod gab;
 pub mod gaborish;
 pub mod gather;
+pub mod identity;
 pub mod mask1x1;
 pub mod pixel_loss;
 pub mod quantize;
