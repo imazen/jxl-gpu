@@ -3,9 +3,22 @@
 
 //! High-level GPU lossy encoder facade.
 //!
-//! Wraps the persistent API into a single-call `encode_one` (one-shot
-//! image lossy roundtrip on GPU) and `encode_many` (batch — same image,
-//! multiple quality settings, with one-time input upload).
+//! Wraps the [`crate::persistent`] API into four user-friendly entry
+//! points and a JPEG-style quality knob:
+//!
+//! | Method | Input | Output | Use case |
+//! |---|---|---|---|
+//! | [`LossyEncoder::encode_one`] | `f32` planar | `(R, G, B)` `f32` | one-shot, already-linear |
+//! | [`LossyEncoder::encode_many`] | `f32` planar | `Vec<(R, G, B)>` | quality sweep, already-linear |
+//! | [`LossyEncoder::encode_one_srgb_u8`] | sRGB `u8` interleaved | sRGB `u8` interleaved | one-shot, image-crate input |
+//! | [`LossyEncoder::encode_many_srgb_u8`] | sRGB `u8` interleaved | `Vec<u8>` per setting | quality sweep, image-crate input |
+//! | [`quality_to_qac`] | quality 1-100 | `qac_qm` scalar | JPEG-style quality knob |
+//!
+//! Construct one [`LossyEncoder`] per `(width, height)` to amortize
+//! the static-input upload (gaborish weights + thresholds + unit
+//! quant matrix) across many encodes. Arbitrary image sizes are
+//! supported (non-multiples-of-8 are padded internally with right+
+//! bottom edge replication and cropped back at output).
 //!
 //! ## What it does today
 //!
