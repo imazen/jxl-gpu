@@ -335,6 +335,92 @@ pub fn apply_heuristic_a_thresholds(
 /// otherwise exceed.
 pub const QUANT_MAX: i32 = 256;
 
+/// AdjustQuantBlockAC heuristic E — large-transform error correction.
+/// Mirrors upstream lines 282-340.
+///
+/// Only fires for the DCT16+ family (DCT16x16, DCT32x32, DCT16x8,
+/// DCT8x16, DCT64x64, DCT64x32, DCT32x64, DCT32x16, DCT16x32). Uses
+/// per-strategy K_MUL1/K_MUL2 tables (4 rows × 3 channels) and
+/// K_QUANT_NORMALIZER to compute a `threshold = K_MUL1 * area +
+/// K_MUL2 * norm_vals`. When `norm_error > threshold`, increments
+/// `quant` by `clamp((norm_error / threshold) as i32, 0, 2)`.
+///
+/// Returns `true` when the heuristic fired (bit `0x10` upstream).
+///
+/// Strategy → table-row index mapping (matching upstream):
+/// - DCT16X16 → 0
+/// - DCT32X16, DCT16X32 → 1
+/// - DCT32X32 → 2
+/// - DCT16X8, DCT8X16, DCT64X*, DCT*X64 → 3 (default for "large but
+///   not in the named buckets")
+pub fn apply_heuristic_e_large_transform(
+    quant: &mut i32,
+    stats: &AdjustQuantBlockStats,
+    c: usize,
+    raw_strategy: u8,
+    xsize: usize,
+    ysize: usize,
+) -> bool {
+    use crate::forks::transform::{
+        RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
+        RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+        RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_DCT8X16,
+    };
+
+    #[allow(clippy::excessive_precision)]
+    const K_MUL1: [[f64; 3]; 4] = [
+        [0.220_806_157_538_484_04, 0.457_974_798_242_620_11, 0.298_592_350_959_779_65],
+        [0.701_094_865_102_868_34, 0.161_852_813_055_126_39, 0.143_876_917_300_354_73],
+        [0.114_985_964_456_218_64, 0.446_568_404_410_277_0, 0.105_876_582_151_490_48],
+        [0.468_496_652_644_093_96, 0.412_390_779_377_819_54, 0.088_667_407_767_185_44],
+    ];
+    #[allow(clippy::excessive_precision)]
+    const K_MUL2: [[f64; 3]; 4] = [
+        [0.274_502_819_418_222_0, 1.125_576_654_998_500, 0.989_504_591_341_283_9],
+        [0.465_216_867_559_828_5, 0.409_458_079_834_558_2, 0.365_818_998_117_513_67],
+        [0.280_349_724_247_157_15, 0.918_265_320_192_973_8, 1.558_153_154_305_741_6],
+        [0.268_731_181_140_337_28, 0.688_637_123_903_924_84, 1.208_218_540_866_678_6],
+    ];
+    const K_QUANT_NORMALIZER: f64 = 2.294_270_834_328_472;
+    const BLOCK_DIM: usize = 8;
+
+    let is_large = matches!(
+        raw_strategy,
+        RAW_STRATEGY_DCT16X16
+            | RAW_STRATEGY_DCT32X32
+            | RAW_STRATEGY_DCT16X8
+            | RAW_STRATEGY_DCT8X16
+            | RAW_STRATEGY_DCT64X64
+            | RAW_STRATEGY_DCT64X32
+            | RAW_STRATEGY_DCT32X64
+            | RAW_STRATEGY_DCT32X16
+            | RAW_STRATEGY_DCT16X32
+    );
+    if !is_large {
+        return false;
+    }
+    let ix = match raw_strategy {
+        RAW_STRATEGY_DCT16X16 => 0,
+        RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => 1,
+        RAW_STRATEGY_DCT32X32 => 2,
+        _ => 3,
+    };
+    let norm_error = stats.sum_of_error as f64 * K_QUANT_NORMALIZER;
+    let norm_vals = stats.sum_of_vals as f64 * K_QUANT_NORMALIZER;
+    let area = (xsize * ysize * BLOCK_DIM * BLOCK_DIM) as f64;
+    let threshold = K_MUL1[ix][c] * area + K_MUL2[ix][c] * norm_vals;
+    if norm_error > threshold {
+        let step = ((norm_error / threshold) as i32).clamp(0, 2);
+        *quant += step;
+        if *quant >= QUANT_MAX {
+            *quant = QUANT_MAX - 1;
+        }
+        true
+    } else {
+        false
+    }
+}
+
 /// AdjustQuantBlockAC heuristic B — sparse Y-channel handling.
 /// Mirrors upstream lines 222-255.
 ///
@@ -604,6 +690,68 @@ mod tests {
         for v in &t {
             assert_eq!(*v, 0.54);
         }
+    }
+
+    #[test]
+    fn test_heuristic_e_skips_small_transforms() {
+        use crate::forks::transform::{RAW_STRATEGY_DCT, RAW_STRATEGY_DCT4X4};
+        let q = 100;
+        let stats = AdjustQuantBlockStats {
+            sum_of_error: 1e6, // huge
+            ..Default::default()
+        };
+        for &strat in &[RAW_STRATEGY_DCT, RAW_STRATEGY_DCT4X4] {
+            let mut q2 = q;
+            assert!(!apply_heuristic_e_large_transform(&mut q2, &stats, 1, strat, 1, 1));
+            assert_eq!(q2, q);
+        }
+    }
+
+    #[test]
+    fn test_heuristic_e_dct16_fires_on_large_error() {
+        use crate::forks::transform::RAW_STRATEGY_DCT16X16;
+        // DCT16x16 (xsize=2, ysize=2). area = 4*64 = 256.
+        // K_MUL1[0][1] (Y) = 0.4579748, K_MUL2[0][1] = 1.1255767.
+        // With sum_of_vals = 0: threshold = 0.4579748 * 256 + 0 = 117.24.
+        // For norm_error > 117.24, need sum_of_error > 117.24 / 2.2942 ≈ 51.1
+        let mut q = 100;
+        let stats = AdjustQuantBlockStats {
+            sum_of_error: 1000.0, // norm_error = 2294 > threshold
+            sum_of_vals: 0.0,
+            ..Default::default()
+        };
+        let fired = apply_heuristic_e_large_transform(
+            &mut q,
+            &stats,
+            1,
+            RAW_STRATEGY_DCT16X16,
+            2,
+            2,
+        );
+        assert!(fired);
+        assert!(q > 100, "quant should be bumped, got {q}");
+        assert!(q <= 100 + 2, "quant bump capped at 2, got {q}");
+    }
+
+    #[test]
+    fn test_heuristic_e_no_fire_on_small_error() {
+        use crate::forks::transform::RAW_STRATEGY_DCT16X16;
+        let mut q = 100;
+        let stats = AdjustQuantBlockStats {
+            sum_of_error: 1.0, // tiny
+            sum_of_vals: 100.0, // raises threshold
+            ..Default::default()
+        };
+        let fired = apply_heuristic_e_large_transform(
+            &mut q,
+            &stats,
+            1,
+            RAW_STRATEGY_DCT16X16,
+            2,
+            2,
+        );
+        assert!(!fired);
+        assert_eq!(q, 100);
     }
 
     #[test]
