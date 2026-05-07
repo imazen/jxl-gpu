@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added — `LossyEncoder` high-level API (`b4eb3619`, `c5c312fb`)
+
+Productionizes the persistent pipeline as a single user-facing API:
+
+```rust
+let lossy = LossyEncoder::new(&enc, width, height);
+
+// One-shot encode (input uploaded once, output downloaded).
+let (r_out, g_out, b_out) = lossy.encode_one(&enc, &r, &g, &b, qac);
+
+// Batch encode at multiple settings on the same input.
+// Input uploaded ONCE; ~5× faster than encode_one in a loop.
+let outputs = lossy.encode_many(&enc, &r, &g, &b, &qac_settings);
+```
+
+**Arbitrary image sizes are supported.** Non-multiples-of-8 are
+padded internally with right+bottom edge replication (matching
+libjxl), pipeline runs on padded dims, output cropped back to
+caller dims. `LossyEncoder::dimensions()` and `padded_dimensions()`
+expose both.
+
+`lossy_encoder_demo` and `lossy_encoder_real_image` examples
+demonstrate one-shot + batch on synthetic and real CLIC2025 photo
+data (cropped to 1017×1013 to exercise the non-aligned path).
+
 ### Performance — GPU pipeline now FASTER than CPU AVX2 (`d6ef26c7`)
 
 The breakthrough: replacing
