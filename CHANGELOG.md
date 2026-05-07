@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Validated — Sub-block selector across CLIC2025 corpus (`6b7411cb`)
+
+`corpus_subblock_picks_demo` runs the full 7-strategy 16×16 partition
+selector across 8 CLIC2025-1024 images (32,768 regions, 45,272
+sub-block cells). The single-image finding from
+`phase3_subblock_real_image_demo` generalizes:
+
+| Strategy | Aggregate pick % |
+|---|---|
+| DCT16×16 | 25.5% |
+| 2×DCT16×8 horiz | 13.7% |
+| 2×DCT8×16 vert | 26.2% |
+| **Four DCT8×8** | **0.1%** (23 of 32,768) |
+| **Four SubBlocks** | **34.5%** |
+
+Pure 4-DCT8 picks 0.0–0.1% on **every image** in the corpus. Within
+the 45,272 sub-block cells, the selector chooses not-DCT8 in 74% of
+cells (DCT4 family + IDENTITY + DCT2X2 win the rest). Stable across
+content — per-cell sub-block ranges are 29-43% and per-cell
+DCT8-share ranges 24-28% across the corpus.
+
+Robust, content-agnostic finding that per-cell strategy choice is
+substantively useful for natural-image VarDCT encoding.
+
 ### Phase 3 — per-cell sub-block strategy choice in select_partitions_16x16
 
 The 16×16 partition selector now supports per-cell sub-block
