@@ -104,16 +104,15 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
-**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, AdjustQuantBlockAC heuristics, non-DCT8 strategies for quantize/dequant, `estimate_entropy_full` orchestration, **inverse** AFV0-3 transform (forward AFV0-3 done as of 2026-05-07; IDENTITY + DCT2X2 forward + inverse done).
+**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, AdjustQuantBlockAC heuristics, non-DCT8 strategies for quantize/dequant, `estimate_entropy_full` orchestration. **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07.
 
 ## Coverage summary
 
 - Phase 1: 7 of 7 ✓ (xyb fwd/inv, gab, gaborish_5x5, mask1x1, denoise, pad_plane)
-- Phase 2 DCT/IDCT: 30 of ~31 ✓ (all 8/16/32/64 squares, rectangulars,
-  and 4-family sub-block variants; raw 4×4 + 4×8 forward DCTs as
-  primitives for AFV; AFV4×4 forward + inverse; **AFV0-3 forward
-  composition done in `forks::afv`**; only inverse 4×4/4×8 raw DCTs
-  remain for the AFV decoder side)
+- Phase 2 DCT/IDCT: 32/32 ✓ (all 8/16/32/64 squares + rectangulars;
+  4-family sub-block variants; raw 4×4 + 4×8 forward + inverse DCTs
+  as primitives for AFV; AFV4×4 forward + inverse; **AFV0-3 forward
+  + inverse composition done in `forks::afv`**)
 - Phase 2 other: 13 of ~13 ✓ (quantize_dct8, quantize_large,
   dequant_dct8, block_l2, pixel_loss, cfl_find_best_multiplier +
   Newton, compute_pre_erosion, per_block_modulations, epf_step1,
@@ -131,12 +130,11 @@ for GPU-friendly batching.
 **Grand total: 56 of ~65 deliverables verified (~86%)**
 
 DCT/IDCT family complete. CfL complete. EPF Steps 1+2 complete.
-11 fork modules verified composing through GpuEncoder (added
-forks::afv). Remaining work concentrates in (a) EPF Step 0 GPU
-kernel (12-tap), (b) full estimate_entropy_full orchestration,
-(c) GPU kernels for non-DCT8 strategies' quantize/dequant,
-(d) **inverse** AFV0-3 transform (forward done) + AFV cost grid
-integration.
+11 fork modules verified composing through GpuEncoder. Remaining
+work concentrates in (a) EPF Step 0 GPU kernel (12-tap), (b) full
+estimate_entropy_full orchestration, (c) GPU kernels for non-DCT8
+strategies' quantize/dequant, (d) AFV0-3 cost grid integration
+(transforms done; needs same wrapper pattern as DCT4/8 family).
 
 ### Note on AC strategy search (Phase 3)
 

@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Phase 5 — AFV0-3 inverse transform — full standard JXL AC strategy family on GPU (`de952f60`, `1d098cbe`)
+
+Closes the AFV port arc. Two new GPU kernels:
+- **Raw 4×4 inverse DCT** (`idct_4x4_raw_kernel`): 16-coeff primitive,
+  bit-near-perfect 5.96e-8 vs upstream `idct_4x4`.
+- **Raw 4×8 inverse DCT** (`idct_4x8_raw_kernel`): 32-coeff primitive
+  consuming the transposed forward output, 5.96e-8.
+
+Plus host-side composition `forks::afv::inverse_afv_transform_gpu`.
+
+Forward + inverse AFV roundtrip on the same synthetic input for all
+4 corner variants (`afv_transform_parity`):
+
+| afv_kind | roundtrip max\|Δ\| |
+|---|---|
+| 0 | 8.94e-8 ✓ |
+| 1 | 5.96e-8 ✓ |
+| 2 | 1.19e-7 ✓ |
+| 3 | 1.19e-7 ✓ |
+
+All FP32 noise floor. **The standard JXL AC strategy family is now
+fully ported on GPU**: every forward + inverse transform in the spec
+(DCT4/8/16/32/64 family squares + rects, IDENTITY, DCT2X2, AFV0-3)
+is available as a GPU kernel and exposed through the encoder facade.
+
 ### Phase 5 — AFV0-3 forward transform on GPU (`faf658a6`, `e8ebb52f`, `0d9514e5`, `4a5fca9b`, `de77c788`, `be8b6206`)
 
 Completes the AFV (Adaptive Frequency Variable) corner DCT family,
