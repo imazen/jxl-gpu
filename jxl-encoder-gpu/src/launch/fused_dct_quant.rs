@@ -1,0 +1,35 @@
+// Copyright (c) Imazen LLC and the JPEG XL Project Authors.
+// Licensed under AGPL-3.0-or-later.
+
+//! Host-side launcher for the fused DCT8+quantize kernel.
+
+use cubecl::prelude::*;
+use cubecl::server::Handle;
+
+use crate::kernels::fused_dct_quant::dct8_quantize_fused_wide_kernel;
+
+#[allow(clippy::too_many_arguments)]
+pub fn dct8_quantize_fused_wide<R: Runtime>(
+    client: &ComputeClient<R>,
+    pixels: Handle,
+    weights: Handle,
+    qac_qm: Handle,
+    thresholds: Handle,
+    output: Handle,
+    num_blocks: u32,
+) {
+    let n_coef = (num_blocks as usize) * 64;
+    let cubes = num_blocks.div_ceil(64).max(1);
+    unsafe {
+        dct8_quantize_fused_wide_kernel::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(cubes, 1, 1),
+            CubeDim::new_1d(64),
+            ArrayArg::from_raw_parts(pixels, n_coef),
+            ArrayArg::from_raw_parts(weights, n_coef),
+            ArrayArg::from_raw_parts(qac_qm, num_blocks as usize),
+            ArrayArg::from_raw_parts(thresholds, 4),
+            ArrayArg::from_raw_parts(output, n_coef),
+        );
+    }
+}

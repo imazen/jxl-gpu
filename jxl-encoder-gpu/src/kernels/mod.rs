@@ -16,6 +16,7 @@ pub mod dct8;
 pub mod dequant;
 pub mod entropy;
 pub mod epf;
+pub mod fused_dct_quant;
 pub mod gab;
 pub mod gaborish;
 pub mod gather;
