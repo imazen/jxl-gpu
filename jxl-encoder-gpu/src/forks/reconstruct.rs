@@ -174,6 +174,162 @@ pub const DCT_RESAMPLE_SCALE_64_TO_8: [f32; 8] = [
     0.717_108_1,
 ];
 
+/// Per-strategy LLF dispatcher. Given the dequantized DC grid for a
+/// single block of the given AC strategy, calls the matching
+/// `restore_llf_*` helper and writes the resulting LLF coefficients
+/// into the right positions of `coeffs`.
+///
+/// Mirrors the body of upstream's `restore_llf_from_dc` per arm
+/// — but factored so the per-strategy DCT math lives in the
+/// individual `restore_llf_*` helpers.
+///
+/// `dc_grid` layout per strategy (row-major within the sub-block grid):
+/// - DCT8 / DCT4×4 / DCT4×8 / DCT8×4 / IDENTITY / DCT2X2 / AFV0-3:
+///   `[dc]` (single value).
+/// - DCT16×8: `[dc(by, bx), dc(by+1, bx)]` (vertical pair).
+/// - DCT8×16: `[dc(by, bx), dc(by, bx+1)]` (horizontal pair).
+/// - DCT16×16: 2×2 grid `[(0,0), (0,1), (1,0), (1,1)]`.
+/// - DCT32×16: 4×2 grid (`iy * 2 + ix`).
+/// - DCT16×32: 2×4 grid (`iy * 4 + ix`).
+/// - DCT32×32: 4×4 grid (`iy * 4 + ix`).
+/// - DCT64×32: 8×4 grid (`iy * 4 + ix`).
+/// - DCT32×64: 4×8 grid (`iy * 8 + ix`).
+/// - DCT64×64: 8×8 grid (`iy * 8 + ix`).
+///
+/// `coeffs.len()` must match the strategy's full coefficient block
+/// size (DCT8 → 64, DCT16×16 → 256, DCT32×32 → 1024, DCT64×64 →
+/// 4096, etc.) — the dispatcher writes only the LLF positions and
+/// leaves AC positions untouched.
+///
+/// Returns the LLF coefficient stride (= columns of the coefficient
+/// block — 8 for square DCT8, 16 for DCT16×16, 32 for DCT32×*, 64
+/// for DCT64×*) so callers can walk the LLF positions if they need
+/// to (the function itself already has).
+pub fn dispatch_restore_llf(
+    coeffs: &mut [f32],
+    dc_grid: &[f32],
+    raw_strategy: u8,
+) -> usize {
+    use crate::forks::transform::{
+        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
+        RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+        RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
+        RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+    };
+
+    match raw_strategy {
+        RAW_STRATEGY_DCT
+        | RAW_STRATEGY_DCT4X4
+        | RAW_STRATEGY_DCT4X8
+        | RAW_STRATEGY_DCT8X4
+        | RAW_STRATEGY_IDENTITY
+        | RAW_STRATEGY_DCT2X2 => {
+            // 1×1 LLF: just the single DC at position [0].
+            coeffs[0] = dc_grid[0];
+            8
+        }
+        RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => {
+            let llf = restore_llf_dct16x8_or_8x16(dc_grid[0], dc_grid[1]);
+            // Coefficient layout: 16×8 = 128 coeffs, stride = 8 cols
+            // (DCT16×8) or 16 (DCT8×16). LLF goes at [0] and [1] for both.
+            coeffs[0] = llf[0];
+            coeffs[1] = llf[1];
+            // For DCT16×8 the post-swap layout is (cy=2, cx=1) → stride 8.
+            // For DCT8×16 the post-swap layout is (cy=1, cx=2) → stride 16.
+            if raw_strategy == RAW_STRATEGY_DCT8X16 {
+                16
+            } else {
+                8
+            }
+        }
+        RAW_STRATEGY_DCT16X16 => {
+            let llf = restore_llf_dct16x16([dc_grid[0], dc_grid[1], dc_grid[2], dc_grid[3]]);
+            // 16×16 layout: stride 16. LLF positions [0, 1, 16, 17].
+            coeffs[0] = llf[0];
+            coeffs[1] = llf[1];
+            coeffs[16] = llf[2];
+            coeffs[17] = llf[3];
+            16
+        }
+        RAW_STRATEGY_DCT32X32 => {
+            let mut grid = [0.0_f32; 16];
+            grid.copy_from_slice(&dc_grid[..16]);
+            let llf = restore_llf_dct32x32(grid);
+            // 32×32 layout: stride 32. LLF positions [iy * 32 + ix] for iy, ix in 0..4.
+            for iy in 0..4 {
+                for ix in 0..4 {
+                    coeffs[iy * 32 + ix] = llf[iy * 4 + ix];
+                }
+            }
+            32
+        }
+        RAW_STRATEGY_DCT32X16 => {
+            let mut grid = [0.0_f32; 8];
+            grid.copy_from_slice(&dc_grid[..8]);
+            let llf = restore_llf_dct32x16(grid);
+            // 32×16 post-swap layout: stride 32. LLF at [iy*32 + ix] for
+            // iy in 0..2, ix in 0..4 (2×4 LLF positions).
+            for iy in 0..2 {
+                for ix in 0..4 {
+                    coeffs[iy * 32 + ix] = llf[iy * 4 + ix];
+                }
+            }
+            32
+        }
+        RAW_STRATEGY_DCT16X32 => {
+            let mut grid = [0.0_f32; 8];
+            grid.copy_from_slice(&dc_grid[..8]);
+            let llf = restore_llf_dct16x32(grid);
+            for iy in 0..2 {
+                for ix in 0..4 {
+                    coeffs[iy * 32 + ix] = llf[iy * 4 + ix];
+                }
+            }
+            32
+        }
+        RAW_STRATEGY_DCT64X64 => {
+            let mut grid = [0.0_f32; 64];
+            grid.copy_from_slice(&dc_grid[..64]);
+            let llf = restore_llf_dct64x64(grid);
+            // 64×64 layout: stride 64. LLF at [iy*64 + ix] for iy, ix in 0..8.
+            for iy in 0..8 {
+                for ix in 0..8 {
+                    coeffs[iy * 64 + ix] = llf[iy * 8 + ix];
+                }
+            }
+            64
+        }
+        RAW_STRATEGY_DCT64X32 => {
+            let mut grid = [0.0_f32; 32];
+            grid.copy_from_slice(&dc_grid[..32]);
+            let llf = restore_llf_dct64x32(grid);
+            // 64×32 post-swap layout: stride 64. LLF at [iy*64 + ix] for
+            // iy in 0..4, ix in 0..8.
+            for iy in 0..4 {
+                for ix in 0..8 {
+                    coeffs[iy * 64 + ix] = llf[iy * 8 + ix];
+                }
+            }
+            64
+        }
+        RAW_STRATEGY_DCT32X64 => {
+            let mut grid = [0.0_f32; 32];
+            grid.copy_from_slice(&dc_grid[..32]);
+            let llf = restore_llf_dct32x64(grid);
+            for iy in 0..4 {
+                for ix in 0..8 {
+                    coeffs[iy * 64 + ix] = llf[iy * 8 + ix];
+                }
+            }
+            64
+        }
+        _ => panic!(
+            "dispatch_restore_llf: unsupported strategy {raw_strategy} \
+             (AFV0-3 routed through forks::afv; other codes unmapped)"
+        ),
+    }
+}
+
 /// Restore the 4×8 LLF coefficients of a DCT64×32 block from the 8×4
 /// stored DC grid. Mirrors upstream `restore_llf_from_dc` for
 /// `RAW_STRATEGY_DCT64X32` (reconstruct.rs lines 758-805).
@@ -861,6 +1017,54 @@ mod tests {
         let [r0, r1] = restore_llf_dct16x8_or_8x16(dc0, dc1);
         assert!((r0 - llf0).abs() < 1e-5, "got {r0} expected {llf0}");
         assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
+    }
+
+    #[test]
+    fn test_dispatch_restore_llf_dct8_writes_position_0() {
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        let mut coeffs = [0.7_f32; 64]; // seed AC positions
+        let stride = dispatch_restore_llf(&mut coeffs, &[1.5_f32], RAW_STRATEGY_DCT);
+        assert_eq!(stride, 8);
+        assert_eq!(coeffs[0], 1.5);
+        // Other positions stay seeded.
+        for i in 1..64 {
+            assert_eq!(coeffs[i], 0.7, "pos {i} unexpectedly modified");
+        }
+    }
+
+    #[test]
+    fn test_dispatch_restore_llf_dct16x16_writes_4_llf_positions() {
+        use crate::forks::transform::RAW_STRATEGY_DCT16X16;
+        let mut coeffs = [0.7_f32; 256];
+        let stride = dispatch_restore_llf(
+            &mut coeffs,
+            &[0.5, 0.5, 0.5, 0.5],
+            RAW_STRATEGY_DCT16X16,
+        );
+        assert_eq!(stride, 16);
+        // Constant DC c=0.5 → only LLF[0,0] = c (other 3 LLF positions ~0).
+        assert!((coeffs[0] - 0.5).abs() < 1e-5);
+        assert!(coeffs[1].abs() < 1e-5);
+        assert!(coeffs[16].abs() < 1e-5);
+        assert!(coeffs[17].abs() < 1e-5);
+        // Other positions stay seeded.
+        for &i in &[2_usize, 15, 18, 32, 64, 100, 255] {
+            assert_eq!(coeffs[i], 0.7, "pos {i} unexpectedly modified");
+        }
+    }
+
+    #[test]
+    fn test_dispatch_restore_llf_dct32x32_writes_4x4_llf() {
+        use crate::forks::transform::RAW_STRATEGY_DCT32X32;
+        let mut coeffs = [0.0_f32; 1024];
+        let stride =
+            dispatch_restore_llf(&mut coeffs, &[0.5_f32; 16], RAW_STRATEGY_DCT32X32);
+        assert_eq!(stride, 32);
+        assert!((coeffs[0] - 0.5).abs() < 1e-5);
+        // Verify no off-LLF position was touched (sample from far areas).
+        for &i in &[5_usize, 32 * 4, 32 * 31 + 31] {
+            assert_eq!(coeffs[i], 0.0);
+        }
     }
 
     #[test]
