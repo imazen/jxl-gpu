@@ -51,6 +51,30 @@ use crate::encoder::GpuEncoder;
 /// X/B (`c=0/2`): `{0.58, 0.62, 0.62, 0.62}`, with multi-block
 /// reduction `-0.00744 * covered_x*covered_y` (floored at 0.5)
 /// when `covered_x * covered_y >= 4`.
+///
+/// ```
+/// use jxl_encoder_gpu::forks::quantize::default_thresholds;
+///
+/// // Y channel always {0.56, 0.62, 0.62, 0.62} regardless of coverage.
+/// assert_eq!(default_thresholds(1, 1, 1), [0.56, 0.62, 0.62, 0.62]);
+/// assert_eq!(default_thresholds(1, 8, 8), [0.56, 0.62, 0.62, 0.62]);
+///
+/// // X/B single-block: {0.58, 0.62, 0.62, 0.62}.
+/// assert_eq!(default_thresholds(0, 1, 1), [0.58, 0.62, 0.62, 0.62]);
+/// assert_eq!(default_thresholds(2, 1, 1), [0.58, 0.62, 0.62, 0.62]);
+///
+/// // X/B multi-block (coverage>=4): -0.00744 per coverage unit.
+/// // 2x2 = 4 blocks → adjustment = 0.00744 * 4 = 0.02976.
+/// let t = default_thresholds(0, 2, 2);
+/// assert!((t[0] - (0.58 - 0.02976)).abs() < 1e-5);
+/// assert!((t[1] - (0.62 - 0.02976)).abs() < 1e-5);
+///
+/// // Very large coverage clamps each threshold at 0.5.
+/// let t = default_thresholds(0, 16, 16);
+/// for &v in &t {
+///     assert!(v >= 0.5);
+/// }
+/// ```
 pub fn default_thresholds(c: usize, covered_x: usize, covered_y: usize) -> [f32; 4] {
     let mut thres = if c == 1 {
         [0.56_f32, 0.62, 0.62, 0.62]
