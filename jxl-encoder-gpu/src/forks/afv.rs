@@ -111,27 +111,71 @@ pub fn pack_afv_dcs(coeffs: &mut [f32; 64]) {
     coeffs[8] = (block00 + block01 - 2.0 * block10) * 0.25;
 }
 
-/// **TODO**: Forward AFV transform on a single 8×8 pixel block.
+/// Forward AFV transform on a single 8×8 pixel block.
 ///
-/// Currently NOT implemented — needs raw 4×4 + 4×8 GPU DCT kernels
-/// (16-coeff and 32-coeff respectively). The existing
-/// `dct_4x4_full_blocks` / `dct_4x8_full_blocks` operate on 64-coeff
-/// 8×8 blocks (with internal sub-block layout) and aren't suitable.
-///
-/// The host-side helpers (`extract_*`, `pack_afv_dcs`) and the
-/// AFV 4×4 GPU kernel ([`crate::launch::afv::afv_dct_4x4`]) are
-/// in place — the missing piece is plain raw 4×4 + 4×8 DCTs.
+/// Three GPU launches (AFV 4×4, raw DCT 4×4, raw DCT 4×8) plus
+/// host-side shuffling / DC packing. Mirrors upstream
+/// `afv_transform_from_pixels` exactly. Output is the 64-coefficient
+/// AFV layout the decoder expects.
 pub fn afv_transform_gpu<R: Runtime>(
-    _enc: &GpuEncoder<R>,
-    _basis_t: &[f32; 256],
-    _pixels: &[f32; 64],
-    _afv_kind: AfvKind,
+    enc: &GpuEncoder<R>,
+    basis_t: &[f32; 256],
+    pixels: &[f32; 64],
+    afv_kind: AfvKind,
 ) -> [f32; 64] {
-    todo!(
-        "afv_transform_gpu: needs raw 4×4 and 4×8 GPU DCT kernels \
-         (existing dct4_full kernels operate on 64-coeff 8×8 blocks). \
-         See module docs."
-    )
+    use cubecl::prelude::*;
+
+    let mut coeffs = [0.0_f32; 64];
+    let client = enc.client_ref();
+
+    // ── Step 1: AFV 4×4 DCT on the (mirrored) corner block. ──
+    let afv_corner = extract_afv_corner(pixels, afv_kind);
+    let h_in_a = client.create_from_slice(f32::as_bytes(&afv_corner));
+    let h_basis = client.create_from_slice(f32::as_bytes(basis_t));
+    let h_out_a = client.create_from_slice(f32::as_bytes(&[0.0_f32; 16]));
+    crate::launch::afv::afv_dct_4x4::<R>(client, h_in_a, h_basis, h_out_a.clone(), 1);
+    let bytes = client.read_one(h_out_a).expect("afv");
+    let afv_coeffs: &[f32] = f32::from_bytes(&bytes);
+    // Place at (even_y, even_x): coefficients[iy*2*8 + ix*2].
+    for iy in 0..4 {
+        for ix in 0..4 {
+            coeffs[iy * 2 * 8 + ix * 2] = afv_coeffs[iy * 4 + ix];
+        }
+    }
+
+    // ── Step 2: Raw 4×4 DCT on the adjacent corner. ──
+    let dct4_corner = extract_dct4_corner(pixels, afv_kind);
+    let h_in_d = client.create_from_slice(f32::as_bytes(&dct4_corner));
+    let h_out_d = client.create_from_slice(f32::as_bytes(&[0.0_f32; 16]));
+    crate::launch::dct4_raw::dct_4x4_raw::<R>(client, h_in_d, h_out_d.clone(), 1);
+    let bytes = client.read_one(h_out_d).expect("dct4");
+    let dct4_coeffs: &[f32] = f32::from_bytes(&bytes);
+    // Place at (even_y, odd_x): coefficients[iy*2*8 + ix*2 + 1].
+    for iy in 0..4 {
+        for ix in 0..4 {
+            coeffs[iy * 2 * 8 + ix * 2 + 1] = dct4_coeffs[iy * 4 + ix];
+        }
+    }
+
+    // ── Step 3: Raw 4×8 DCT on the other half. ──
+    let dct4x8_half = extract_dct4x8_half(pixels, afv_kind);
+    let h_in_8 = client.create_from_slice(f32::as_bytes(&dct4x8_half));
+    let h_out_8 = client.create_from_slice(f32::as_bytes(&[0.0_f32; 32]));
+    crate::launch::dct4_raw::dct_4x8_raw::<R>(client, h_in_8, h_out_8.clone(), 1);
+    let bytes = client.read_one(h_out_8).expect("dct4x8");
+    let dct4x8_coeffs: &[f32] = f32::from_bytes(&bytes);
+    // Place at (odd_y, *): coefficients[(1 + iy*2)*8 + ix].
+    // The dct_4x8_raw output is transposed (4 cols × 8 rows = `output[col*8+row]`)
+    // matching upstream's dct_4x8 convention; iy*8 + ix indexes col=iy, row=ix.
+    for iy in 0..4 {
+        for ix in 0..8 {
+            coeffs[(1 + iy * 2) * 8 + ix] = dct4x8_coeffs[iy * 8 + ix];
+        }
+    }
+
+    // ── Step 4: DC packing. ──
+    pack_afv_dcs(&mut coeffs);
+    coeffs
 }
 
 /// Single-sub-block AFV 4×4 DCT helper. Wraps the GPU kernel for a
