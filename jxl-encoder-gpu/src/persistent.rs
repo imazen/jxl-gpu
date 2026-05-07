@@ -16,14 +16,27 @@
 //! mask1x1 vs ~17 ms for a hand-coded persistent pipeline (3.2×
 //! slower). At 4096×4096, 1970 ms vs 964 ms (2.0× slower).
 //!
-//! This module provides:
-//! - [`GpuPlane`] — typed handle to a GPU-resident `f32` plane
-//!   (width, height, GPU buffer). Holds an opaque `cubecl::Handle`.
-//! - Persistent-API methods on [`GpuEncoder`] that return `GpuPlane`s
-//!   (suffixed `_persistent`). Caller chains stages without
-//!   round-tripping data through host memory.
-//! - [`GpuEncoder::download_plane`] / `upload_plane` for explicit
-//!   transfer at the pipeline boundaries.
+//! Most users want [`crate::lossy_encoder::LossyEncoder`] instead;
+//! this module is the lower-level building blocks for callers
+//! composing custom pipelines.
+//!
+//! ## Typed handles
+//!
+//! | Type | Layout | Use |
+//! |---|---|---|
+//! | [`GpuPlane`] | `width × height` `f32` (row-major) | spatial plane data (XYB channels, RGB, masks) |
+//! | [`GpuBlocks`] | `num_blocks × coeffs_per_block` `f32` | per-block coefficient data (DCT output, dequantized) |
+//! | [`GpuI32Blocks`] | `num_blocks × coeffs_per_block` `i32` | per-block quantized coefficient data |
+//!
+//! ## Method naming
+//!
+//! Persistent-API methods on [`GpuEncoder`] are suffixed `_persistent`
+//! and take/return the typed handles above. Caller chains stages
+//! without host roundtrips. Boundary methods:
+//!
+//! - [`GpuEncoder::upload_plane`] / [`GpuEncoder::download_plane`]
+//! - [`GpuEncoder::upload_blocks`] / [`GpuEncoder::download_blocks`]
+//! - [`GpuEncoder::download_i32_blocks`]
 //!
 //! ## Lifetime model
 //!
