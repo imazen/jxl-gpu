@@ -18,7 +18,7 @@
 fn main() {
     use cubecl::Runtime;
     use cubecl::prelude::*;
-    use jxl_encoder_gpu::launch::dct8::{dct_8x8, dct_8x8_coop};
+    use jxl_encoder_gpu::launch::dct8::{dct_8x8, dct_8x8_coop, dct_8x8_wide};
 
     type Backend = cubecl::cuda::CudaRuntime;
     let device = <Backend as Runtime>::Device::default();
@@ -33,13 +33,13 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(7);
 
-    println!("=== DCT8 throughput: CPU vs naive-GPU vs cooperative-GPU ===");
+    println!("=== DCT8 throughput: CPU vs naive-GPU vs cooperative-GPU vs wide-GPU ===");
     println!("Iters per size: {iters} (1 warmup + {} sampled)\n", iters - 1);
     println!(
-        "{:>6}  {:>9}  {:>10}  {:>10}  {:>10}  {:>8}  {:>8}",
-        "side", "blocks", "CPU ms", "naive ms", "coop ms", "naive×", "coop×"
+        "{:>6}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>7}  {:>7}  {:>7}",
+        "side", "blocks", "CPU ms", "naive ms", "coop ms", "wide ms", "naive×", "coop×", "wide×"
     );
-    println!("{}", "─".repeat(70));
+    println!("{}", "─".repeat(82));
 
     for &side in &sizes {
         let nb = (side / 8) * (side / 8);
@@ -126,18 +126,49 @@ fn main() {
             );
         }
 
+        // GPU wide-cube
+        let mut wide_times = Vec::with_capacity(iters);
+        let mut wide_out = vec![0.0_f32; n];
+        for it in 0..iters {
+            let t = std::time::Instant::now();
+            let h_in = client.create_from_slice(f32::as_bytes(&input));
+            let h_out = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            dct_8x8_wide::<Backend>(&client, h_in, h_out.clone(), nb as u32);
+            let bytes = client.read_one(h_out).expect("read");
+            let result: &[f32] = f32::from_bytes(&bytes);
+            let dt = t.elapsed();
+            if it > 0 {
+                wide_times.push(dt);
+            }
+            if it == iters - 1 {
+                wide_out = result.to_vec();
+            }
+        }
+        wide_times.sort();
+        let wide_med = wide_times[wide_times.len() / 2];
+        let max_wide = wide_out
+            .iter()
+            .zip(&cpu_out)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        if max_wide > 1e-4 {
+            eprintln!("WARNING: wide parity drift at side={side}: {max_wide:.3e}");
+        }
+
         let cpu_ms = cpu_med.as_secs_f64() * 1000.0;
         let naive_ms = naive_med.as_secs_f64() * 1000.0;
         let coop_ms = coop_med.as_secs_f64() * 1000.0;
+        let wide_ms = wide_med.as_secs_f64() * 1000.0;
         let naive_x = cpu_med.as_secs_f64() / naive_med.as_secs_f64();
         let coop_x = cpu_med.as_secs_f64() / coop_med.as_secs_f64();
+        let wide_x = cpu_med.as_secs_f64() / wide_med.as_secs_f64();
         println!(
-            "{:>6}  {:>9}  {:>10.2}  {:>10.2}  {:>10.2}  {:>6.2}×  {:>6.2}×",
-            side, nb, cpu_ms, naive_ms, coop_ms, naive_x, coop_x
+            "{:>6}  {:>9}  {:>9.2}  {:>9.2}  {:>9.2}  {:>9.2}  {:>5.2}×  {:>5.2}×  {:>5.2}×",
+            side, nb, cpu_ms, naive_ms, coop_ms, wide_ms, naive_x, coop_x, wide_x
         );
     }
     println!(
-        "\n  naive× / coop× = CPU_time / GPU_time. >1.0 = GPU faster than CPU.\n  Coop kernel uses cube_dim=8 (one thread per row); naive uses cube_dim=1.\n  Both produce identical output to CPU within sub-ulp tolerance."
+        "\n  naive× / coop× / wide× = CPU_time / GPU_time. >1.0 = GPU faster.\n  naive: cube_dim=1, one block per cube.\n  coop:  cube_dim=8, one block per cube, one thread per row, sync_cube barriers.\n  wide:  cube_dim=32, ONE block per thread, 32 blocks per cube, no sync.\n  All three produce identical output to CPU within sub-ulp tolerance."
     );
 }
 

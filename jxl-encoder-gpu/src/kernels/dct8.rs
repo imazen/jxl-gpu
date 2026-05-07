@@ -251,6 +251,89 @@ pub fn dct_8x8_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     }
 }
 
+/// Wide-cube forward 8×8 DCT: each thread handles ONE complete block,
+/// but cubes pack `WIDE_CUBE_DIM` threads to amortize launch overhead.
+///
+/// Per-thread scratch lives at `[UNIT_POS * 64 + ...]` of a
+/// shared `WIDE_CUBE_DIM * 64` array. Each thread reads/writes its
+/// own 64-float slice; no inter-thread communication.
+///
+/// Trades cube_dim=1's private-shared-memory simplicity for better
+/// launch amortization and warp utilization.
+const WIDE_CUBE_DIM: u32 = 32;
+
+#[cube(launch_unchecked)]
+pub fn dct_8x8_wide_kernel(input: &Array<f32>, output: &mut Array<f32>) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = input.len() / 64usize;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+    let unit = UNIT_POS;
+    let private_base = unit * 64u32;
+    let private_base_us = private_base as usize;
+
+    let mut scratch = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut transposed = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            scratch[private_base_us + row_off_us + cu] = input[off + row_off_us + cu];
+            c += 1u32;
+        }
+        dct1d_8(&mut scratch, private_base + row_off);
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            scratch[private_base_us + row_off_us + cu] =
+                scratch[private_base_us + row_off_us + cu] * ONE_OVER_8;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            transposed[private_base_us + cu * 8usize + ru] =
+                scratch[private_base_us + ru * 8usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        dct1d_8(&mut transposed, private_base + row_off);
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            transposed[private_base_us + row_off_us + cu] =
+                transposed[private_base_us + row_off_us + cu] * ONE_OVER_8;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    let mut i: u32 = 0u32;
+    while i < 64u32 {
+        let iu = i as usize;
+        output[off + iu] = transposed[private_base_us + iu];
+        i += 1u32;
+    }
+}
+
 /// Cooperative forward 8×8 DCT: 8 threads per block, one per row.
 ///
 /// Each cube processes one block. Within a cube, thread `r` (UNIT_POS)
