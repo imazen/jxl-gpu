@@ -132,6 +132,13 @@ pub fn coeff_count_per_strategy(raw_strategy: u8) -> usize {
 /// IDENTITY/DCT2X2 extract from an 8×8 region (their internal layout
 /// differs but the gather is the same). AFV0-3 also extract from 8×8
 /// but use a per-block composition kernel — see `forks::afv` instead.
+///
+/// Public for use by reconstruct/scatter logic that needs the
+/// per-strategy pixel block size.
+pub fn tile_dims_pixels(raw_strategy: u8) -> (usize, usize) {
+    tile_dims(raw_strategy)
+}
+
 fn tile_dims(raw_strategy: u8) -> (usize, usize) {
     match raw_strategy {
         // 8×8 extraction; transform sub-divides internally

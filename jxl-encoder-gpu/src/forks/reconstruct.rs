@@ -174,6 +174,40 @@ pub const DCT_RESAMPLE_SCALE_64_TO_8: [f32; 8] = [
     0.717_108_1,
 ];
 
+/// Scatter a single block's IDCT output (in pixel layout, row-major,
+/// stride = block_width) into the padded plane at the block's pixel
+/// position `(bx * 8, by * 8)`.
+///
+/// `block_pixels` must contain `block_w * block_h` floats where
+/// `(block_w, block_h) = forks::transform::tile_dims_pixels(raw_strategy)`.
+///
+/// Mirrors the per-strategy scatter loop in upstream's
+/// `reconstruct_xyb_impl` (reconstruct.rs lines 459-469): writes
+/// `block_w` floats per row for `block_h` rows into the destination
+/// plane, advancing `padded_width` per row.
+///
+/// `plane.len()` must be at least `padded_width * (by * 8 + block_h)`
+/// (the plane should be the full padded XYB plane for that channel).
+pub fn scatter_block_to_plane(
+    plane: &mut [f32],
+    block_pixels: &[f32],
+    bx: usize,
+    by: usize,
+    raw_strategy: u8,
+    padded_width: usize,
+) {
+    let (block_w, block_h) = crate::forks::transform::tile_dims_pixels(raw_strategy);
+    debug_assert_eq!(block_pixels.len(), block_w * block_h);
+    let pixel_x = bx * 8;
+    let pixel_y = by * 8;
+    for row in 0..block_h {
+        let dst_off = (pixel_y + row) * padded_width + pixel_x;
+        let src_off = row * block_w;
+        plane[dst_off..dst_off + block_w]
+            .copy_from_slice(&block_pixels[src_off..src_off + block_w]);
+    }
+}
+
 /// Per-strategy LLF dispatcher. Given the dequantized DC grid for a
 /// single block of the given AC strategy, calls the matching
 /// `restore_llf_*` helper and writes the resulting LLF coefficients
@@ -1017,6 +1051,60 @@ mod tests {
         let [r0, r1] = restore_llf_dct16x8_or_8x16(dc0, dc1);
         assert!((r0 - llf0).abs() < 1e-5, "got {r0} expected {llf0}");
         assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
+    }
+
+    #[test]
+    fn test_scatter_block_to_plane_dct8() {
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        // 32×16 padded plane (4 wide × 2 tall blocks).
+        let padded_w = 32_usize;
+        let padded_h = 16_usize;
+        let mut plane = vec![0.0_f32; padded_w * padded_h];
+        // Place a constant block at (bx=2, by=1).
+        let block: Vec<f32> = (0..64).map(|i| i as f32).collect();
+        scatter_block_to_plane(&mut plane, &block, 2, 1, RAW_STRATEGY_DCT, padded_w);
+        // Row 0 of the block lands at (px=16, py=8).
+        for col in 0..8 {
+            assert_eq!(
+                plane[8 * padded_w + 16 + col],
+                col as f32,
+                "row 0 col {col}"
+            );
+        }
+        // Row 7 lands at (px=16, py=15).
+        for col in 0..8 {
+            assert_eq!(
+                plane[15 * padded_w + 16 + col],
+                (7 * 8 + col) as f32,
+                "row 7 col {col}"
+            );
+        }
+        // Adjacent untouched pixel at (15, 8) still 0.
+        assert_eq!(plane[8 * padded_w + 15], 0.0);
+        // Pixel just past the block (24, 8) still 0.
+        assert_eq!(plane[8 * padded_w + 24], 0.0);
+    }
+
+    #[test]
+    fn test_scatter_block_to_plane_dct16x16() {
+        use crate::forks::transform::RAW_STRATEGY_DCT16X16;
+        // 32×16 plane is too small; use 64×32 (8 wide × 4 tall blocks)
+        let padded_w = 64_usize;
+        let padded_h = 32_usize;
+        let mut plane = vec![0.0_f32; padded_w * padded_h];
+        let block = vec![0.5_f32; 256]; // 16×16 constant
+        // Place a 16×16 block at (bx=2, by=1) → covers pixels
+        // (16..32) × (8..24).
+        scatter_block_to_plane(&mut plane, &block, 2, 1, RAW_STRATEGY_DCT16X16, padded_w);
+        // Spot-check 4 corners + 1 center of the destination region.
+        assert_eq!(plane[8 * padded_w + 16], 0.5); // top-left
+        assert_eq!(plane[8 * padded_w + 31], 0.5); // top-right
+        assert_eq!(plane[23 * padded_w + 16], 0.5); // bot-left
+        assert_eq!(plane[23 * padded_w + 31], 0.5); // bot-right
+        assert_eq!(plane[15 * padded_w + 23], 0.5); // mid
+        // Just outside the block.
+        assert_eq!(plane[8 * padded_w + 15], 0.0);
+        assert_eq!(plane[24 * padded_w + 16], 0.0);
     }
 
     #[test]
