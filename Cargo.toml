@@ -34,18 +34,16 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 jxl = { path = "/home/lilith/work/third-party/jxl-rs/jxl" }
 
 [profile.dev]
-# Compile our code at opt-level=3 even in debug builds — GPU
-# kernels and DCT inner loops are too slow at -O0 to be useful
-# during iteration. Build deps stay at the cargo default (1) so
-# clean builds aren't penalized.
+# Compile at opt-level=3 even in debug builds — GPU kernels and
+# DCT inner loops are too slow at -O0 to be useful during iteration.
 opt-level = 3
 
-# Debug builds of dependencies stay lightly optimized. cubecl /
-# image / etc. recompile rarely; this just keeps them fast enough
-# during initial download without bloating per-incremental-build
-# time.
+# Dependencies (cubecl, image, jxl, etc.) also at -O3 — they run on
+# every benchmark/example invocation, and -O1 leaves real
+# throughput on the floor. Initial clean build is slower as a
+# result; incremental rebuilds of our crate are unaffected.
 [profile.dev.package."*"]
-opt-level = 1
+opt-level = 3
 
 [profile.release]
 opt-level = 3

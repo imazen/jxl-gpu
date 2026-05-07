@@ -79,6 +79,22 @@ pub const RAW_STRATEGY_DCT64X32: u8 = 13;
 pub const RAW_STRATEGY_DCT32X64: u8 = 14;
 
 /// Number of coefficient floats produced per block by each strategy.
+///
+/// ```
+/// use jxl_encoder_gpu::forks::transform::*;
+///
+/// // 64 coeffs (8×8 input, possibly subdivided): DCT8 + DCT4 family.
+/// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT), 64);
+/// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT4X4), 64);
+/// // 128: DCT16x8 / DCT8x16 (rectangular 16×8).
+/// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT16X8), 128);
+/// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT8X16), 128);
+/// // 256: DCT16x16 square.
+/// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT16X16), 256);
+/// // 512 / 1024 / 2048 / 4096: DCT32+/DCT64+ family.
+/// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT32X32), 1024);
+/// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT64X64), 4096);
+/// ```
 pub fn coeff_count_per_strategy(raw_strategy: u8) -> usize {
     match raw_strategy {
         RAW_STRATEGY_DCT | RAW_STRATEGY_DCT4X8 | RAW_STRATEGY_DCT8X4 | RAW_STRATEGY_DCT4X4 => 64,
