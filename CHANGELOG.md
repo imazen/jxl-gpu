@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### `compute_epf_sharpness_dct8_gpu` — end-to-end EPF sharpness picker on GPU (`9a8903dd`, `fe1bf69d`)
+
+Closes the EPF sharpness orchestrator gap for the DCT8-only path.
+Two pieces:
+
+1. `forks::epf::apply_epf_chain_gpu` (`9a8903dd`) — full step0+step1+
+   step2 chain orchestrator per upstream's `apply_epf` semantics.
+   Tier gating: `epf_iters >= 3` runs step 0, `>= 1` runs step 1,
+   `>= 2` runs step 2. Sigma scales 1.485 / 1.65 / 10.725 match
+   upstream exactly.
+2. `forks::epf::epf_sharpness_candidates(distance)` (`9a8903dd`) —
+   `&'static` slice selector returning `[0, 4]` at distance > 4.5,
+   `[0, 2, 7]` otherwise.
+3. `forks::epf::compute_epf_sharpness_dct8_gpu` (`fe1bf69d`) — the
+   full orchestrator. Pipeline:
+
+   ```
+   reconstruct_xyb_dct8_only_gpu          (4 launches)
+     → gab_smooth_gpu (optional)          (3 launches)
+     → for each candidate:
+         compute_inv_sigma_map (host)
+         apply_epf_chain_gpu               (3-9 launches)
+         enc.block_l2_errors               (1 launch)
+     → select_sharpness_two_pass (host)
+   ```
+
+   Per-candidate cost: 4-10 GPU launches plus one host-side picker
+   pass. Three candidates → ~12-30 launches per image at the
+   typical settings.
+
+Together with the AdjustQuantBlockAC port (session 6.5) and the
+AFV cost grid integration (session 6.4), the encoder-side
+reconstruction + quality heuristic chain is now fully GPU-resident
+for the common DCT8-only case. Mixed-strategy images need the
+per-strategy IDCT dispatch + scatter still pending in
+`forks::reconstruct`.
+
 ### DCT8-only `reconstruct_xyb_*_gpu` orchestrator (`878e144f`, `44405a8d`, `984431fb`)
 
 The DCT8 fast path of upstream's `reconstruct_xyb` (which produces

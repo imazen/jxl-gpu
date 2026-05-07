@@ -105,7 +105,7 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
-**Not yet covered (CPU path stays):** `compute_epf_sharpness` orchestrator (selection logic + DCT8 reconstruct now both ported; full mixed-strategy `reconstruct_xyb_gpu` still TODO for non-DCT8 blocks), `estimate_entropy_full` orchestration. **AdjustQuantBlockAC fully ported as host helpers as of 2026-05-07** — pre-scan + all 6 heuristics A-F + orchestrator (`forks::quantize::adjust_quant_block_ac_host`) match upstream. A future `#[cube]` kernel can transcribe the now-standalone heuristics for per-block-parallel execution without further reverse-engineering. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **DCT8-only reconstruct path on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_xyb_dct8_only_gpu` composes dequant + DC override + IDCT + scatter into 4 GPU launches per image. Sufficient for the all-blocks-are-DCT8 case (common for straightforward distance values). **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
+**Not yet covered (CPU path stays):** mixed-strategy `reconstruct_xyb_gpu` (per-strategy IDCT dispatch + scatter for non-DCT8 blocks), `estimate_entropy_full` orchestration. **`compute_epf_sharpness_dct8_gpu` fully composed as of 2026-05-07** — `forks::epf::compute_epf_sharpness_dct8_gpu` runs reconstruct → gaborish (opt) → per-candidate EPF + L2 → two-pass selection on GPU end-to-end for the DCT8-only path. **AdjustQuantBlockAC fully ported as host helpers as of 2026-05-07** — pre-scan + all 6 heuristics A-F + orchestrator (`forks::quantize::adjust_quant_block_ac_host`) match upstream. A future `#[cube]` kernel can transcribe the now-standalone heuristics for per-block-parallel execution without further reverse-engineering. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **DCT8-only reconstruct path on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_xyb_dct8_only_gpu` composes dequant + DC override + IDCT + scatter into 4 GPU launches per image. Sufficient for the all-blocks-are-DCT8 case (common for straightforward distance values). **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
 
 ## Coverage summary
 
@@ -140,11 +140,13 @@ two-pass selection logic ported as pure-CPU helper.
 **AdjustQuantBlockAC fully ported** (pre-scan + 6 heuristics A-F
 + orchestrator). **DCT8-only reconstruct path on GPU** (4 launches
 per image — dequant + IDCT×3 + host DC override + host scatter).
-Remaining work concentrates in (a) mixed-strategy reconstruct (per-
-strategy IDCT dispatch + scatter for non-DCT8 blocks), (b) full
-estimate_entropy_full orchestration, (c) optional GPU kernels:
-per-block AdjustQuantBlockAC batch parallelism, sharpness candidate
-fan-out.
+**`compute_epf_sharpness_dct8_gpu` end-to-end** (reconstruct →
+gaborish → per-candidate EPF + L2 → two-pass picker, all on GPU
+plus the small host-side picker logic). Remaining work concentrates
+in (a) mixed-strategy reconstruct (per-strategy IDCT dispatch +
+scatter for non-DCT8 blocks), (b) full estimate_entropy_full
+orchestration, (c) optional GPU kernels: per-block
+AdjustQuantBlockAC batch parallelism, sharpness candidate fan-out.
 
 ### Note on AC strategy search (Phase 3)
 
