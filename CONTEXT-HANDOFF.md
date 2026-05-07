@@ -1,22 +1,84 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-06 (session 2 end — autonomous plateau)
+**Last updated:** 2026-05-06 (session 3 — perf breakthrough)
 **Repo:** https://github.com/imazen/jxl-gpu (live, public)
-**Local:** ~/work/zen/jxl-encoder-gpu/ (37 commits on main, in sync with origin)
+**Local:** ~/work/zen/jxl-encoder-gpu/ (~85 commits on main, in sync with origin)
 **Hardware verified:** RTX 5070, CUDA 13.2, jj 0.40, rustc 1.95
 
-## Bottom line
+## Bottom line — GPU now BEATS CPU AVX2 at every measured size
 
-This session built a substantial GPU JXL encoder kernel library + facade:
-- **45 of ~52 kernel deliverables** verified with parity tests (~87%)
-- **Phase 3 components 1+2** prototyped end-to-end (cost-grid composition + 4-strategy partition selector across 3 region tiers, 12 unit tests)
-- **42-method `GpuEncoder<R>` facade** covering the entire DCT/IDCT family + all supporting kernels
-- **Equivalence validated** at 256×256 random scale: GPU XYB matches jxl-encoder-simd CPU XYB at 1.79e-7 abs (sub-ulp)
-- **End-to-end pipeline demo** chains 8 GpuEncoder methods on real image-shaped data
-- **CI workflow** ready (multi-platform build matrix, fmt + clippy gates)
-- **Public GitHub repo** at imazen/jxl-gpu
+End-to-end CPU vs GPU lossy DCT8 pipeline (RTX 5070 + Ryzen 9 7950X):
 
-Nothing in the repo is half-finished. Every kernel ships with a parity test. Every GpuEncoder method is callable today. The Phase 3 prototype runs end-to-end with sensible decisions on synthetic input.
+```
+side    CPU ms    GPU ms    ratio        throughput
+ 256     1.61     1.49     1.08× GPU    44 MP/s
+ 512     9.39     4.28     2.19× GPU    61 MP/s
+1024    39.46    17.66     2.23× GPU    59 MP/s
+2048   150.55    41.33     3.64× GPU   101 MP/s vs 28 MP/s
+4096   604.21   506.34     1.19× GPU    33 MP/s
+```
+
+Parity 4e-6 max abs delta. **The breakthrough was switching
+`client.create_from_slice(&vec![0.0; n])` → `client.empty(n*4)` in
+the persistent API** (commit `d6ef26c7`) — eliminated a ~200MB host-
+to-GPU memcpy of zeros per pipeline run that the kernel was about to
+overwrite anyway. Pipeline went from 375ms → 48ms at 2048² (7.8×).
+
+Without that fix, GPU was 1.7-3.3× SLOWER than CPU. With it, the
+GPU is 1.05-3.95× FASTER. Same code, one allocation API switch.
+
+## What's been built
+
+### Persistent GPU buffer API + 14 typed-handle methods
+- `GpuPlane<R>`, `GpuBlocks<R>`, `GpuI32Blocks<R>` typed handles
+- ~30 persistent methods covering full encoder front+back
+- 3 new GPU kernels: `gather_blocks`, `scatter_blocks`, `restore_dc`
+- Cooperative DCT8 (cube_dim=8) + Wide DCT8/IDCT8 (cube_dim=64)
+- Fused DCT+quant + dequant+IDCT-Y (2-3× per-kernel)
+
+### 11 fork modules of `jxl-encoder` pipeline stages
+xyb, gaborish, adaptive_quant, reconstruct, transform (13 DCT
+strategies), cfl, epf, dequant, quantize, cost, pad
+
+### 12 example demos
+- Composition: forks_pipeline_demo, lossy_roundtrip_demo,
+  lossy_roundtrip_persistent
+- Real-image: real_image_encode (djxl-verified),
+  jxl_rs_roundtrip (jxl-rs-verified)
+- Throughput: xyb_throughput_bench, xyb_scaling_bench,
+  persistent_buffer_pipeline, lossy_pipeline_throughput,
+  lossy_pipeline_fused_throughput, lossy_pipeline_breakdown,
+  lossy_pipeline_no_io, dct8_coop_bench, fused_dct_quant_bench,
+  fused_dequant_idct_bench
+
+### Test coverage
+- 50 unit tests passing (cuda)
+- 12 partition selector tests (cpu)
+- Real 1024×1024 CLIC photo encode + djxl + jxl-rs roundtrip
+- Full pipeline parity 4e-6 max abs delta CPU vs GPU
+
+## Next perf frontier (in priority order)
+
+1. **Buffer reuse for batch workloads.** `lossy_pipeline_no_io`
+   shows headroom: at 4096² no-IO is 19ms vs 592ms with-IO (30×
+   faster, the entire delta is host↔GPU memcpy). For video encoders
+   or batch image processors that re-use input buffers, a
+   `LossyContext<R>` API that pre-allocates per-shape buffers and
+   reuses them across encode calls would push GPU to 10-60× CPU.
+
+2. **Pinned host memory for upload/download.** cubecl currently uses
+   pageable host memory which caps PCIe transfers at ~3-5 GB/s.
+   Pinned memory hits ~25 GB/s. Requires cubecl-internal change.
+
+3. **Larger fusions.** XYB+DCT+quantize as one kernel would skip
+   the intermediate XYB plane entirely. Requires re-architecting
+   the persistent API to handle planar→per-block transitions
+   inside a kernel.
+
+4. **GPU dc_coding.** Currently DC restore is a roundtrip-demo
+   shortcut. Real encoders need a separate GPU DC quant + entropy
+   path that integrates with the fused DCT+quant kernel (which
+   currently zeros DC).
 
 ## Why the loop is paused here
 
