@@ -169,6 +169,17 @@ pub fn dct_4x4_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
 
 /// Forward raw 4×8 DCT (4 rows × 8 cols). Input/output: `num_blocks * 32` floats.
 /// Output layout: 4 cols × 8 rows (transposed) per upstream's ROWS<COLS convention.
+///
+/// **KNOWN BUG**: this kernel currently has a parity divergence vs
+/// upstream `jxl_encoder::vardct::dct::dct_4x8` (max|Δ| ≈ 7.3e-2 at
+/// some output positions). Tried: helper-based + inlined dct1d_4
+/// inside dct1d_8, two 32-elem SharedMemories vs one 64. None
+/// fixed it. dct_4x4_raw using the same dct1d_4 helper is bit-perfect,
+/// so the issue is somewhere in the dct_4x8 composition or dct1d_8.
+/// See `examples/dct4_raw_parity.rs` for the reproducer.
+///
+/// Uses ONE 64-element SharedMemory split into a tile region [0..32]
+/// + temp region [32..64].
 #[cube(launch_unchecked)]
 pub fn dct_4x8_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     let block_idx = ABSOLUTE_POS;
@@ -178,38 +189,38 @@ pub fn dct_4x8_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     }
     let off = block_idx * 32usize;
 
-    let mut tile = SharedMemory::<f32>::new(32usize);
-    let mut temp = SharedMemory::<f32>::new(32usize);
+    let mut buf = SharedMemory::<f32>::new(64usize);
+    // tile region: [0..32]; temp region: [32..64].
 
     // Pass 1: row DCTs (8-point) on 4 rows × 8 cols. Store transposed
-    // (col, row) into temp with 1/8 scale.
+    // (col, row) into temp region with 1/8 scale.
     let mut row: u32 = 0u32;
     while row < 4u32 {
         let rs = (row * 8u32) as usize;
         let mut k: u32 = 0u32;
         while k < 8u32 {
-            tile[rs + k as usize] = input[off + rs + k as usize];
+            buf[rs + k as usize] = input[off + rs + k as usize];
             k += 1u32;
         }
-        dct1d_8(&mut tile, row * 8u32);
+        dct1d_8(&mut buf, row * 8u32);
         let mut col: u32 = 0u32;
         while col < 8u32 {
-            temp[(col * 4u32 + row) as usize] = tile[rs + col as usize] * ONE_OVER_8;
+            buf[32usize + (col * 4u32 + row) as usize] = buf[rs + col as usize] * ONE_OVER_8;
             col += 1u32;
         }
         row += 1u32;
     }
 
-    // Pass 2: column DCTs (4-point) on temp's 8 rows × 4 cols.
+    // Pass 2: column DCTs (4-point) on temp region's 8 rows × 4 cols.
     // Final transpose: write output as 4 cols × 8 rows (col-major in output).
     let mut row2: u32 = 0u32;
     while row2 < 8u32 {
-        dct1d_4(&mut temp, row2 * 4u32);
-        let s = (row2 * 4u32) as usize;
-        output[off + (0u32 * 8u32 + row2) as usize] = temp[s] * ONE_OVER_4;
-        output[off + (1u32 * 8u32 + row2) as usize] = temp[s + 1usize] * ONE_OVER_4;
-        output[off + (2u32 * 8u32 + row2) as usize] = temp[s + 2usize] * ONE_OVER_4;
-        output[off + (3u32 * 8u32 + row2) as usize] = temp[s + 3usize] * ONE_OVER_4;
+        dct1d_4(&mut buf, 32u32 + row2 * 4u32);
+        let s = 32usize + (row2 * 4u32) as usize;
+        output[off + (0u32 * 8u32 + row2) as usize] = buf[s] * ONE_OVER_4;
+        output[off + (1u32 * 8u32 + row2) as usize] = buf[s + 1usize] * ONE_OVER_4;
+        output[off + (2u32 * 8u32 + row2) as usize] = buf[s + 2usize] * ONE_OVER_4;
+        output[off + (3u32 * 8u32 + row2) as usize] = buf[s + 3usize] * ONE_OVER_4;
         row2 += 1u32;
     }
 }
