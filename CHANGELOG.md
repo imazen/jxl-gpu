@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+### Phase 3 — per-cell sub-block strategy choice in select_partitions_16x16
+
+The 16×16 partition selector now supports per-cell sub-block
+strategy choice via a new `Partition16x16::FourSubBlocks([SubStrategy; 4])`
+variant. Each of the 4 8×8 cells independently picks the lowest-
+cost strategy from `{DCT8, DCT4×4, DCT4×8, DCT8×4, IDENTITY, DCT2X2}`,
+based on optional per-cell cost grids passed via the new
+`SubBlockCostGrids` field on `CostGrids16x16`.
+
+API additions (`6c61103d`, `6345f558`):
+- `pub enum SubStrategy { Dct8, Dct4x4, Dct4x8, Dct8x4, Identity, Dct2x2 }`
+- `pub struct SubBlockCostGrids<'a>` — optional per-cell grids
+- `pub fn pick_subblock_strategies(...) -> (f32, [SubStrategy; 4])`
+- `Partition16x16::FourSubBlocks([SubStrategy; 4])` (new variant)
+- `CostGrids16x16::sub_blocks` (new field, defaults to all-None)
+
+Backwards compatible — existing callers that don't set `sub_blocks`
+continue picking from the original 4-strategy set.
+
+`phase3_subblock_real_image_demo` validation on 1024² CLIC photo
+with real DCT8 quant weights (`dcd1af2c`):
+
+| Strategy           | 16×16-tier picks |
+|---|---|
+| DCT16×16           | 28.2% |
+| Two DCT16×8 horiz  | 10.1% |
+| Two DCT8×16 vert   | 28.2% |
+| **Four DCT8×8**    | **0.1%** (3 regions of 4096) |
+| **Four SubBlocks** | **33.4%** (1367 regions) |
+
+Within the 5468 sub-block cells:
+- DCT8: 27.9%
+- DCT4×4: 14.2%, DCT4×8: 20.2%, DCT8×4: 21.0%
+- IDENTITY: 6.0%, DCT2X2: 10.8%
+
+Pure 4-DCT8 nearly vanishes when sub-block alternatives are
+offered — clear signal that per-cell strategy choice is
+substantively useful for natural-image encoding.
+
+### Real-weights helper module (`939b400b`)
+
+New `pub mod quant_weights` exposes the libjxl default DCT8 quant
+weights (previously private to `LossyEncoder`):
+
+- `pub fn dct8_weights() -> [f32; 192]`
+- `pub fn dct8_weights_per_channel() -> ([f32; 64], [f32; 64], [f32; 64])`
+- `pub fn replicate_weights(per_block, n_blocks) -> Vec<f32>`
+- `pub const DCT8_PARAMS: [[f64; 6]; 3]` — band parameter table
+
+Bit-for-bit match with `jxl_encoder::vardct::quant::quant_weights(0, c)`.
+Cost grid demos using these weights produce content-driven strategy
+distributions; with mock unit weights all strategies produce
+degenerate identical costs.
+
 ### Phase 3 — IDENTITY + DCT2X2 ported, 15-strategy cost grid coverage
 
 Two new GPU AC-strategy kernels with **bit-exact parity** vs the
