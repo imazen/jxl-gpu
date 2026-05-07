@@ -33,11 +33,23 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(4.0);
 
-    let img = image::open(&image_path)
+    let img_raw = image::open(&image_path)
         .unwrap_or_else(|e| panic!("failed to open {image_path}: {e}"))
         .to_rgb8();
+    // Demonstrate arbitrary-size support: crop the image to a
+    // non-multiple-of-8 size on each axis. LossyEncoder will pad
+    // internally and crop back transparently. Override with the
+    // CROP env var (e.g. CROP=1024 for the original aligned dims).
+    let crop_w: u32 = std::env::var("CROP_W")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or((img_raw.width() - 7).min(1019));
+    let crop_h: u32 = std::env::var("CROP_H")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or((img_raw.height() - 11).min(1013));
+    let img = image::imageops::crop_imm(&img_raw, 0, 0, crop_w, crop_h).to_image();
     let (w, h) = img.dimensions();
-    assert!(w.is_multiple_of(8) && h.is_multiple_of(8), "image dims must be 8-aligned");
     let pixels: Vec<u8> = img.into_raw();
     let n = (w * h) as usize;
 
