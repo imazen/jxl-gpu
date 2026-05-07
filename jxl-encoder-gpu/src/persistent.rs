@@ -43,6 +43,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::encoder::GpuEncoder;
+use crate::launch::dct8::{dct_8x8, idct_8x8};
 use crate::launch::epf::pad_plane;
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
@@ -75,6 +76,44 @@ impl<R: Runtime> GpuPlane<R> {
     /// Borrow the underlying handle for chaining custom launches that
     /// aren't covered by the persistent-API methods. The returned
     /// `Handle` is `Clone`; cubecl reference-counts it.
+    pub fn handle(&self) -> &Handle {
+        &self.handle
+    }
+}
+
+/// Typed handle to a GPU-resident contiguous buffer of per-block
+/// f32 data — DCT coefficients, quantized values, etc.
+///
+/// Layout: `num_blocks * coeffs_per_block` floats. The transform that
+/// produced these blocks determines `coeffs_per_block`:
+/// - DCT8: 64
+/// - DCT4×8 / DCT8×4 / DCT4×4: 64 (sub-blocks within an 8×8 region)
+/// - DCT16×8 / DCT8×16: 128
+/// - DCT16×16: 256
+/// - DCT32×16 / DCT16×32: 512
+/// - DCT32×32: 1024
+/// - DCT64×32 / DCT32×64: 2048
+/// - DCT64×64: 4096
+///
+/// `GpuBlocks` is the per-block analog of [`GpuPlane`] (which holds
+/// spatially-laid-out plane data).
+pub struct GpuBlocks<R: Runtime> {
+    handle: Handle,
+    num_blocks: u32,
+    coeffs_per_block: u32,
+    _r: core::marker::PhantomData<R>,
+}
+
+impl<R: Runtime> GpuBlocks<R> {
+    pub fn num_blocks(&self) -> u32 {
+        self.num_blocks
+    }
+    pub fn coeffs_per_block(&self) -> u32 {
+        self.coeffs_per_block
+    }
+    pub fn total_floats(&self) -> usize {
+        (self.num_blocks as usize) * (self.coeffs_per_block as usize)
+    }
     pub fn handle(&self) -> &Handle {
         &self.handle
     }
@@ -322,6 +361,102 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Upload per-block coefficient data (e.g., a contiguous batch of
+    /// DCT8 blocks) to GPU. `data.len()` must equal
+    /// `num_blocks * coeffs_per_block`.
+    pub fn upload_blocks(
+        &self,
+        data: &[f32],
+        num_blocks: u32,
+        coeffs_per_block: u32,
+    ) -> GpuBlocks<R> {
+        let expected = (num_blocks as usize) * (coeffs_per_block as usize);
+        assert_eq!(
+            data.len(),
+            expected,
+            "data length {} != num_blocks*coeffs_per_block {expected}",
+            data.len()
+        );
+        let handle = self.client_ref().create_from_slice(f32::as_bytes(data));
+        GpuBlocks {
+            handle,
+            num_blocks,
+            coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Allocate zero-filled per-block GPU buffer.
+    pub fn alloc_blocks(&self, num_blocks: u32, coeffs_per_block: u32) -> GpuBlocks<R> {
+        let n = (num_blocks as usize) * (coeffs_per_block as usize);
+        let handle = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        GpuBlocks {
+            handle,
+            num_blocks,
+            coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Download a `GpuBlocks` back to host memory.
+    pub fn download_blocks(&self, blocks: &GpuBlocks<R>) -> Vec<f32> {
+        let bytes = self.client_ref().read_one(blocks.handle.clone()).expect("download");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Persistent-API forward DCT8 on a batch of 8×8 blocks.
+    /// Input `coeffs_per_block` must be 64; output is 64-per-block.
+    pub fn dct_8x8_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        assert_eq!(
+            blocks.coeffs_per_block, 64,
+            "DCT8 expects 64 floats per block, got {}",
+            blocks.coeffs_per_block
+        );
+        let n = blocks.total_floats();
+        let h_out = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        dct_8x8::<R>(
+            self.client_ref(),
+            blocks.handle.clone(),
+            h_out.clone(),
+            blocks.num_blocks,
+        );
+        GpuBlocks {
+            handle: h_out,
+            num_blocks: blocks.num_blocks,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Persistent-API inverse DCT8 on a batch of 8×8 coefficient blocks.
+    pub fn idct_8x8_persistent(&self, coeffs: &GpuBlocks<R>) -> GpuBlocks<R> {
+        assert_eq!(
+            coeffs.coeffs_per_block, 64,
+            "IDCT8 expects 64 floats per block, got {}",
+            coeffs.coeffs_per_block
+        );
+        let n = coeffs.total_floats();
+        let h_out = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        idct_8x8::<R>(
+            self.client_ref(),
+            coeffs.handle.clone(),
+            h_out.clone(),
+            coeffs.num_blocks,
+        );
+        GpuBlocks {
+            handle: h_out,
+            num_blocks: coeffs.num_blocks,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Persistent-API mask1x1 field on the Y channel.
     pub fn mask1x1_persistent(&self, y: &GpuPlane<R>) -> GpuPlane<R> {
         let n = y.n_pixels();
@@ -432,6 +567,32 @@ mod tests {
         for &v in &host {
             assert!((v - 0.7).abs() < 1e-5);
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dct_idct_persistent_roundtrip() {
+        // Forward + inverse DCT8 on persistent blocks should round-trip.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let nb = 8;
+        let n = nb * 64;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin()).collect();
+        let blocks = enc.upload_blocks(&input, nb as u32, 64);
+        assert_eq!(blocks.num_blocks(), 8);
+        assert_eq!(blocks.coeffs_per_block(), 64);
+        assert_eq!(blocks.total_floats(), n);
+        let coeffs = enc.dct_8x8_persistent(&blocks);
+        let recon = enc.idct_8x8_persistent(&coeffs);
+        let recon_host = enc.download_blocks(&recon);
+        let mut max_err = 0.0_f32;
+        for i in 0..n {
+            max_err = max_err.max((input[i] - recon_host[i]).abs());
+        }
+        assert!(
+            max_err < 5e-5,
+            "DCT/IDCT roundtrip via persistent API drift: {max_err:.3e}"
+        );
     }
 
     #[cfg(feature = "cuda")]
