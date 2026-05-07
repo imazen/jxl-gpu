@@ -65,13 +65,29 @@
 //!   + algorithmic correctness, not a complete encoder).
 //! - Does not implement DC quant + entropy coding (DC restore is a
 //!   passthrough; real encoders use jxl-encoder's dc_coding).
-//! - DCT8 only (one strategy). The 13 strategies are available
-//!   individually via [`crate::persistent`] but a strategy-search +
-//!   per-block dispatch isn't yet wrapped here.
+//! - DCT8 only (one strategy) in this facade. The 13 strategies are
+//!   available individually via [`crate::persistent`], and per-strategy
+//!   3-channel cost grids + recursive partition selection (16×16 /
+//!   32×32 / 64×64 tiers) are in [`crate::pipeline`] —
+//!   [`crate::pipeline::compute_cost_grid_dct8_xyb`] et al. and
+//!   [`crate::pipeline::select_partitions_16x16_full`] et al. The
+//!   high-level facade just doesn't compose them yet.
 //!
 //! For full bitstream encoding today, use
 //! [`crate::encoder::GpuEncoder::encode_lossy_via_cpu`] which delegates
 //! to jxl-encoder.
+//!
+//! ## Related: Phase 3 strategy selection (`crate::pipeline`)
+//!
+//! The [`crate::pipeline`] module provides the lower-level building
+//! blocks for a full strategy-search encoder:
+//! - 13 single-channel + 13 3-channel cost grids covering the
+//!   DCT4/8/16/32/64 family (square + rect + sub-block).
+//! - Three partition selectors (16×16, 32×32, 64×64) that compose
+//!   recursively.
+//! - Validated end-to-end on real images: rect strategies win ~60%
+//!   of picks across a CLIC2025 corpus when offered to the selector
+//!   (see `examples/corpus_rect_picks_demo`).
 
 use alloc::vec;
 use alloc::vec::Vec;
