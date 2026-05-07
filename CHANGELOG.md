@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+### Per-strategy LLF restoration helpers — full family ported (`a501b6a6`, `9b8341e0`, `b5ffb944`, `ea19ff8f`, `b6bb257e`)
+
+Foundation for mixed-strategy reconstruct: every DCT16+ strategy
+now has a pure-scalar host helper that reconstructs its low-low-
+frequency coefficients from the stored DC grid. Mirrors upstream
+`jxl_encoder::vardct::reconstruct::restore_llf_from_dc` arm-by-arm.
+
+In `forks::reconstruct`:
+
+- `dequant_dc_channel(quant_dc, quant_dc_y, channel, scale_dc)` —
+  channel-aware DC dequant including the 0.5× Y→B CfL contribution.
+- Constants: `DCT_RESAMPLE_SCALE_16_TO_2` (2 floats),
+  `DCT_RESAMPLE_SCALE_32_TO_4` (4 floats),
+  `DCT_RESAMPLE_SCALE_64_TO_8` (8 floats).
+- Private DCT primitives: `dct1d_2`, `dct1d_4`, `dct1d_8` —
+  bit-for-bit ports of upstream's forward butterflies (with WC4 +
+  WC8 + SQRT2 constants inlined).
+- LLF restorers, all with `out[iy * cols + ix]` ordering ready for
+  scatter into the rectangular coefficient block:
+  - `restore_llf_dct16x8_or_8x16(dc0, dc1) -> [f32; 2]`
+  - `restore_llf_dct16x16(dc_grid: [f32; 4]) -> [f32; 4]`
+  - `restore_llf_dct32x32(dc_grid: [f32; 16]) -> [f32; 16]`
+  - `restore_llf_dct32x16(dc_grid: [f32; 8]) -> [f32; 8]`
+  - `restore_llf_dct16x32(dc_grid: [f32; 8]) -> [f32; 8]`
+  - `restore_llf_dct64x64(dc_grid: [f32; 64]) -> [f32; 64]`
+  - `restore_llf_dct64x32(dc_grid: [f32; 32]) -> [f32; 32]`
+  - `restore_llf_dct32x64(dc_grid: [f32; 32]) -> [f32; 32]`
+
+Each helper has zero-passthrough + constant-DC unit tests
+(15 total). The 1×1-LLF strategies (DCT8, IDENTITY, DCT2X2,
+DCT4×4/8/4, AFV0-3) reuse `restore_dct8_dc_override`'s simple DC
+formula.
+
+This unblocks the per-strategy IDCT dispatch + scatter that's the
+remaining piece of the mixed-strategy reconstruct path. With the
+LLF helpers in place, the dispatcher just needs to: read DC grid →
+call the right LLF restorer → write LLF positions into the
+coefficient block → run per-strategy IDCT → scatter.
+
 ### `compute_epf_sharpness_dct8_gpu` — end-to-end EPF sharpness picker on GPU (`9a8903dd`, `fe1bf69d`)
 
 Closes the EPF sharpness orchestrator gap for the DCT8-only path.
