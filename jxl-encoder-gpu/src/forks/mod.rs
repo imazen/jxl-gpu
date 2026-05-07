@@ -21,7 +21,7 @@
 //! | [`xyb`] | `vardct::xyb` | whole-image batch instead of per-row strips |
 //! | [`gaborish`] | `vardct::gaborish` | 3 sequential GPU launches instead of `rayon::join` |
 //! | [`noise`] | `vardct::noise::denoise_xyb` | 3 sequential GPU launches; same Y-snapshot read pattern |
-//! | [`adaptive_quant`] | `vardct::adaptive_quant` (`compute_mask1x1` + `pre_erosion` + `per_block_modulations`) | direct GPU substitution; `fuzzy_erosion` stays CPU |
+//! | [`adaptive_quant`] | `vardct::adaptive_quant` (`compute_mask1x1` + `pre_erosion` + `fuzzy_erosion` + `per_block_modulations`) | direct GPU substitution; full chain on GPU |
 //! | [`reconstruct`] | `vardct::reconstruct::{gab_smooth, xyb_to_linear_rgb_planar}` | 3 sequential launches |
 //! | [`transform`] | `vardct::transform::Transform::apply_dct` | per-strategy batched: gather all blocks of one strategy, single launch covers all |
 //! | [`cfl`] | `vardct::chroma_from_luma::find_best_multiplier` | single-tile + multi-tile batched (one launch covers all tiles) |

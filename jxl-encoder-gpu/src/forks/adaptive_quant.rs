@@ -9,12 +9,12 @@
 //! Currently covers the cleanest substitutable units:
 //! - `compute_mask1x1_gpu` — Y-plane Laplacian + Symmetric5 blur
 //! - `compute_pre_erosion_gpu` — Y-plane limit clamp + 4× downsample
+//! - `fuzzy_erosion_gpu` — 3×3 min-of-4 weighted sum + 2× downsample
 //! - `per_block_modulations_gpu` — mask/gamma/hf/blue modulations on aq_map
 //!
-//! Not yet covered (no GPU kernel yet):
-//! - `fuzzy_erosion` — 2× downsample with distance-dependent weights.
-//!   This stays on CPU for now; sandwich it between the GPU pre-erosion
-//!   and GPU per-block-modulations stages.
+//! With `fuzzy_erosion_gpu` (added 2026-05-07), the full
+//! adaptive_quant chain (`mask1x1 → pre_erosion → fuzzy_erosion →
+//! per_block_modulations`) runs end-to-end on GPU.
 //!
 //! Reshape vs upstream `jxl_encoder::vardct::adaptive_quant`:
 //! - `compute_mask1x1`: original SIMD allocates a scratch buffer per
@@ -99,6 +99,39 @@ pub fn compute_pre_erosion_gpu<R: Runtime>(
         pre_erosion_h as u32,
     );
     (out, pre_erosion_w, pre_erosion_h)
+}
+
+/// GPU `fuzzy_erosion`. Mirrors upstream
+/// `jxl_encoder::vardct::adaptive_quant::fuzzy_erosion`. Returns
+/// `(out, out_w, out_h)` where `out_w = region_w / 2` and
+/// `out_h = region_h / 2`.
+///
+/// `butteraugli_target` derives the per-position k_mul weights via
+/// the same formula libjxl uses (see `forks::adaptive_quant_kmul`
+/// for the formula).
+#[allow(clippy::too_many_arguments)]
+pub fn fuzzy_erosion_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    src: &[f32],
+    src_w: usize,
+    src_h: usize,
+    from_x0: usize,
+    from_y0: usize,
+    region_w: usize,
+    region_h: usize,
+    butteraugli_target: f32,
+) -> (Vec<f32>, usize, usize) {
+    let (out, out_w, out_h) = enc.fuzzy_erosion_plane(
+        src,
+        src_w as u32,
+        src_h as u32,
+        from_x0 as u32,
+        from_y0 as u32,
+        region_w as u32,
+        region_h as u32,
+        butteraugli_target,
+    );
+    (out, out_w as usize, out_h as usize)
 }
 
 /// GPU `per_block_modulations`. Mirrors upstream signature; mutates

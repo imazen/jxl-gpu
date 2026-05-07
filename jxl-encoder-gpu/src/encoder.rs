@@ -47,6 +47,7 @@ use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
 use crate::launch::dct2x2::{dct2x2_forward, dct2x2_inverse};
 use crate::launch::denoise::denoise as denoise_launch;
+use crate::launch::fuzzy_erosion::{fuzzy_erosion as fuzzy_erosion_launch, fuzzy_erosion_kmul};
 use crate::launch::dequant::dequant_dct8;
 use crate::launch::entropy::entropy_coeffs_pixel;
 use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
@@ -292,6 +293,53 @@ impl<R: Runtime> GpuEncoder<R> {
         dct_8x8::<R>(&self.client, h_in, h_out.clone(), num_blocks);
         let bytes = self.client.read_one(h_out).expect("read dct");
         f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Fuzzy-erosion + 2× downsample on a 2D plane. Mirrors
+    /// `jxl_encoder::vardct::adaptive_quant::fuzzy_erosion`.
+    ///
+    /// For each output pixel (size `out_w × out_h` = `region_w/2 × region_h/2`),
+    /// reads four input pixels in the source plane (offset by `from_x0`,
+    /// `from_y0`), computes the 3×3 min-of-4 weighted sum at each, and
+    /// accumulates the 4 contributions.
+    ///
+    /// `butteraugli_target` is used to derive `k_mul` weights via
+    /// [`fuzzy_erosion_kmul`]; pass directly if you want to override.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fuzzy_erosion_plane(
+        &self,
+        src: &[f32],
+        src_w: u32,
+        src_h: u32,
+        from_x0: u32,
+        from_y0: u32,
+        region_w: u32,
+        region_h: u32,
+        butteraugli_target: f32,
+    ) -> (Vec<f32>, u32, u32) {
+        assert_eq!(src.len(), (src_w as usize) * (src_h as usize));
+        let out_w = region_w / 2;
+        let out_h = region_h / 2;
+        let n_out = (out_w as usize) * (out_h as usize);
+        let h_src = self.client.create_from_slice(f32::as_bytes(src));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_out]));
+        let k_mul = fuzzy_erosion_kmul(butteraugli_target);
+        fuzzy_erosion_launch::<R>(
+            &self.client,
+            h_src,
+            h_out.clone(),
+            src_w,
+            src_h,
+            from_x0,
+            from_y0,
+            out_w,
+            out_h,
+            k_mul,
+        );
+        let bytes = self.client.read_one(h_out).expect("read fuzzy_erosion");
+        (f32::from_bytes(&bytes).to_vec(), out_w, out_h)
     }
 
     /// IDENTITY transform on a contiguous batch of 8×8 blocks. Mirrors
