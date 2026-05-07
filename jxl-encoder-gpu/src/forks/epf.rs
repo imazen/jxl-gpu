@@ -229,6 +229,124 @@ pub fn apply_epf_step2_gpu<R: Runtime>(
     )
 }
 
+/// EPF candidate-list selector. Mirrors upstream
+/// `compute_epf_sharpness` lines 774-778 — chooses
+/// `[0, 4]` at high distance (> 4.5) and `[0, 2, 7]` otherwise.
+///
+/// Returned slice is one of two `'static` arrays so callers can
+/// avoid allocating.
+pub fn epf_sharpness_candidates(distance: f32) -> &'static [u8] {
+    if distance > 4.5 {
+        const HIGH_D: [u8; 2] = [0, 4];
+        &HIGH_D
+    } else {
+        const NORMAL: [u8; 3] = [0, 2, 7];
+        &NORMAL
+    }
+}
+
+/// Apply the full EPF chain (step0 + step1 + step2 in sequence per
+/// `epf_iters`) on GPU. Mirrors upstream `apply_epf` end-to-end.
+///
+/// Iteration semantics (matching upstream):
+/// - `epf_iters == 0`: planes returned unchanged
+/// - `epf_iters >= 3`: step 0 runs first (5×5 plus, 12 neighbors)
+/// - `epf_iters >= 1`: step 1 always runs (3×3 cross + 5-pos SAD)
+/// - `epf_iters >= 2`: step 2 runs last (3×3 cross + single-point SAD)
+///
+/// Each step pads its input independently (pad = 3 / 2 / 1) and
+/// returns unpadded output. `inv_sigma` is reused across all steps
+/// (one per 8×8 block).
+///
+/// Sigma scales applied:
+/// - Step 0: `EPF_PASS0_SIGMA_SCALE * 1.65 = 1.485`
+/// - Step 1: `1.65`
+/// - Step 2: `EPF_PASS2_SIGMA_SCALE * 1.65 = 10.725`
+///
+/// All steps use `EPF_BORDER_SAD_MUL = 2/3` for the block-edge
+/// reduction.
+///
+/// Returns `[plane_x, plane_y, plane_b]` (each `width * height`).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_epf_chain_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    plane_x: &[f32],
+    plane_y: &[f32],
+    plane_b: &[f32],
+    inv_sigma: &[f32],
+    epf_iters: u32,
+    width: u32,
+    height: u32,
+    xsize_blocks: u32,
+    ysize_blocks: u32,
+) -> [Vec<f32>; 3] {
+    if epf_iters == 0 {
+        return [plane_x.to_vec(), plane_y.to_vec(), plane_b.to_vec()];
+    }
+
+    let mut cur_x: Vec<f32> = plane_x.to_vec();
+    let mut cur_y: Vec<f32> = plane_y.to_vec();
+    let mut cur_b: Vec<f32> = plane_b.to_vec();
+
+    let pad_for = |p: u32, x: &[f32]| -> Vec<f32> {
+        enc.pad_plane_channel(x, width, height, p)
+    };
+
+    if epf_iters >= 3 {
+        let pad = 3_u32;
+        let px = pad_for(pad, &cur_x);
+        let py = pad_for(pad, &cur_y);
+        let pb = pad_for(pad, &cur_b);
+        let (ox, oy, ob) = apply_epf_step0_gpu(
+            enc,
+            &px, &py, &pb,
+            inv_sigma,
+            width, height, xsize_blocks, ysize_blocks, pad,
+            EPF_PASS0_SIGMA_SCALE * 1.65,
+            EPF_BORDER_SAD_MUL,
+        );
+        cur_x = ox;
+        cur_y = oy;
+        cur_b = ob;
+    }
+    if epf_iters >= 1 {
+        let pad = 2_u32;
+        let px = pad_for(pad, &cur_x);
+        let py = pad_for(pad, &cur_y);
+        let pb = pad_for(pad, &cur_b);
+        let (ox, oy, ob) = apply_epf_step1_gpu(
+            enc,
+            &px, &py, &pb,
+            inv_sigma,
+            width, height, xsize_blocks, ysize_blocks, pad,
+            1.65,
+            EPF_BORDER_SAD_MUL,
+        );
+        cur_x = ox;
+        cur_y = oy;
+        cur_b = ob;
+    }
+    if epf_iters >= 2 {
+        let pad = 1_u32;
+        let px = pad_for(pad, &cur_x);
+        let py = pad_for(pad, &cur_y);
+        let pb = pad_for(pad, &cur_b);
+        let (ox, oy, ob) = apply_epf_step2_gpu(
+            enc,
+            &px, &py, &pb,
+            inv_sigma,
+            width, height, xsize_blocks, ysize_blocks, pad,
+            EPF_PASS2_SIGMA_SCALE * 1.65,
+            EPF_BORDER_SAD_MUL,
+        );
+        cur_x = ox;
+        cur_y = oy;
+        cur_b = ob;
+    }
+
+    [cur_x, cur_y, cur_b]
+}
+
 /// Two-pass per-block sharpness selection.
 ///
 /// Pure-CPU port of the selection logic from
@@ -402,6 +520,20 @@ pub fn select_sharpness_two_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_epf_sharpness_candidates_normal() {
+        for d in [0.5_f32, 1.0, 2.0, 4.0, 4.5] {
+            assert_eq!(epf_sharpness_candidates(d), &[0_u8, 2, 7]);
+        }
+    }
+
+    #[test]
+    fn test_epf_sharpness_candidates_high_distance() {
+        for d in [4.51_f32, 5.0, 7.0, 100.0] {
+            assert_eq!(epf_sharpness_candidates(d), &[0_u8, 4]);
+        }
+    }
 
     #[test]
     fn test_select_sharpness_two_pass_clear_winner() {
