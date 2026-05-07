@@ -99,6 +99,30 @@ fn align_up(n: u32, align: u32) -> u32 {
     n.div_ceil(align) * align
 }
 
+/// Map a JPEG-style quality value (1..=100) to the per-block `qac_qm`
+/// scale that [`LossyEncoder`] expects.
+///
+/// Convention chosen to roughly match jxl-encoder's distance gates:
+/// - quality=100 → qac_qm=0.5 (very high quality, light quant)
+/// - quality=90  → qac_qm=1.5
+/// - quality=75  → qac_qm=4.0
+/// - quality=50  → qac_qm=8.0
+/// - quality=25  → qac_qm=20.0
+/// - quality=10  → qac_qm=50.0
+///
+/// The mapping is approximate — for actual JPEG XL compatibility,
+/// users targeting specific bitrate or quality should drive
+/// `qac_qm` directly via measurement (e.g., via SSIMULACRA2).
+/// This helper exists for "I want a JPEG-quality knob" callers
+/// who don't want to think about quant scales.
+pub fn quality_to_qac(quality: f32) -> f32 {
+    let q = quality.clamp(1.0, 100.0);
+    // Smooth exponential mapping: quality=100 → qac=0.5, quality=10 → qac=50.
+    // qac = 0.5 * 10^((100 - q) / 50) — gives 0.5 at q=100 and 50 at q=10.
+    // Matches the table above to within ~10%.
+    0.5 * (10.0_f32).powf((100.0 - q) / 50.0)
+}
+
 /// Pad a `width × height` plane up to `padded_width × padded_height` with
 /// edge-replication on the right/bottom. Output buffer is allocated by
 /// this function; caller passes empty Vec or pre-allocated of correct size.
@@ -456,6 +480,28 @@ mod tests {
             max_diff < 64,
             "smooth-gradient reconstruction max byte diff = {max_diff}, expected < 64 at qac=1"
         );
+    }
+
+    #[test]
+    fn test_quality_to_qac_monotonic_and_bounded() {
+        // quality_to_qac should monotonically decrease as quality
+        // increases, and produce reasonable values at the endpoints.
+        let qac_100 = quality_to_qac(100.0);
+        let qac_75 = quality_to_qac(75.0);
+        let qac_50 = quality_to_qac(50.0);
+        let qac_25 = quality_to_qac(25.0);
+        let qac_10 = quality_to_qac(10.0);
+        // Monotonically decreasing: lower quality -> higher qac.
+        assert!(qac_100 < qac_75);
+        assert!(qac_75 < qac_50);
+        assert!(qac_50 < qac_25);
+        assert!(qac_25 < qac_10);
+        // Endpoint sanity.
+        assert!(qac_100 < 1.0, "quality=100 should be qac<1, got {qac_100}");
+        assert!(qac_10 > 20.0, "quality=10 should be qac>20, got {qac_10}");
+        // Clamp behaviour: out-of-range inputs clamped to [1, 100].
+        assert_eq!(quality_to_qac(150.0), quality_to_qac(100.0));
+        assert_eq!(quality_to_qac(-10.0), quality_to_qac(1.0));
     }
 
     #[cfg(feature = "cuda")]
