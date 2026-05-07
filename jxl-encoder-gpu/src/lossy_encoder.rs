@@ -110,7 +110,11 @@ pub struct LossyEncoder<R: Runtime> {
     weights_y: GpuBlocks<R>,
     weights_b: GpuBlocks<R>,
     weights: GaborishWeights,
-    thresholds: [f32; 4],
+    /// Per-channel dead-zone thresholds (X, Y, B). Y has the tightest
+    /// TL threshold (0.56) — matches libjxl `default_thresholds`.
+    thresholds_x: [f32; 4],
+    thresholds_y: [f32; 4],
+    thresholds_b: [f32; 4],
 }
 
 /// Round `n` up to the next multiple of `align`.
@@ -351,7 +355,11 @@ impl<R: Runtime> LossyEncoder<R> {
             weights_y,
             weights_b,
             weights: default_gaborish_weights(),
-            thresholds: [0.56, 0.62, 0.62, 0.62],
+            // libjxl default_thresholds: Y has tightest TL (0.56);
+            // X/B share the same {0.58, 0.62, 0.62, 0.62}.
+            thresholds_x: [0.58, 0.62, 0.62, 0.62],
+            thresholds_y: [0.56, 0.62, 0.62, 0.62],
+            thresholds_b: [0.58, 0.62, 0.62, 0.62],
         }
     }
 
@@ -538,11 +546,11 @@ impl<R: Runtime> LossyEncoder<R> {
         let coeffs_y = enc.dct_8x8_wide_persistent(&by_g);
         let coeffs_b = enc.dct_8x8_wide_persistent(&bb_g);
         let q_x =
-            enc.quantize_dct8_persistent(&coeffs_x, &self.weights_x, &qac_vec, &self.thresholds);
+            enc.quantize_dct8_persistent(&coeffs_x, &self.weights_x, &qac_vec, &self.thresholds_x);
         let q_y =
-            enc.quantize_dct8_persistent(&coeffs_y, &self.weights_y, &qac_vec, &self.thresholds);
+            enc.quantize_dct8_persistent(&coeffs_y, &self.weights_y, &qac_vec, &self.thresholds_y);
         let q_b =
-            enc.quantize_dct8_persistent(&coeffs_b, &self.weights_b, &qac_vec, &self.thresholds);
+            enc.quantize_dct8_persistent(&coeffs_b, &self.weights_b, &qac_vec, &self.thresholds_b);
         let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
             &q_x,
             &q_y,
