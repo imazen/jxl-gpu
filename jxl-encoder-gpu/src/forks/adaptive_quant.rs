@@ -221,6 +221,56 @@ mod tests {
         assert!(out.iter().all(|v| v.is_finite()));
     }
 
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_fuzzy_erosion_gpu_shape() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // 32x32 src, region 16x16 → output 8x8 (2× downsample on the region)
+        let w = 32;
+        let h = 32;
+        let src: Vec<f32> = (0..w * h)
+            .map(|i| 0.3 + 0.4 * (i as f32 * 0.01).sin())
+            .collect();
+        let (out, ow, oh) = fuzzy_erosion_gpu(&enc, &src, w, h, 4, 4, 16, 16, 1.0);
+        assert_eq!(ow, 8);
+        assert_eq!(oh, 8);
+        assert_eq!(out.len(), 64);
+        // fuzzy_erosion is a weighted sum of mins — sign tracks input.
+        for &v in &out {
+            assert!(v.is_finite(), "fuzzy_erosion output must be finite");
+        }
+    }
+
+    /// End-to-end full adaptive_quant chain on GPU:
+    ///   mask1x1 → pre_erosion → fuzzy_erosion → (per_block_modulations
+    ///   path stays in the upper-level encoder logic for now)
+    /// Just verifies the compositions produce finite values.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_full_aq_chain_gpu() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let w = 64;
+        let h = 64;
+        let xyb_y: Vec<f32> = (0..w * h)
+            .map(|i| 0.3 + 0.2 * (i as f32 * 0.013).sin())
+            .collect();
+        // Step 1: mask1x1
+        let mask = compute_mask1x1_gpu(&enc, &xyb_y, w, h);
+        assert_eq!(mask.len(), w * h);
+        assert!(mask.iter().all(|v| v.is_finite()));
+        // Step 2: pre_erosion (4× downsample)
+        let (pre, pw, ph) = compute_pre_erosion_gpu(&enc, &xyb_y, w, h, 0, 0, w, h);
+        assert_eq!(pw, 16);
+        assert_eq!(ph, 16);
+        // Step 3: fuzzy_erosion (2× downsample on the pre_erosion output)
+        let (fuzz, fw, fh) = fuzzy_erosion_gpu(&enc, &pre, pw, ph, 0, 0, pw, ph, 1.0);
+        assert_eq!(fw, 8);
+        assert_eq!(fh, 8);
+        assert!(fuzz.iter().all(|v| v.is_finite()));
+    }
+
     #[test]
     fn test_quantize_quant_field_matches_upstream_logic() {
         // Spot-check the bit-for-bit copy is correct.
