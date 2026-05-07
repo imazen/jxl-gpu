@@ -298,6 +298,38 @@ pub fn adjust_quant_prescan(
     Some(stats)
 }
 
+/// AdjustQuantBlockAC heuristic A — threshold reduction for large
+/// transforms. Applied unconditionally before the pre-scan in
+/// upstream's `adjust_quant_block_ac`.
+///
+/// Behavior (matches upstream lines 167-176):
+/// - If `xsize > 1 || ysize > 1` (any covered_blocks > 1×1):
+///   - Compute `adj = clamp(0.003 * xsize * ysize, 0.0, 0.08)`.
+///   - For each of the 4 thresholds: `t = max(t - adj, 0.54)`.
+///   - Returns `true` (heuristic fired).
+/// - Otherwise: thresholds unchanged, returns `false`.
+///
+/// The returned bool corresponds to `heuristics_fired & 0x01` in
+/// upstream's bitfield convention.
+pub fn apply_heuristic_a_thresholds(
+    thresholds: &mut [f32; 4],
+    xsize: usize,
+    ysize: usize,
+) -> bool {
+    if xsize > 1 || ysize > 1 {
+        let adj = (0.003 * (xsize * ysize) as f32).clamp(0.0, 0.08);
+        for t in thresholds.iter_mut() {
+            *t -= adj;
+            if *t < 0.54 {
+                *t = 0.54;
+            }
+        }
+        true
+    } else {
+        false
+    }
+}
+
 /// Convenience: returns a length-`num_blocks * 64` vec of all-1.0
 /// inverse quant matrix entries. Useful for tests where you don't
 /// care about the actual quant matrix.
@@ -391,6 +423,48 @@ mod tests {
         assert!((s.hf_max_error[3] - 0.5).abs() < 1e-6);
         assert_eq!(s.sum_of_vals, 0.0);
         assert!((s.sum_of_error - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_heuristic_a_no_op_for_1x1() {
+        let mut t = [0.62_f32; 4];
+        let fired = apply_heuristic_a_thresholds(&mut t, 1, 1);
+        assert!(!fired);
+        assert_eq!(t, [0.62_f32; 4]);
+    }
+
+    #[test]
+    fn test_heuristic_a_2x2() {
+        // adj = 0.003 * 4 = 0.012 (under 0.08 cap), each threshold drops by 0.012.
+        let mut t = [0.62_f32; 4];
+        let fired = apply_heuristic_a_thresholds(&mut t, 2, 2);
+        assert!(fired);
+        for v in &t {
+            assert!((v - (0.62 - 0.012)).abs() < 1e-6, "got {v}");
+        }
+    }
+
+    #[test]
+    fn test_heuristic_a_caps_at_008() {
+        // For xsize*ysize >= 27 (= 0.08 / 0.003), adj caps at 0.08.
+        // 8x8 → 64 → adj = 0.192 capped to 0.08.
+        let mut t = [0.62_f32; 4];
+        let fired = apply_heuristic_a_thresholds(&mut t, 8, 8);
+        assert!(fired);
+        for v in &t {
+            assert!((v - (0.62 - 0.08)).abs() < 1e-6, "got {v}");
+        }
+    }
+
+    #[test]
+    fn test_heuristic_a_clamps_at_054_floor() {
+        // Start at the floor — can't go lower. xsize=2, ysize=2 → adj = 0.012.
+        // 0.55 - 0.012 = 0.538 → clamped up to 0.54.
+        let mut t = [0.55_f32; 4];
+        let _ = apply_heuristic_a_thresholds(&mut t, 2, 2);
+        for v in &t {
+            assert_eq!(*v, 0.54);
+        }
     }
 
     #[test]
