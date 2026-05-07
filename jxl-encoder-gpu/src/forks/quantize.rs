@@ -330,6 +330,80 @@ pub fn apply_heuristic_a_thresholds(
     }
 }
 
+/// `quant` cap matching upstream `QUANT_MAX = 256`. The heuristics
+/// clamp at `QUANT_MAX - 1` (255) when their increment would
+/// otherwise exceed.
+pub const QUANT_MAX: i32 = 256;
+
+/// AdjustQuantBlockAC heuristic C — high-frequency corner penalty.
+/// Mirrors upstream lines 257-269.
+///
+/// Computes `all = sum(hf_nonzeros) + 1.0`. If
+/// `mul[c] * sum_of_highest_freq >= all` (where `mul = [70, 30, 60]`
+/// for X/Y/B), increments `quant` by `(mul[c] * sum_of_highest_freq
+/// / all) as i32`, clamped to `QUANT_MAX - 1`. Returns `true` when
+/// the heuristic fired (bit `0x04` upstream).
+///
+/// `c` is the channel index (0=X, 1=Y, 2=B). The `mul` per-channel
+/// constants are reproduced verbatim from upstream.
+pub fn apply_heuristic_c_corner_penalty(
+    quant: &mut i32,
+    stats: &AdjustQuantBlockStats,
+    c: usize,
+) -> bool {
+    let all = stats.hf_nonzeros[0]
+        + stats.hf_nonzeros[1]
+        + stats.hf_nonzeros[2]
+        + stats.hf_nonzeros[3]
+        + 1.0;
+    let mul = [70.0_f32, 30.0, 60.0];
+    if mul[c] * stats.sum_of_highest_freq >= all {
+        let bump = (mul[c] * stats.sum_of_highest_freq / all) as i32;
+        *quant += bump;
+        if *quant >= QUANT_MAX {
+            *quant = QUANT_MAX - 1;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// AdjustQuantBlockAC heuristic D — DCT8 flatness detection.
+/// Mirrors upstream lines 271-280.
+///
+/// Only fires for `raw_strategy == RAW_STRATEGY_DCT` (8×8 transform).
+/// If `sum(hf_nonzeros) < 11.0`, increments `quant` by 1 (clamped
+/// to `QUANT_MAX - 1`). Returns `true` when the heuristic fired
+/// (bit `0x08` upstream).
+///
+/// The intuition: a very flat DCT8 block (few non-zero AC values)
+/// can blur visibly with insufficient quantization; bumping `quant`
+/// reduces the chance of blocking artifacts.
+pub fn apply_heuristic_d_dct8_flatness(
+    quant: &mut i32,
+    stats: &AdjustQuantBlockStats,
+    raw_strategy: u8,
+) -> bool {
+    use crate::forks::transform::RAW_STRATEGY_DCT;
+    if raw_strategy != RAW_STRATEGY_DCT {
+        return false;
+    }
+    let sum = stats.hf_nonzeros[0]
+        + stats.hf_nonzeros[1]
+        + stats.hf_nonzeros[2]
+        + stats.hf_nonzeros[3];
+    if sum < 11.0 {
+        *quant += 1;
+        if *quant >= QUANT_MAX {
+            *quant = QUANT_MAX - 1;
+        }
+        true
+    } else {
+        false
+    }
+}
+
 /// Convenience: returns a length-`num_blocks * 64` vec of all-1.0
 /// inverse quant matrix entries. Useful for tests where you don't
 /// care about the actual quant matrix.
@@ -465,6 +539,82 @@ mod tests {
         for v in &t {
             assert_eq!(*v, 0.54);
         }
+    }
+
+    #[test]
+    fn test_heuristic_c_no_fire_when_no_hf_signal() {
+        // sum_of_highest_freq=0 → never fires.
+        let q = 100;
+        let stats = AdjustQuantBlockStats {
+            sum_of_highest_freq: 0.0,
+            hf_nonzeros: [10.0, 10.0, 10.0, 10.0],
+            ..Default::default()
+        };
+        for c in 0..3 {
+            let mut q2 = q;
+            assert!(!apply_heuristic_c_corner_penalty(&mut q2, &stats, c));
+            assert_eq!(q2, q);
+        }
+    }
+
+    #[test]
+    fn test_heuristic_c_fires_y_channel() {
+        // c=1, mul=30. all = sum(hf_nonzeros) + 1 = 1.0 (no nonzeros) + 1 = 1.0
+        // Wait: hf_nonzeros all 0 → all = 1.0. mul[1]=30. sum_of_highest_freq=1.
+        // 30*1 >= 1 → fires. bump = (30 * 1 / 1) = 30. quant 100 + 30 = 130.
+        let mut q = 100;
+        let stats = AdjustQuantBlockStats {
+            sum_of_highest_freq: 1.0,
+            hf_nonzeros: [0.0; 4],
+            ..Default::default()
+        };
+        let fired = apply_heuristic_c_corner_penalty(&mut q, &stats, 1);
+        assert!(fired);
+        assert_eq!(q, 130);
+    }
+
+    #[test]
+    fn test_heuristic_c_clamps_at_quant_max() {
+        // Force a huge bump to verify clamping.
+        let mut q = 200;
+        let stats = AdjustQuantBlockStats {
+            sum_of_highest_freq: 100.0,
+            hf_nonzeros: [0.0; 4],
+            ..Default::default()
+        };
+        let _ = apply_heuristic_c_corner_penalty(&mut q, &stats, 0);
+        assert_eq!(q, QUANT_MAX - 1);
+    }
+
+    #[test]
+    fn test_heuristic_d_only_for_dct8() {
+        use crate::forks::transform::{RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16};
+        let mut q = 100;
+        // hf_nonzeros sum = 0 → < 11, would fire if DCT8
+        let stats = AdjustQuantBlockStats {
+            hf_nonzeros: [0.0; 4],
+            ..Default::default()
+        };
+        assert!(!apply_heuristic_d_dct8_flatness(
+            &mut q,
+            &stats,
+            RAW_STRATEGY_DCT16X16
+        ));
+        assert_eq!(q, 100);
+        assert!(apply_heuristic_d_dct8_flatness(&mut q, &stats, RAW_STRATEGY_DCT));
+        assert_eq!(q, 101);
+    }
+
+    #[test]
+    fn test_heuristic_d_no_fire_when_active() {
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        let mut q = 100;
+        let stats = AdjustQuantBlockStats {
+            hf_nonzeros: [4.0, 4.0, 4.0, 4.0], // sum = 16 > 11
+            ..Default::default()
+        };
+        assert!(!apply_heuristic_d_dct8_flatness(&mut q, &stats, RAW_STRATEGY_DCT));
+        assert_eq!(q, 100);
     }
 
     #[test]
