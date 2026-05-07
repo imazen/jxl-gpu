@@ -31,6 +31,9 @@ fn main() {
     use cubecl::prelude::*;
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::adaptive_quant::compute_mask1x1_gpu;
+    use jxl_encoder_gpu::quant_weights::{
+        dct8_weights, dct16x16_weights, dct16x8_weights, replicate_weights,
+    };
     use jxl_encoder_gpu::pipeline::{
         CostGrids16x16, Partition16x16, compute_cost_grid_dct8_xyb,
         compute_cost_grid_dct8x16_xyb, compute_cost_grid_dct16x8_xyb,
@@ -112,31 +115,18 @@ fn main() {
     let by16 = repack16(&xy);
     let bb16 = repack16(&xb);
 
-    // Per-channel weight matrices (mock DCT8/DCT16x16 quant matrices —
-    // the demo just needs them to be the right shape; production should
-    // pull them from the actual quant_weights tables).
-    let mk_w = |size: usize, side: usize, scale: f32| {
-        let mut w = vec![1.0f32; size];
-        for i in 0..size {
-            let r = (i / side) as f32;
-            let c = (i % side) as f32;
-            w[i] = (1.0 + 0.7 * (r + c)) * scale;
-        }
-        w
-    };
-    let replicate = |per: &[f32], n: usize| {
-        let mut out = vec![0.0f32; n * per.len()];
-        for k in 0..n {
-            out[k * per.len()..(k + 1) * per.len()].copy_from_slice(per);
-        }
-        out
-    };
-    let wx8 = replicate(&mk_w(64, 8, 0.6), nb8);
-    let wy8 = replicate(&mk_w(64, 8, 1.0), nb8);
-    let wb8 = replicate(&mk_w(64, 8, 1.3), nb8);
-    let wx16 = replicate(&mk_w(256, 16, 0.6), nb16);
-    let wy16 = replicate(&mk_w(256, 16, 1.0), nb16);
-    let wb16 = replicate(&mk_w(256, 16, 1.3), nb16);
+    // Real libjxl per-channel quant weights via quant_weights module.
+    // (Cost grids are now backed by the actual upstream tables; mock
+    // weights would zero all but DC under typical qac and produce
+    // degenerate identical costs across strategies.)
+    let dct8_all = dct8_weights();
+    let wx8 = replicate_weights(&dct8_all[..64], nb8);
+    let wy8 = replicate_weights(&dct8_all[64..128], nb8);
+    let wb8 = replicate_weights(&dct8_all[128..192], nb8);
+    let dct16_all = dct16x16_weights();
+    let wx16 = replicate_weights(&dct16_all[..256], nb16);
+    let wy16 = replicate_weights(&dct16_all[256..512], nb16);
+    let wb16 = replicate_weights(&dct16_all[512..768], nb16);
     let qac8 = vec![1.7f32; nb8];
     let qac16 = vec![1.7f32; nb16];
     let thr_y = [0.56f32, 0.62, 0.62, 0.62];
@@ -298,9 +288,11 @@ fn main() {
     let by_8x16 = repack_8x16(&xy);
     let bb_8x16 = repack_8x16(&xb);
 
-    let wx_rect = replicate(&mk_w(128, 8, 0.6), nb_16x8);
-    let wy_rect = replicate(&mk_w(128, 8, 1.0), nb_16x8);
-    let wb_rect = replicate(&mk_w(128, 8, 1.3), nb_16x8);
+    // Real DCT16x8 weights (8 rows × 16 cols = 128 floats per channel).
+    let dct16x8_all = dct16x8_weights();
+    let wx_rect = replicate_weights(&dct16x8_all[..128], nb_16x8);
+    let wy_rect = replicate_weights(&dct16x8_all[128..256], nb_16x8);
+    let wb_rect = replicate_weights(&dct16x8_all[256..384], nb_16x8);
     let qac_16x8 = vec![1.7f32; nb_16x8];
     let cg_16x8 = compute_cost_grid_dct16x8_xyb::<Backend>(
         &client,
@@ -335,9 +327,10 @@ fn main() {
         out
     };
 
-    let wx_rect2 = replicate(&mk_w(128, 16, 0.6), nb_8x16);
-    let wy_rect2 = replicate(&mk_w(128, 16, 1.0), nb_8x16);
-    let wb_rect2 = replicate(&mk_w(128, 16, 1.3), nb_8x16);
+    // DCT8x16 shares the DCT16x8 weight table per upstream.
+    let wx_rect2 = replicate_weights(&dct16x8_all[..128], nb_8x16);
+    let wy_rect2 = replicate_weights(&dct16x8_all[128..256], nb_8x16);
+    let wb_rect2 = replicate_weights(&dct16x8_all[256..384], nb_8x16);
     let qac_8x16 = vec![1.7f32; nb_8x16];
     let cg_8x16 = compute_cost_grid_dct8x16_xyb::<Backend>(
         &client,
