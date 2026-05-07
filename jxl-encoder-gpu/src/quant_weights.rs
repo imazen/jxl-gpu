@@ -23,6 +23,38 @@ pub const DCT8_PARAMS: [[f64; 6]; 3] = [
     [512.0, -2.0, -1.0, 0.0, -1.0, -2.0],    // B channel
 ];
 
+/// libjxl DCT16x16 band parameters from `quant_weights.cc:647-676`.
+/// `[X, Y, B]` × 7 bands per channel.
+pub const DCT16X16_PARAMS: [[f64; 7]; 3] = [
+    [
+        8996.872_571_181_412,
+        -1.300_077_739_335_380_4,
+        -0.494_245_298_245_712_25,
+        -0.439_093_774_457_103_44,
+        -0.635_010_183_269_574_4,
+        -0.901_772_640_508_276_1,
+        -1.616_209_923_988_741_4,
+    ],
+    [
+        3191.483_662_968_442_3,
+        -0.674_245_821_041_943_5,
+        -0.807_458_134_284_710_0,
+        -0.449_258_374_848_434_4,
+        -0.358_654_409_810_334_03,
+        -0.313_223_891_118_773_05,
+        -0.376_150_253_157_254_83,
+    ],
+    [
+        1157.504_081_454_872,
+        -2.053_142_316_580_441_4,
+        -1.4,
+        -0.506_871_300_333_784_0,
+        -0.427_087_306_247_339_03,
+        -1.485_683_453_929_624_4,
+        -4.920_914_288_440_160_4,
+    ],
+];
+
 #[inline]
 fn band_mult(v: f64) -> f64 {
     if v > 0.0 {
@@ -83,6 +115,72 @@ pub fn dct8_weights() -> [f32; 192] {
     out
 }
 
+/// Generate per-channel parametric DCT quant weights for an arbitrary
+/// `rows × cols` block + per-channel band-parameter table.
+///
+/// Returns `3 * rows * cols` floats: X channel, then Y, then B.
+/// Matches `jxl_encoder::vardct::quant::generate_dct_quant_weights_rect`
+/// bit-for-bit.
+///
+/// Use this if you have band parameters for a strategy not exposed by
+/// the named `*_weights()` helpers (e.g., DCT32X32, DCT4 family).
+pub fn generate_quant_weights_rect(
+    rows: usize,
+    cols: usize,
+    band_params: &[&[f64]; 3],
+    num_bands: usize,
+) -> Vec<f32> {
+    let num = rows * cols;
+    let total = 3 * num;
+    let mut out = vec![0.0_f32; total];
+
+    let sqrt2 = core::f64::consts::SQRT_2;
+    let scale = (num_bands as f64 - 1.0) / (sqrt2 + 1e-6);
+    let rcpcol = scale / (cols as f64 - 1.0);
+    let rcprow = scale / (rows as f64 - 1.0);
+
+    for c in 0..3 {
+        let params = band_params[c];
+        let mut bands = vec![0.0_f64; num_bands];
+        bands[0] = params[0];
+        for i in 1..num_bands {
+            bands[i] = bands[i - 1] * band_mult(params[i]);
+        }
+        for y in 0..rows {
+            let dy = y as f64 * rcprow;
+            let dy2 = dy * dy;
+            for x in 0..cols {
+                let dx = x as f64 * rcpcol;
+                let scaled_distance = (dx * dx + dy2).sqrt();
+                let dequant_weight = interpolate_band(scaled_distance, &bands);
+                out[c * num + y * cols + x] = (1.0 / dequant_weight) as f32;
+            }
+        }
+    }
+    out
+}
+
+/// Generate the 3-channel DCT16×16 quant weight table (768 floats:
+/// 256 per channel, X/Y/B). Matches
+/// `jxl_encoder::vardct::quant::quant_weights_dct16x16()` bit-for-bit.
+pub fn dct16x16_weights() -> Vec<f32> {
+    generate_quant_weights_rect(
+        16,
+        16,
+        &[&DCT16X16_PARAMS[0], &DCT16X16_PARAMS[1], &DCT16X16_PARAMS[2]],
+        7,
+    )
+}
+
+/// Per-channel split: returns three 256-float `Vec<f32>` slices for X/Y/B.
+pub fn dct16x16_weights_per_channel() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let all = dct16x16_weights();
+    let x = all[..256].to_vec();
+    let y = all[256..512].to_vec();
+    let b = all[512..768].to_vec();
+    (x, y, b)
+}
+
 /// Convenience: per-channel DCT8 weights as 3 separate `[f32; 64]`
 /// blocks. Equivalent to slicing `dct8_weights()` into thirds.
 pub fn dct8_weights_per_channel() -> ([f32; 64], [f32; 64], [f32; 64]) {
@@ -135,6 +233,47 @@ mod tests {
             assert_eq!(x[i], all[i]);
             assert_eq!(y[i], all[64 + i]);
             assert_eq!(b[i], all[128 + i]);
+        }
+    }
+
+    #[test]
+    fn test_dct16x16_weights_shape_and_dc() {
+        let w = dct16x16_weights();
+        assert_eq!(w.len(), 768);
+        for c in 0..3 {
+            let dc = w[c * 256];
+            // Last position (15, 15) — high-freq corner.
+            let hf = w[c * 256 + 255];
+            assert!(
+                dc < hf,
+                "channel {c}: DCT16 DC weight {dc} should be < high-freq corner {hf}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dct16x16_per_channel_split_matches() {
+        let all = dct16x16_weights();
+        let (x, y, b) = dct16x16_weights_per_channel();
+        for i in 0..256 {
+            assert_eq!(x[i], all[i]);
+            assert_eq!(y[i], all[256 + i]);
+            assert_eq!(b[i], all[512 + i]);
+        }
+    }
+
+    #[test]
+    fn test_generate_rect_matches_dct8() {
+        let direct = dct8_weights();
+        let via_generic = generate_quant_weights_rect(
+            8,
+            8,
+            &[&DCT8_PARAMS[0], &DCT8_PARAMS[1], &DCT8_PARAMS[2]],
+            6,
+        );
+        assert_eq!(direct.len(), via_generic.len());
+        for i in 0..direct.len() {
+            assert_eq!(direct[i], via_generic[i]);
         }
     }
 
