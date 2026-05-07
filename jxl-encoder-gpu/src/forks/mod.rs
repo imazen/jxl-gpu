@@ -20,6 +20,7 @@
 //! `LICENSE-COMMERCIAL` at the repo root.
 
 pub mod adaptive_quant;
+pub mod cfl;
 pub mod gaborish;
 pub mod reconstruct;
 pub mod transform;
