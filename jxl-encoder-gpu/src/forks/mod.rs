@@ -45,6 +45,7 @@
 //! `LICENSE-COMMERCIAL` at the repo root.
 
 pub mod adaptive_quant;
+pub mod afv;
 pub mod cfl;
 pub mod cost;
 pub mod dequant;
