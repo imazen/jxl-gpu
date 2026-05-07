@@ -62,7 +62,7 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 
 | Component | Status |
 |---|---|
-| Per-strategy whole-image cost grid kernels | ✓ | 15 strategies × 2 flavors = 30 cost-grid functions: full DCT4/8/16/32/64 family (squares + rects) + IDENTITY + DCT2X2, in both single-channel proxy and 3-channel XYB-weighted + mask1x1-modulated forms. Validated end-to-end on real CLIC2025 photos (`phase3_xyb_real_image_demo`, `corpus_subblock_picks_demo`). Remaining: AFV0-3 (forward transform kernels ported as of 2026-05-07; cost grid integration still TODO) + CfL-aware variants (chroma-from-luma decorrelation in coefficient space) |
+| Per-strategy whole-image cost grid kernels | ✓ | 15 GPU-resident strategies × 2 flavors = 30 cost-grid functions: full DCT4/8/16/32/64 family (squares + rects) + IDENTITY + DCT2X2, single-channel proxy + 3-channel XYB-weighted + mask1x1-modulated. Validated end-to-end on real CLIC2025 photos (`phase3_xyb_real_image_demo`, `corpus_subblock_picks_demo`). **AFV0-3 cost grid integration done as of 2026-05-07** via host-side `forks::afv::afv_cost_grid_single_channel` + `afv_cost_grid_xyb_host` (host-orchestrated because the AFV transform composition itself stays on the host: 3 GPU launches per direction with per-block DC pack/unpack + corner mirroring). Remaining: CfL-aware variants (chroma-from-luma decorrelation in coefficient space) |
 | Host-side partition selector | ✓ | Full 7-strategy coverage at 16×16 tier: DCT16×16 + 2× DCT16×8 + 2× DCT8×16 + Four DCT8×8 + per-cell `FourSubBlocks([SubStrategy; 4])` choosing from {DCT8, DCT4×4, DCT4×8, DCT8×4, IDENTITY, DCT2X2}. Recursive composition through 32×32 + 64×64 tiers. Corpus validation: pure 4-DCT8 essentially dies (0.1% of 32k regions) when sub-block alternatives offered |
 | Refactor `ac_strategy_search.rs` to consume cost grids | ⛔ | requires touching `jxl-encoder` crate (separate repo) — needs user permission |
 
@@ -130,11 +130,12 @@ for GPU-friendly batching.
 **Grand total: 56 of ~65 deliverables verified (~86%)**
 
 DCT/IDCT family complete. CfL complete. EPF Steps 1+2 complete.
-11 fork modules verified composing through GpuEncoder. Remaining
-work concentrates in (a) EPF Step 0 GPU kernel (12-tap), (b) full
-estimate_entropy_full orchestration, (c) AdjustQuantBlockAC
-heuristics, (d) AFV0-3 cost grid integration (transforms done;
-wrappers pending).
+AFV cost grid integration complete (host-side wrappers in
+`forks::afv` consuming `afv_weights()` + the existing batched AFV
+transforms). 11 fork modules verified composing through GpuEncoder.
+Remaining work concentrates in (a) EPF Step 0 GPU kernel (12-tap),
+(b) full estimate_entropy_full orchestration, (c) AdjustQuantBlockAC
+heuristics.
 
 ### Note on AC strategy search (Phase 3)
 
