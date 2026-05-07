@@ -208,17 +208,17 @@ fn main() {
             let bx_g = enc.gather_blocks_persistent(&xx_g, 8, 8);
             let by_g = enc.gather_blocks_persistent(&xy_g, 8, 8);
             let bb_g = enc.gather_blocks_persistent(&xb_g, 8, 8);
-            // DCT8 ×3
+            // DCT8 ×3 + quantize ×3
+            // (Cannot use fused DCT+quantize here because we need the
+            //  forward DCT output separately for DC restore. Real
+            //  encoders use dc_coding for DC and can use the fused
+            //  kernel — see fused_dct_quant_bench for kernel speedup.)
             let coeffs_x = enc.dct_8x8_wide_persistent(&bx_g);
             let coeffs_y = enc.dct_8x8_wide_persistent(&by_g);
             let coeffs_b = enc.dct_8x8_wide_persistent(&bb_g);
-            // Quantize ×3
-            let q_x =
-                enc.quantize_dct8_persistent(&coeffs_x, &weights_g, &qac_vec, &thr);
-            let q_y =
-                enc.quantize_dct8_persistent(&coeffs_y, &weights_g, &qac_vec, &thr);
-            let q_b =
-                enc.quantize_dct8_persistent(&coeffs_b, &weights_g, &qac_vec, &thr);
+            let q_x = enc.quantize_dct8_persistent(&coeffs_x, &weights_g, &qac_vec, &thr);
+            let q_y = enc.quantize_dct8_persistent(&coeffs_y, &weights_g, &qac_vec, &thr);
+            let q_b = enc.quantize_dct8_persistent(&coeffs_b, &weights_g, &qac_vec, &thr);
             // Dequant
             let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
                 &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g,
