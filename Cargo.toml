@@ -33,6 +33,20 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # jxl-rs — primary Rust JXL decoder for roundtrip tests.
 jxl = { path = "/home/lilith/work/third-party/jxl-rs/jxl" }
 
+[profile.dev]
+# Compile our code at opt-level=3 even in debug builds — GPU
+# kernels and DCT inner loops are too slow at -O0 to be useful
+# during iteration. Build deps stay at the cargo default (1) so
+# clean builds aren't penalized.
+opt-level = 3
+
+# Debug builds of dependencies stay lightly optimized. cubecl /
+# image / etc. recompile rarely; this just keeps them fast enough
+# during initial download without bloating per-incremental-build
+# time.
+[profile.dev.package."*"]
+opt-level = 1
+
 [profile.release]
 opt-level = 3
 lto = "fat"
