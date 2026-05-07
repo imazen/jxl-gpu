@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Mixed-strategy reconstruct on GPU (`3359b065`, `53e47679`, `61ae5ae6`, `b7e55d15`)
+
+Closes the second-largest remaining gap. Builds out from the LLF
+restoration foundation:
+
+1. `tile_dims_pixels(raw_strategy)` (`3359b065`) — public
+   per-strategy pixel block dims.
+2. `scatter_block_to_plane` (`3359b065`) — copies an IDCT-output
+   block into the padded plane at `(bx*8, by*8)` for any strategy.
+3. `idct_and_scatter_one_block_gpu` (`53e47679`) — per-block
+   convenience: composes `apply_idct_batch_gpu` (batch=1) +
+   `scatter_block_to_plane`.
+4. `batched_reconstruct_same_strategy_gpu` (`61ae5ae6`) — efficient
+   form for N blocks of the same strategy: ONE IDCT launch + per-
+   block memcpy scatter.
+5. `BlockRecipe<'a>` + `reconstruct_mixed_strategy_gpu` (`b7e55d15`)
+   — multi-strategy dispatcher. Buckets recipes by `raw_strategy`
+   (0..=16), emits at most 15 GPU launches per image regardless of
+   block count.
+
+The caller's responsibility is to produce already-dequantized,
+CfL-corrected, LLF-restored coefficients in each `BlockRecipe`
+(use `dispatch_restore_llf` for the LLF stage).
+
+AFV0-3 are not handled here — their per-block sub-transform
+composition stays in `forks::afv`. The orchestrator panics on AFV
+codes with a pointer to that module.
+
+GPU smoke test: 5 mixed recipes (3 DCT8 + 2 DCT16×16) at
+non-overlapping coordinates → 2 GPU launches; all destination
+regions ~0 (zero coeffs → zero IDCT), untouched pixel stays at
+the seed value.
+
+This makes the reconstruct path strategy-agnostic. The DCT8-only
+path (`reconstruct_xyb_dct8_only_gpu`) remains as a faster
+specialization for the common case.
+
 ### Per-strategy LLF restoration helpers — full family ported (`a501b6a6`, `9b8341e0`, `b5ffb944`, `ea19ff8f`, `b6bb257e`)
 
 Foundation for mixed-strategy reconstruct: every DCT16+ strategy
