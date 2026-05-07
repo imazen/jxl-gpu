@@ -174,6 +174,106 @@ pub const DCT_RESAMPLE_SCALE_64_TO_8: [f32; 8] = [
     0.717_108_1,
 ];
 
+/// Restore the 4×8 LLF coefficients of a DCT64×32 block from the 8×4
+/// stored DC grid. Mirrors upstream `restore_llf_from_dc` for
+/// `RAW_STRATEGY_DCT64X32` (reconstruct.rs lines 758-805).
+///
+/// `dc_grid[iy * 4 + ix]` is the dequantized DC value at sub-block
+/// `(iy, ix)` within the 8×4 region (8 rows × 4 cols, post-swap).
+///
+/// Returns `[f32; 32]` ordered as `out[iy * 8 + ix]` for `iy in 0..4,
+/// ix in 0..8` — to be written at coefficient positions
+/// `coeffs[iy * 64 + ix]` in the 64×32 coefficient block.
+///
+/// Math: forward 4-pt DCT on each of 8 rows → transpose 8×4 → 4×8 →
+/// forward 8-pt DCT (with 1/8 compensation) on each of 4 rows →
+/// divide by `(scale_iy * scale_ix * 4)`. The combined forward gain
+/// is `dct1d_4(4) × dct1d_8/8(1) = 4`.
+pub fn restore_llf_dct64x32(dc_grid: [f32; 32]) -> [f32; 32] {
+    let mut block = dc_grid;
+    // Forward 4-pt DCT on rows (8 rows of 4).
+    for iy in 0..8 {
+        dct1d_4(&mut block[iy * 4..(iy + 1) * 4]);
+    }
+    // Transpose 8×4 → 4×8.
+    let mut t = [0.0_f32; 32];
+    for iy in 0..8 {
+        for ix in 0..4 {
+            t[ix * 8 + iy] = block[iy * 4 + ix];
+        }
+    }
+    // Forward 8-pt DCT on rows (4 rows of 8) with 1/8 compensation.
+    for iy in 0..4 {
+        let s = iy * 8;
+        dct1d_8(&mut t[s..s + 8]);
+        for v in &mut t[s..s + 8] {
+            *v *= 1.0 / 8.0;
+        }
+    }
+    // Apply per-position scale + 1/4 normalization.
+    let mut out = [0.0_f32; 32];
+    for iy in 0..4 {
+        for ix in 0..8 {
+            let scale = DCT_RESAMPLE_SCALE_32_TO_4[iy] * DCT_RESAMPLE_SCALE_64_TO_8[ix];
+            out[iy * 8 + ix] = t[iy * 8 + ix] / (scale * 4.0);
+        }
+    }
+    out
+}
+
+/// Restore the 4×8 LLF coefficients of a DCT32×64 block from the 4×8
+/// stored DC grid. Mirrors upstream `restore_llf_from_dc` for
+/// `RAW_STRATEGY_DCT32X64` (reconstruct.rs lines 807-852).
+///
+/// `dc_grid[iy * 8 + ix]` is the dequantized DC value at sub-block
+/// `(iy, ix)` within the 4×8 region (4 rows × 8 cols, post-swap).
+///
+/// Returns `[f32; 32]` ordered as `out[iy * 8 + ix]` for `iy in 0..4,
+/// ix in 0..8` — to be written at coefficient positions
+/// `coeffs[iy * 64 + ix]` in the 32×64 coefficient block.
+///
+/// Math: forward 8-pt DCT (with 1/8 compensation) on each of 4 rows →
+/// transpose 4×8 → 8×4 → forward 4-pt DCT on each of 8 rows →
+/// transpose back 8×4 → 4×8 → divide by `(scale_iy * scale_ix * 4)`.
+pub fn restore_llf_dct32x64(dc_grid: [f32; 32]) -> [f32; 32] {
+    let mut block = dc_grid;
+    // Forward 8-pt DCT on rows (4 rows of 8) with 1/8 compensation.
+    for iy in 0..4 {
+        let s = iy * 8;
+        dct1d_8(&mut block[s..s + 8]);
+        for v in &mut block[s..s + 8] {
+            *v *= 1.0 / 8.0;
+        }
+    }
+    // Transpose 4×8 → 8×4.
+    let mut t = [0.0_f32; 32];
+    for iy in 0..4 {
+        for ix in 0..8 {
+            t[ix * 4 + iy] = block[iy * 8 + ix];
+        }
+    }
+    // Forward 4-pt DCT on rows (8 rows of 4).
+    for iy in 0..8 {
+        dct1d_4(&mut t[iy * 4..(iy + 1) * 4]);
+    }
+    // Transpose back 8×4 → 4×8.
+    let mut result = [0.0_f32; 32];
+    for iy in 0..8 {
+        for ix in 0..4 {
+            result[ix * 8 + iy] = t[iy * 4 + ix];
+        }
+    }
+    // Apply per-position scale + 1/4 normalization.
+    let mut out = [0.0_f32; 32];
+    for iy in 0..4 {
+        for ix in 0..8 {
+            let scale = DCT_RESAMPLE_SCALE_32_TO_4[iy] * DCT_RESAMPLE_SCALE_64_TO_8[ix];
+            out[iy * 8 + ix] = result[iy * 8 + ix] / (scale * 4.0);
+        }
+    }
+    out
+}
+
 /// Restore the 8×8 LLF coefficients of a DCT64×64 block from the 8×8
 /// stored DC grid. Mirrors upstream `restore_llf_from_dc` for
 /// `RAW_STRATEGY_DCT64X64` (reconstruct.rs lines 732-757).
@@ -761,6 +861,43 @@ mod tests {
         let [r0, r1] = restore_llf_dct16x8_or_8x16(dc0, dc1);
         assert!((r0 - llf0).abs() < 1e-5, "got {r0} expected {llf0}");
         assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
+    }
+
+    #[test]
+    fn test_restore_llf_dct64x32_zero_in() {
+        let r = restore_llf_dct64x32([0.0; 32]);
+        for &v in &r {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_restore_llf_dct64x32_constant_dc() {
+        // Constant DC c → only out[0] should be ~c (others ~0 by symmetry).
+        let c = 0.5_f32;
+        let r = restore_llf_dct64x32([c; 32]);
+        assert!((r[0] - c).abs() < 1e-4, "got {} expected {}", r[0], c);
+        for i in 1..32 {
+            assert!(r[i].abs() < 1e-4, "pos {i}: got {} expected 0", r[i]);
+        }
+    }
+
+    #[test]
+    fn test_restore_llf_dct32x64_zero_in() {
+        let r = restore_llf_dct32x64([0.0; 32]);
+        for &v in &r {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_restore_llf_dct32x64_constant_dc() {
+        let c = 0.5_f32;
+        let r = restore_llf_dct32x64([c; 32]);
+        assert!((r[0] - c).abs() < 1e-4, "got {} expected {}", r[0], c);
+        for i in 1..32 {
+            assert!(r[i].abs() < 1e-4, "pos {i}: got {} expected 0", r[i]);
+        }
     }
 
     #[test]
