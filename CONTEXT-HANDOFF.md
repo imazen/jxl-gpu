@@ -1,6 +1,47 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-07 (session 6.3 conclusion — full AC strategy family on GPU)
+**Last updated:** 2026-05-07 (session 6.4 — AFV cost grid + EPF Step 0 + sharpness picker)
+
+## Session 6.4 — AFV cost grid + EPF Step 0 + sharpness picker
+
+Three previously-listed gaps closed:
+
+### AFV0-3 cost grid integration (last per-strategy gap)
+- `quant_weights::afv_weights()` (`1f25c7c3`) — bit-for-bit port of upstream `generate_afv_weights`, 192 floats (64 per channel)
+- `forks::afv::afv_cost_grid_single_channel` (`f6c3e45e`) — host-side, all 4 afv_kinds per call
+- `forks::afv::afv_cost_grid_xyb_host` (`2ef97a2e`) — 3-channel mask-modulated counterpart matching `compute_cost_grid_*_xyb` shape
+
+### EPF Step 0 (heaviest of the three EPF passes)
+- `kernels::epf::epf_step0_kernel` (`147e6ffb`) — 5×5 plus pattern, 12 neighbors × 5-position SAD
+- `launch::epf::epf_step0` + `GpuEncoder::epf_step0_channels` (`094ea81f`)
+- `examples/epf_step0_parity.rs` (`3ec161d1`) — line-by-line inline CPU port of upstream `epf_step0_strip` (private in jxl-encoder, not in jxl-encoder-simd). CUDA parity 4.7e-10 / 4.5e-8 / 4.5e-8 vs 5e-5 tolerance — bit-near-perfect at FP32 floor.
+- `forks::epf::apply_epf_step0_gpu` (`4f49174e`) wrapper
+
+### Sharpness picker
+- `forks::epf::select_sharpness_two_pass` (`a270f002`) — pure-CPU port of the per-block picker from upstream `compute_epf_sharpness`. Pass 1: greedy + neighbor preference + `K_FAVOR_NO_SMOOTHING=0.99`. Pass 2: context reweighting with libjxl's exact integer division.
+
+### Earlier this session (already in prior handoff)
+- Quantize + dequant cover full strategy family (`768e5763`, `c79c3c5d`)
+- AFV batched APIs (`248dff39`, `15b309eb`)
+- Stale TODO sweep on `forks::transform` (`451dd3ce`)
+
+### Status of remaining gaps
+
+| Gap | Status |
+|-----|--------|
+| Full AC strategy family on GPU | DONE |
+| Quantize + dequant strategy dispatch | DONE |
+| AFV cost grid integration | DONE |
+| EPF Step 0 (12-tap) | DONE (parity verified at FP32 floor) |
+| Sharpness selection logic | DONE (pure-CPU helper) |
+| `forks::reconstruct::reconstruct_xyb_gpu` | NOT STARTED (unblocks compute_epf_sharpness orchestrator) |
+| `estimate_entropy_full` orchestration | NOT STARTED |
+| AdjustQuantBlockAC heuristics | NOT STARTED (~250 lines, 6 heuristics A-F; pre-scan stats are the GPU candidate) |
+| Per-(w,h) instance pre-allocation cache | NOT STARTED (perf optimization) |
+
+---
+
+**Earlier:** 2026-05-07 (session 6.3 conclusion — full AC strategy family on GPU)
 **Repo:** https://github.com/imazen/jxl-gpu (live, public)
 **Local:** ~/work/zen/jxl-encoder-gpu/ (195 commits on main, in sync with origin)
 **Hardware verified:** RTX 5070, CUDA 13.2, jj 0.40, rustc 1.95
