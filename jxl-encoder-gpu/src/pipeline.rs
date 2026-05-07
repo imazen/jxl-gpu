@@ -1,28 +1,56 @@
 // Copyright (c) Imazen LLC and the JPEG XL Project Authors.
 // Licensed under AGPL-3.0-or-later. Commercial licenses at https://www.imazen.io/pricing
 
-//! Phase 3 prototype: whole-image cost-grid composition.
+//! Phase 3: whole-image cost-grid composition + host-side partition
+//! selector.
 //!
-//! Demonstrates the **whole-image-per-strategy** AC strategy search
-//! pattern documented in `CLAUDE.md`. For each candidate strategy S
-//! (here DCT8 only — the most common case), one coherent whole-image
-//! pipeline computes per-block cost. A future host-side partition
-//! selector can then enumerate legal partitions per 32×32 / 64×64
-//! region and pick the min-cost partition.
+//! Implements the **whole-image-per-strategy** AC strategy search
+//! pattern documented in `CLAUDE.md`. For each candidate strategy S,
+//! one coherent whole-image pipeline computes per-block cost. The
+//! host-side partition selector then enumerates legal partitions per
+//! 16×16 / 32×32 / 64×64 region and picks the min-cost partition.
 //!
-//! Pipeline for DCT8 single-channel (Y), no CfL:
-//! 1. Forward DCT 8x8 → coefficients
-//! 2. Quantize → quantized integer coeffs
-//! 3. Dequantize → reconstructed coeffs
-//! 4. Inverse DCT → reconstructed pixels
-//! 5. Compute per-block L2 error vs original (proxy for pixel_loss)
-//! 6. Combine into per-block cost
+//! ## Cost-grid coverage
 //!
-//! This is the **simplest** proof-of-concept; full Phase 3 needs:
-//! - 3-channel coverage with CfL decorrelation
-//! - Multiple candidate strategies (DCT8, DCT16, DCT32, DCT64, DCT4, AFV)
-//! - Host-side partition selector reading the per-strategy cost grids
-//! - Refactor of `ac_strategy_search.rs` in `jxl-encoder` crate
+//! Per-strategy cost grids are available in two flavors:
+//!
+//! - **Single-channel**: simplified Y-only proxy. Cheaper, useful for
+//!   smoke tests and as a strategy-pick predictor where the full
+//!   3-channel signal isn't needed (turns out to be a near-equivalent
+//!   predictor on natural photos).
+//! - **3-channel XYB + mask1x1**: full XYB-weighted reconstruction
+//!   error masked by per-pixel perceptual sensitivity. Matches what
+//!   the VarDCT encoder actually pays for in production.
+//!
+//! | Strategy   | Single-ch        | 3-channel        | Sub-cells / region |
+//! |---|---|---|---|
+//! | DCT8       | `*_dct8_*`       | `*_dct8_xyb`     | 1                  |
+//! | DCT16×8    | `*_dct16x8_*`    | `*_dct16x8_xyb`  | 2 (2×1)            |
+//! | DCT8×16    | `*_dct8x16_*`    | `*_dct8x16_xyb`  | 2 (1×2)            |
+//! | DCT16×16   | `*_dct16x16_*`   | `*_dct16x16_xyb` | 4 (2×2)            |
+//! | DCT32×16   | `*_dct32x16_*`   | `*_dct32x16_xyb` | 8 (4×2)            |
+//! | DCT16×32   | `*_dct16x32_*`   | `*_dct16x32_xyb` | 8 (2×4)            |
+//! | DCT32×32   | `*_dct32x32_*`   | `*_dct32x32_xyb` | 16 (4×4)           |
+//! | DCT64×32   | `*_dct64x32_*`   | `*_dct64x32_xyb` | 32 (8×4)           |
+//! | DCT32×64   | `*_dct32x64_*`   | `*_dct32x64_xyb` | 32 (4×8)           |
+//! | DCT64×64   | `*_dct64x64_*`   | `*_dct64x64_xyb` | 64 (8×8)           |
+//! | DCT4×4     | `*_dct4x4_*`     | `*_dct4x4_xyb`   | 1 (sub-block)      |
+//! | DCT4×8     | `*_dct4x8_*`     | `*_dct4x8_xyb`   | 1 (sub-block)      |
+//! | DCT8×4     | `*_dct8x4_*`     | `*_dct8x4_xyb`   | 1 (sub-block)      |
+//!
+//! Full DCT4/8/16/32/64 family covered (square + rect + sub-block).
+//! Remaining: CfL-aware variants + IDENTITY/DCT2X2/AFV.
+//!
+//! ## Partition selectors
+//!
+//! - [`select_partitions_16x16_full`] — picks per 16×16 region across
+//!   {DCT16×16, 2×DCT16×8, 2×DCT8×16, 4×DCT8}.
+//! - [`select_partitions_32x32_full`] — picks per 32×32 region across
+//!   {DCT32×32, 2×DCT32×16, 2×DCT16×32, 4×Sub16×16}.
+//! - [`select_partitions_64x64`] — picks per 64×64 region across
+//!   {DCT64×64, 2×DCT64×32, 2×DCT32×64, 4×Sub32×32}. All three
+//!   selectors compose recursively for full hierarchical strategy
+//!   selection.
 
 // `if let Some(c) = opt { if c < best { ... } }` pattern is intentionally
 // nested for readability over collapsed `if let Some(c) = opt && c < best`
