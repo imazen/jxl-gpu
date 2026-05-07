@@ -115,24 +115,33 @@ fn align_up(n: u32, align: u32) -> u32 {
 /// Map a JPEG-style quality value (1..=100) to the per-block `qac_qm`
 /// scale that [`LossyEncoder`] expects.
 ///
-/// Convention chosen to roughly match jxl-encoder's distance gates:
-/// - quality=100 → qac_qm=0.5 (very high quality, light quant)
-/// - quality=90  → qac_qm=1.5
-/// - quality=75  → qac_qm=4.0
-/// - quality=50  → qac_qm=8.0
-/// - quality=25  → qac_qm=20.0
-/// - quality=10  → qac_qm=50.0
+/// Smooth exponential mapping `qac = 0.5 * 10^((100 - q) / 50)`:
+///
+/// - quality=100 → qac=0.5  (very high quality, light quant)
+/// - quality=90  → qac≈0.79
+/// - quality=75  → qac≈1.58
+/// - quality=50  → qac=5.0
+/// - quality=25  → qac≈15.8
+/// - quality=10  → qac≈31.5
+/// - quality=1   → qac≈49.7
 ///
 /// The mapping is approximate — for actual JPEG XL compatibility,
 /// users targeting specific bitrate or quality should drive
 /// `qac_qm` directly via measurement (e.g., via SSIMULACRA2).
 /// This helper exists for "I want a JPEG-quality knob" callers
 /// who don't want to think about quant scales.
+///
+/// ```
+/// use jxl_encoder_gpu::lossy_encoder::quality_to_qac;
+/// assert!((quality_to_qac(100.0) - 0.5).abs() < 0.01);
+/// assert!((quality_to_qac(50.0) - 5.0).abs() < 0.01);
+/// // Monotonically decreasing with quality.
+/// assert!(quality_to_qac(100.0) < quality_to_qac(50.0));
+/// // Out-of-range inputs clamp to [1, 100].
+/// assert_eq!(quality_to_qac(150.0), quality_to_qac(100.0));
+/// ```
 pub fn quality_to_qac(quality: f32) -> f32 {
     let q = quality.clamp(1.0, 100.0);
-    // Smooth exponential mapping: quality=100 → qac=0.5, quality=10 → qac=50.
-    // qac = 0.5 * 10^((100 - q) / 50) — gives 0.5 at q=100 and 50 at q=10.
-    // Matches the table above to within ~10%.
     0.5 * (10.0_f32).powf((100.0 - q) / 50.0)
 }
 
