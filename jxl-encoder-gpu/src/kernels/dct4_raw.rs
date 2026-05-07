@@ -103,17 +103,18 @@ fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
     let v1b = q3 * WC4_1;
     let r1_3 = v0b - v1b;           // w1
     let r1_1 = SQRT2 * (v0b + v1b) + r1_3; // b0
-    // ── Final B-transform + interleave to libjxl factorization order ──
+    // ── Final B-transform + interleave (libjxl `dct1d_8_val` order:
+    //     [r0[0], b0, r0[1], b1, r0[2], b2, r0[3], b3]) ──
     let b0 = SQRT2 * r1_0 + r1_1;
     let b1 = r1_1 + r1_2;
     let b2 = r1_2 + r1_3;
     let b3 = r1_3;
     mem[b] = r0_0;
     mem[b + 1usize] = b0;
-    mem[b + 2usize] = r0_2;
-    mem[b + 3usize] = b2;
-    mem[b + 4usize] = r0_1;
-    mem[b + 5usize] = b1;
+    mem[b + 2usize] = r0_1;
+    mem[b + 3usize] = b1;
+    mem[b + 4usize] = r0_2;
+    mem[b + 5usize] = b2;
     mem[b + 6usize] = r0_3;
     mem[b + 7usize] = b3;
 }
