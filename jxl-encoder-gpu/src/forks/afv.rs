@@ -508,6 +508,78 @@ pub fn inverse_afv_transform_gpu<R: Runtime>(
     pixels
 }
 
+/// Single-channel AFV cost grid (host-side, all 4 afv_kinds in one
+/// pass per call).
+///
+/// Mirrors the shape of [`crate::pipeline::compute_cost_grid_dct4x4_single_channel`]
+/// but for the AFV0-3 family. Returns one cost per block per kind:
+/// the L2 norm of the per-pixel reconstruction error after
+/// (forward AFV → quantize → dequant → inverse AFV) using the
+/// supplied per-coefficient `weights` and per-block `qac_qm` scale.
+///
+/// `pixel_blocks` is `n_blocks * 64` floats in row-major 8×8 layout
+/// (one block after another), in any single channel — typically Y
+/// during AC strategy search. `weights` is the per-channel slice of
+/// [`crate::quant_weights::afv_weights`] (64 floats per channel; pass
+/// the channel you actually have data for).
+///
+/// Output: `Vec<f32>` of length `4 * n_blocks`. The cost for AFV
+/// kind `k` at block index `b` lives at `out[k * n_blocks + b]`.
+///
+/// Three GPU launches per kind (AFV 4x4, raw DCT 4x4, raw DCT 4x8)
+/// for forward + inverse + the generic quantize/dequant kernels.
+/// Per-block extraction, DC packing, and L2 reduction stay on the
+/// host. Suitable for the cost grid pass where we evaluate every
+/// candidate strategy on every block.
+pub fn afv_cost_grid_single_channel<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    basis_t: &[f32; 256],
+    pixel_blocks: &[f32],
+    weights_per_block: &[f32; 64],
+    qac_qm: &[f32],
+    thresholds: &[f32; 4],
+) -> Vec<f32> {
+    use crate::forks::dequant::dequant_blocks_gpu;
+    use crate::forks::quantize::quantize_blocks_gpu;
+
+    assert!(pixel_blocks.len().is_multiple_of(64));
+    let n_blocks = pixel_blocks.len() / 64;
+    assert_eq!(qac_qm.len(), n_blocks);
+
+    // Replicate per-block weights for every block.
+    let mut weights = Vec::with_capacity(n_blocks * 64);
+    for _ in 0..n_blocks {
+        weights.extend_from_slice(weights_per_block);
+    }
+
+    let mut all_costs = Vec::with_capacity(4 * n_blocks);
+    for kind in 0_usize..4 {
+        // Forward AFV.
+        let coeffs = afv_transform_batch_gpu(enc, basis_t, pixel_blocks, kind);
+        // Quantize using DCT8-shaped path (AFV produces 64 coeffs in 8x8 layout).
+        let quant = quantize_blocks_gpu(
+            enc, &coeffs, &weights, qac_qm, thresholds, 8, 8, 1, 1,
+        );
+        // Dequant via the generic per-coefficient kernel.
+        let dequant = dequant_blocks_gpu(enc, &quant, &weights, 64);
+        // Inverse AFV → recon pixels.
+        let recon = inverse_afv_transform_batch_gpu(enc, basis_t, &dequant, kind);
+
+        // Per-block L2 cost on the host (no mask).
+        for b in 0..n_blocks {
+            let mut sum_sq = 0.0_f32;
+            let orig = &pixel_blocks[b * 64..b * 64 + 64];
+            let rec = &recon[b * 64..b * 64 + 64];
+            for i in 0..64 {
+                let d = orig[i] - rec[i];
+                sum_sq += d * d;
+            }
+            all_costs.push(sum_sq);
+        }
+    }
+    all_costs
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
@@ -618,6 +690,42 @@ mod tests {
             assert!(max_d < 1e-3,
                 "kind={kind}: AFV batch roundtrip max|Δ| = {max_d:.3e}");
         }
+    }
+
+    #[test]
+    fn test_afv_cost_grid_single_channel_smoke() {
+        use crate::quant_weights::afv_weights;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        const N: usize = 4;
+        let mut pixel_blocks = vec![0.0_f32; N * 64];
+        for b in 0..N {
+            for i in 0..64 {
+                let v = ((b * 7 + i * 11).wrapping_mul(31) % 251) as f32 / 251.0 - 0.5;
+                pixel_blocks[b * 64 + i] = 0.3 + 0.4 * v;
+            }
+        }
+        // Use the Y (luma) channel slice of afv_weights.
+        let all_w = afv_weights();
+        let mut wy = [0.0_f32; 64];
+        wy.copy_from_slice(&all_w[64..128]);
+        let qac_qm = vec![1.0_f32; N];
+        let thresholds = [0.6_f32, 0.6, 0.6, 0.6];
+
+        let costs = afv_cost_grid_single_channel(
+            &enc,
+            &AFV4X4_BASIS_TRANSPOSE,
+            &pixel_blocks,
+            &wy,
+            &qac_qm,
+            &thresholds,
+        );
+        // 4 kinds × N blocks
+        assert_eq!(costs.len(), 4 * N);
+        for &c in &costs {
+            assert!(c.is_finite() && c >= 0.0, "AFV cost grid produced bad cost {c}");
+        }
+        // At least one entry should be > 0 (synthetic input is not zero).
+        assert!(costs.iter().any(|&c| c > 0.0));
     }
 
     #[test]
