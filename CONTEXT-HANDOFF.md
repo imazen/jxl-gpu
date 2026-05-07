@@ -29,32 +29,51 @@ GPU is 1.05-3.95× FASTER. Same code, one allocation API switch.
 
 ## What's been built
 
-### Persistent GPU buffer API + 14 typed-handle methods
+### High-level `LossyEncoder` API (`crate::lossy_encoder`)
+- `LossyEncoder::new(enc, w, h)` — accepts arbitrary sizes (pads
+  internally with right+bottom edge replication)
+- `encode_one(rgb_f32, qac)` / `encode_many(rgb_f32, &qacs)`
+- `encode_one_srgb_u8(rgb_u8, qac)` / `encode_many_srgb_u8(rgb_u8, &qacs)`
+- `quality_to_qac(quality_1_to_100)` — JPEG-style quality knob
+
+This is the user-facing entry point. Construct one per `(width, height)`
+to amortize static-input upload; pass RGB U8 (interleaved) or planar
+f32. Batch variants amortize input upload across N encodes (5× speedup
+per `lossy_pipeline_repeated_input`).
+
+### Persistent GPU buffer API (`crate::persistent`)
 - `GpuPlane<R>`, `GpuBlocks<R>`, `GpuI32Blocks<R>` typed handles
 - ~30 persistent methods covering full encoder front+back
 - 3 new GPU kernels: `gather_blocks`, `scatter_blocks`, `restore_dc`
 - Cooperative DCT8 (cube_dim=8) + Wide DCT8/IDCT8 (cube_dim=64)
 - Fused DCT+quant + dequant+IDCT-Y (2-3× per-kernel)
 
-### 11 fork modules of `jxl-encoder` pipeline stages
+This is the lower-level building blocks. Use directly when you need
+fine-grained control over which kernels run, or to chain custom
+pipelines that LossyEncoder doesn't cover.
+
+### 11 fork modules of `jxl-encoder` pipeline stages (`crate::forks`)
 xyb, gaborish, adaptive_quant, reconstruct, transform (13 DCT
 strategies), cfl, epf, dequant, quantize, cost, pad
 
-### 12 example demos
-- Composition: forks_pipeline_demo, lossy_roundtrip_demo,
-  lossy_roundtrip_persistent
-- Real-image: real_image_encode (djxl-verified),
-  jxl_rs_roundtrip (jxl-rs-verified)
-- Throughput: xyb_throughput_bench, xyb_scaling_bench,
-  persistent_buffer_pipeline, lossy_pipeline_throughput,
-  lossy_pipeline_fused_throughput, lossy_pipeline_breakdown,
-  lossy_pipeline_no_io, dct8_coop_bench, fused_dct_quant_bench,
-  fused_dequant_idct_bench
+### 14+ example demos
+- API: `lossy_encoder_demo`, `lossy_encoder_real_image`
+- Composition: `forks_pipeline_demo`, `lossy_roundtrip_demo`,
+  `lossy_roundtrip_persistent`
+- Real-image: `real_image_encode` (djxl-verified),
+  `jxl_rs_roundtrip` (jxl-rs-verified)
+- Throughput: `xyb_throughput_bench`, `xyb_scaling_bench`,
+  `persistent_buffer_pipeline`, `lossy_pipeline_throughput`,
+  `lossy_pipeline_fused_throughput`, `lossy_pipeline_breakdown`,
+  `lossy_pipeline_no_io`, `lossy_pipeline_repeated_input`,
+  `dct8_coop_bench`, `fused_dct_quant_bench`,
+  `fused_dequant_idct_bench`
 
 ### Test coverage
-- 50 unit tests passing (cuda)
+- 59 unit tests passing (cuda)
 - 12 partition selector tests (cpu)
 - Real 1024×1024 CLIC photo encode + djxl + jxl-rs roundtrip
+- 1017×1013 cropped (non-aligned) photo via LossyEncoder
 - Full pipeline parity 4e-6 max abs delta CPU vs GPU
 
 ## Next perf frontier (in priority order)
