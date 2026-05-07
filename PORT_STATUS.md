@@ -62,7 +62,7 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 
 | Component | Status |
 |---|---|
-| Per-strategy whole-image cost grid kernels | ⚙ | Single-channel cost grids for DCT4x4, DCT4x8, DCT8x4, DCT8, DCT16x8, DCT8x16, DCT16x16, DCT32x16, DCT16x32, DCT32x32, DCT64x32, DCT32x64, DCT64x64 (DCT4/8/16/32/64 family — square + rect — complete). 3-channel XYB-weighted + mask1x1 cost grids for DCT8 + DCT16x16 + DCT32x32 (`compute_cost_grid_*_xyb`); needs 3-channel for DCT64 + rect family + CfL + IDENTITY/DCT2X2/AFV variants |
+| Per-strategy whole-image cost grid kernels | ⚙ | Single-channel cost grids for DCT4x4, DCT4x8, DCT8x4, DCT8, DCT16x8, DCT8x16, DCT16x16, DCT32x16, DCT16x32, DCT32x32, DCT64x32, DCT32x64, DCT64x64 (DCT4/8/16/32/64 family — square + rect — complete). 3-channel XYB-weighted + mask1x1 cost grids for DCT8 + DCT16x16 + DCT32x32 + DCT64x64 (square family complete in `compute_cost_grid_*_xyb`); needs 3-channel for rect family + CfL + IDENTITY/DCT2X2/AFV variants |
 | Host-side partition selector | ✓ | Full coverage of standard rectangular family across 16/32/64 region tiers (12 variants). 12 unit tests passing. End-to-end integration demo verifies algorithmic correctness on synthetic smooth+noisy input |
 | Refactor `ac_strategy_search.rs` to consume cost grids | ⛔ | requires touching `jxl-encoder` crate (separate repo) — needs user permission |
 

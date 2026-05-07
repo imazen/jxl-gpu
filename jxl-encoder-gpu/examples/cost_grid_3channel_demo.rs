@@ -30,7 +30,7 @@ fn main() {
     use jxl_encoder_gpu::forks::adaptive_quant::compute_mask1x1_gpu;
     use jxl_encoder_gpu::pipeline::{
         compute_cost_grid_dct8_single_channel, compute_cost_grid_dct8_xyb,
-        compute_cost_grid_dct32x32_xyb,
+        compute_cost_grid_dct32x32_xyb, compute_cost_grid_dct64x64_xyb,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -272,4 +272,93 @@ fn main() {
         std::process::exit(1);
     }
     println!("✓ DCT32x32 3-channel cost grid produced varying costs on real content.");
+
+    // ---- DCT64x64 3-channel (per-region) ----
+    let xb64 = xb_blocks / 8;
+    let yb64 = yb_blocks / 8;
+    let nb64 = xb64 * yb64;
+    if nb64 == 0 {
+        println!("\n(image too small for DCT64x64 demo — skipping)");
+        return;
+    }
+    let repack64 = |plane: &[f32]| {
+        let mut out = vec![0.0f32; nb64 * 4096];
+        for ry in 0..yb64 {
+            for rx in 0..xb64 {
+                for ly in 0..64 {
+                    for lx in 0..64 {
+                        out[(ry * xb64 + rx) * 4096 + ly * 64 + lx] =
+                            plane[(ry * 64 + ly) * (w as usize) + (rx * 64 + lx)];
+                    }
+                }
+            }
+        }
+        out
+    };
+    let bx64 = repack64(&xx);
+    let by64 = repack64(&xy);
+    let bb64 = repack64(&xb);
+    let mut wts64 = vec![1.0f32; 4096];
+    for i in 0..4096 {
+        wts64[i] = 1.0 + 0.5 * (i as f32 / 4096.0);
+    }
+    let wx64: Vec<f32> = wts64.iter().map(|w| w * 0.6).collect();
+    let wy64 = wts64.clone();
+    let wb64: Vec<f32> = wts64.iter().map(|w| w * 1.3).collect();
+    let replicate64 = |per: &[f32]| {
+        let mut out = vec![0.0f32; nb64 * per.len()];
+        for k in 0..nb64 {
+            out[k * per.len()..(k + 1) * per.len()].copy_from_slice(per);
+        }
+        out
+    };
+    let qac64 = vec![1.7f32; nb64];
+    let cg64 = compute_cost_grid_dct64x64_xyb::<Backend>(
+        &client,
+        client.create_from_slice(f32::as_bytes(&bx64)),
+        client.create_from_slice(f32::as_bytes(&by64)),
+        client.create_from_slice(f32::as_bytes(&bb64)),
+        client.create_from_slice(f32::as_bytes(&replicate64(&wx64))),
+        client.create_from_slice(f32::as_bytes(&replicate64(&wy64))),
+        client.create_from_slice(f32::as_bytes(&replicate64(&wb64))),
+        client.create_from_slice(f32::as_bytes(&qac64)),
+        client.create_from_slice(f32::as_bytes(&qac64)),
+        client.create_from_slice(f32::as_bytes(&qac64)),
+        client.create_from_slice(f32::as_bytes(&thr_xb[..])),
+        client.create_from_slice(f32::as_bytes(&thr_y[..])),
+        client.create_from_slice(f32::as_bytes(&thr_xb[..])),
+        client.create_from_slice(f32::as_bytes(&mask1x1)),
+        xb64 as u32,
+        yb64 as u32,
+    );
+    let costs64_raw: Vec<f32> = {
+        let bytes = client.read_one(cg64.costs).expect("dct64 xyb");
+        f32::from_bytes(&bytes).to_vec()
+    };
+    // Aggregate 64 sub-cells per 64x64 region.
+    let xb_sub = xb64 * 8;
+    let mut costs64 = vec![0.0f32; nb64];
+    for ry in 0..yb64 {
+        for rx in 0..xb64 {
+            let by = ry * 8;
+            let bx = rx * 8;
+            let mut s = 0.0_f32;
+            for dy in 0..8 {
+                for dx in 0..8 {
+                    s += costs64_raw[(by + dy) * xb_sub + bx + dx];
+                }
+            }
+            costs64[ry * xb64 + rx] = s;
+        }
+    }
+    let (mn, me, mx, sd) = stats(&costs64);
+    println!(
+        "DCT64x64 (3-ch XYB+mask):  min={mn:.4}  mean={me:.4}  max={mx:.4}  std={sd:.4}  (std/mean={:.3})",
+        sd / me.max(1e-9)
+    );
+    if sd / me.max(1e-9) < 0.05 {
+        eprintln!("✗ DCT64x64 cost grid distribution unexpectedly flat");
+        std::process::exit(1);
+    }
+    println!("✓ DCT64x64 3-channel cost grid produced varying costs on real content.");
 }
