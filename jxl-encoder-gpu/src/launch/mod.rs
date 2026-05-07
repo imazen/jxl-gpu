@@ -10,6 +10,7 @@ pub mod cfl;
 pub mod dc_restore;
 pub mod denoise;
 pub mod dct16;
+pub mod dct2x2;
 pub mod dct32;
 pub mod dct4;
 pub mod dct64;
