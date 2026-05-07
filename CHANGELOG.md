@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+### Phase 5 — AFV0-3 forward transform on GPU (`faf658a6`, `e8ebb52f`, `0d9514e5`, `4a5fca9b`, `de77c788`, `be8b6206`)
+
+Completes the AFV (Adaptive Frequency Variable) corner DCT family,
+the last remaining unported transform in the standard JXL AC strategy
+set. AFV is used for 8×8 blocks at the corners of larger transform
+regions and provides better frequency localization than DCT8.
+
+Three new GPU kernels:
+- **AFV 4×4 DCT** (`afv_dct_4x4_kernel` + inverse): the unique
+  16×16 matmul against the libjxl `AFV4X4_BASIS_TRANSPOSE` matrix.
+  Forward + inverse both bit-exact (8.85e-9 / 5.96e-8).
+- **Raw 4×4 forward DCT** (`dct_4x4_raw_kernel`): the 16-coeff
+  primitive (NOT the 64-coeff dct_4x4_full). 8.85e-9 parity.
+- **Raw 4×8 forward DCT** (`dct_4x8_raw_kernel`): 32-coeff primitive,
+  transposed output. 2.24e-8 parity after fixing dct1d_8 output
+  ordering bug (was misreading upstream `dct1d_8_val` array layout —
+  positions 2/3/4/5 were swapped).
+
+Plus host-side composition (`forks::afv`):
+- `extract_afv_corner` (with mirror per `afv_kind`)
+- `extract_dct4_corner`, `extract_dct4x8_half`
+- `pack_afv_dcs` (DC repacking)
+- `afv_transform_gpu(enc, basis_t, pixels, afv_kind) -> [f32; 64]`
+
+End-to-end parity (`afv_transform_parity` example) for all 4
+corner variants:
+
+| afv_kind | max\|Δ\| |
+|---|---|
+| 0 | 3.07e-8 ✓ |
+| 1 | 7.45e-8 ✓ |
+| 2 | 3.70e-8 ✓ |
+| 3 | 3.91e-8 ✓ |
+
+3 GPU launches per block (un-batched). Future optimization: batch
+by `afv_kind` for higher throughput. **Inverse AFV transform port
+is still TODO** (decoder side; needs idct_4x4_raw + idct_4x8_raw +
+the inverse AFV-DCT kernel which already exists).
+
 ### Phase 5 — fuzzy_erosion ported, forks::adaptive_quant fully on GPU (`feb0ec97`, `67c00680`, `53efc207`, `bf89275c`)
 
 GPU-port of `jxl_encoder::vardct::adaptive_quant::fuzzy_erosion` —
