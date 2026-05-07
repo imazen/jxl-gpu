@@ -1,28 +1,28 @@
 //! Full GPU per-block lossy roundtrip via the persistent API.
 //!
-//! Mirror of `lossy_roundtrip_demo` but rewritten to use the typed
-//! `crate::persistent` API throughout. Demonstrates the canonical
-//! shape of a real-world GPU encoder pipeline:
+//! End-to-end on-GPU pipeline mirroring a real VarDCT lossy path:
 //!
-//!   linear-RGB                      ─ upload ─▶ G_R, G_G, G_B
-//!   xyb_from_linear_rgb_persistent  ───────▶ G_X, G_Y, G_B
-//!   gaborish_5x5_persistent (×3)    ───────▶ G_Xg, G_Yg, G_Bg
-//!   (host-side block extraction —   currently unavoidable: gather
-//!    blocks from spatial planes into per-block buffers)
-//!   upload_blocks (×3)              ───────▶ GpuBlocks for each ch
-//!   dct_8x8_persistent (×3)         ───────▶ DCT coeffs (3 channels)
-//!   quantize_dct8_persistent (×3)   ───────▶ GpuI32Blocks (3 ch)
-//!   dequant_dct8_persistent          ───────▶ Dequantized (X, Y, B)
-//!   idct_8x8_persistent (×3)         ───────▶ Reconstructed pixels
-//!   download_blocks                  ─ download ─▶ host
+//!   linear-RGB                          ─ upload ─▶
+//!   xyb_from_linear_rgb_persistent      ─────────▶
+//!   gaborish_5x5_persistent (×3)        ─────────▶
+//!   gather_blocks_persistent (×3)       ─────────▶ (GPU spatial→blocks)
+//!   dct_8x8_persistent (×3)             ─────────▶
+//!   quantize_dct8_persistent (×3)       ─────────▶ (i32 quantized)
+//!   dequant_dct8_persistent              ─────────▶ (3-channel batched)
+//!   idct_8x8_persistent (×3)             ─────────▶
+//!   scatter_blocks_persistent (×3)      ─────────▶ (GPU blocks→spatial)
+//!                                       ─ download ─▶ host
 //!
-//! This is ONE upload (RGB) + ONE download (reconstructed Y coefficient
-//! batch) per pipeline run, vs. the original demo's ~10 round-trips.
+//! With the gather/scatter GPU kernels (added 2026-05-06), the
+//! pipeline now traverses the host↔GPU boundary only at the input
+//! upload and final download. Internal stages stay GPU-resident.
 //!
-//! Note: the host-side block-gather between spatial-plane stages and
-//! per-block-batch stages is the next API gap to close — it forces a
-//! GPU→host download + host gather + host→GPU upload. Future work:
-//! a GPU `gather_blocks_into_batch` kernel would close that gap.
+//! DC handling: the GPU quantize_dct8 kernel always zeros DC (in the
+//! real encoder, DC has its own quant + entropy coding via dc_coding).
+//! We download the forward DCT coefficients once to extract DC, then
+//! restore them after dequant. This is the same mitigation as the
+//! original lossy_roundtrip_demo; closing it requires a separate DC
+//! quant path (next API addition).
 
 #[cfg(all(feature = "cuda", feature = "encoder"))]
 fn main() {
@@ -37,7 +37,7 @@ fn main() {
     const NB: usize = (W / 8) * (H / 8); // 64 DCT8 blocks
 
     println!(
-        "=== persistent lossy roundtrip: 64×64 RGB → JPEG XL VarDCT-style → RGB ===\n"
+        "=== full-GPU lossy roundtrip (gather/scatter on-GPU): 64×64 ===\n"
     );
 
     // Synthetic input.
@@ -57,7 +57,7 @@ fn main() {
         }
     }
 
-    // Gaborish weights (mul=1.0, matches forks::gaborish).
+    // Gaborish weights (mul=1.0).
     const K_GABORISH: [f64; 5] = [
         -0.094_958_15_67,
         -0.041_031_725,
@@ -85,42 +85,22 @@ fn main() {
     let g_g = enc.upload_plane(&g_plane, W as u32, H as u32);
     let g_b = enc.upload_plane(&b_plane, W as u32, H as u32);
 
-    // ── Plane stages (XYB + gaborish) ──────────────────────────────
+    // ── Plane stages: XYB + gaborish ───────────────────────────────
     let (xx, xy, xbo) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
     let xx_g = enc.gaborish_5x5_persistent(&xx, &weights);
     let xy_g = enc.gaborish_5x5_persistent(&xy, &weights);
     let xb_g = enc.gaborish_5x5_persistent(&xbo, &weights);
 
-    // ── Spatial → per-block boundary (host-side gather; the next
-    //    API gap to close with a GPU gather kernel) ───────────────
-    let xyb_x = enc.download_plane(&xx_g);
-    let xyb_y = enc.download_plane(&xy_g);
-    let xyb_b = enc.download_plane(&xb_g);
-    let mut block_x = vec![0.0_f32; NB * 64];
-    let mut block_y = vec![0.0_f32; NB * 64];
-    let mut block_b = vec![0.0_f32; NB * 64];
-    for by in 0..(H / 8) {
-        for bx in 0..(W / 8) {
-            let lin_idx = by * (W / 8) + bx;
-            for dy in 0..8 {
-                let src_off = (by * 8 + dy) * W + bx * 8;
-                let dst_off = lin_idx * 64 + dy * 8;
-                block_x[dst_off..dst_off + 8].copy_from_slice(&xyb_x[src_off..src_off + 8]);
-                block_y[dst_off..dst_off + 8].copy_from_slice(&xyb_y[src_off..src_off + 8]);
-                block_b[dst_off..dst_off + 8].copy_from_slice(&xyb_b[src_off..src_off + 8]);
-            }
-        }
-    }
-    let bx = enc.upload_blocks(&block_x, NB as u32, 64);
-    let by = enc.upload_blocks(&block_y, NB as u32, 64);
-    let bb = enc.upload_blocks(&block_b, NB as u32, 64);
+    // ── Spatial → per-block via GPU gather (NO host transfer) ──────
+    let bx_g = enc.gather_blocks_persistent(&xx_g, 8, 8);
+    let by_g = enc.gather_blocks_persistent(&xy_g, 8, 8);
+    let bb_g = enc.gather_blocks_persistent(&xb_g, 8, 8);
 
-    // ── Per-block stages (DCT → quant → dequant → IDCT) ────────────
-    let coeffs_x = enc.dct_8x8_persistent(&bx);
-    let coeffs_y = enc.dct_8x8_persistent(&by);
-    let coeffs_b = enc.dct_8x8_persistent(&bb);
+    // ── Per-block stages: DCT → quant → dequant → IDCT ─────────────
+    let coeffs_x = enc.dct_8x8_persistent(&bx_g);
+    let coeffs_y = enc.dct_8x8_persistent(&by_g);
+    let coeffs_b = enc.dct_8x8_persistent(&bb_g);
 
-    // Quantize using mild qac_qm=4.0 + unit weights.
     let weights_unit = enc.upload_blocks(&vec![1.0_f32; NB * 64], NB as u32, 64);
     let qac = vec![4.0_f32; NB];
     let thr = [0.56_f32, 0.62, 0.62, 0.62];
@@ -144,8 +124,7 @@ fn main() {
         &bf,
     );
 
-    // GPU dequant zeros DC. Restore from forward DCT coefficients
-    // (matches the host-side mitigation in the round-trip demo).
+    // DC restoration (still host-side; the GPU quantize zeros DC).
     let host_coeffs_x = enc.download_blocks(&coeffs_x);
     let host_coeffs_y = enc.download_blocks(&coeffs_y);
     let host_coeffs_b = enc.download_blocks(&coeffs_b);
@@ -166,48 +145,64 @@ fn main() {
     let recon_y_blocks = enc.idct_8x8_persistent(&dq_y);
     let recon_b_blocks = enc.idct_8x8_persistent(&dq_b);
 
-    // ── Download (output boundary) ─────────────────────────────────
-    let recon_x = enc.download_blocks(&recon_x_blocks);
-    let recon_y = enc.download_blocks(&recon_y_blocks);
-    let recon_b = enc.download_blocks(&recon_b_blocks);
+    // ── Per-block → spatial via GPU scatter ────────────────────────
+    let recon_x_plane = enc.scatter_blocks_persistent(&recon_x_blocks, W as u32, H as u32, 8, 8);
+    let recon_y_plane = enc.scatter_blocks_persistent(&recon_y_blocks, W as u32, H as u32, 8, 8);
+    let recon_b_plane = enc.scatter_blocks_persistent(&recon_b_blocks, W as u32, H as u32, 8, 8);
 
+    // ── Inverse XYB on GPU → linear RGB ────────────────────────────
+    let (rgb_r, rgb_g, rgb_b) =
+        enc.xyb_to_linear_rgb_planar_persistent(&recon_x_plane, &recon_y_plane, &recon_b_plane);
+
+    // ── Download (output boundary) ─────────────────────────────────
+    let r_out = enc.download_plane(&rgb_r);
+    let g_out = enc.download_plane(&rgb_g);
+    let b_out = enc.download_plane(&rgb_b);
     let dt = t0.elapsed();
     println!("Pipeline: {:.2}ms total", dt.as_secs_f64() * 1000.0);
 
-    // ── Verify Y reconstruction quality ────────────────────────────
-    let mut max_err_y = 0.0_f32;
-    let mut sum_err_y = 0.0_f64;
-    for by in 0..(H / 8) {
-        for bx in 0..(W / 8) {
-            let lin_idx = by * (W / 8) + bx;
-            for dy in 0..8 {
-                for dx in 0..8 {
-                    let src_off = (by * 8 + dy) * W + bx * 8 + dx;
-                    let dst_off = lin_idx * 64 + dy * 8 + dx;
-                    let err = (xyb_y[src_off] - recon_x[dst_off]).abs();
-                    let err_y = (xyb_y[src_off] - recon_y[dst_off]).abs();
-                    let _ = err; // suppress unused warning
-                    max_err_y = max_err_y.max(err_y);
-                    sum_err_y += err_y as f64;
-                }
-            }
-        }
+    // ── Verify final RGB reconstruction ────────────────────────────
+    let mut sum_r = 0.0_f64;
+    let mut sum_g = 0.0_f64;
+    let mut sum_b_acc = 0.0_f64;
+    let mut max_r = 0.0_f32;
+    let mut max_g = 0.0_f32;
+    let mut max_b = 0.0_f32;
+    for i in 0..(W * H) {
+        let dr = (r_plane[i] - r_out[i]).abs();
+        let dg = (g_plane[i] - g_out[i]).abs();
+        let db = (b_plane[i] - b_out[i]).abs();
+        sum_r += dr as f64;
+        sum_g += dg as f64;
+        sum_b_acc += db as f64;
+        max_r = max_r.max(dr);
+        max_g = max_g.max(dg);
+        max_b = max_b.max(db);
     }
-    let mae_y = sum_err_y / (W * H) as f64;
-    println!("Y MAE: {mae_y:.4e}, max: {max_err_y:.4e}");
-    assert!(mae_y < 0.05, "Y MAE too large: {mae_y:.3e}");
-
-    // Also confirm B/X are finite (their DC is restored too).
-    for v in recon_x.iter().chain(&recon_b) {
-        assert!(v.is_finite());
+    let n = (W * H) as f64;
+    println!(
+        "RGB MAE: R={:.4e} G={:.4e} B={:.4e}",
+        sum_r / n,
+        sum_g / n,
+        sum_b_acc / n
+    );
+    println!(
+        "RGB max: R={:.4e} G={:.4e} B={:.4e}",
+        max_r, max_g, max_b
+    );
+    for v in r_out.iter().chain(&g_out).chain(&b_out) {
+        assert!(v.is_finite(), "non-finite pixel: {v}");
     }
+    assert!(sum_r / n < 0.05, "R MAE: {:.3e}", sum_r / n);
+    assert!(sum_g / n < 0.05, "G MAE: {:.3e}", sum_g / n);
+    assert!(sum_b_acc / n < 0.15, "B MAE: {:.3e}", sum_b_acc / n);
 
     println!("\n✓ Full lossy DCT8 roundtrip via persistent API:");
     println!(
-        "  upload_plane × 3 (R,G,B) → 4 plane-stage launches (XYB+3×gaborish) →\n  3 × (DCT, quantize, dequant, IDCT) per-block stages → download_blocks × 3"
+        "  upload_plane × 3 → XYB → gaborish × 3 → gather × 3 →\n  DCT × 3 → quantize × 3 → dequant → (DC restore via host hop) →\n  IDCT × 3 → scatter × 3 → XYB inverse → download_plane × 3"
     );
     println!(
-        "  Inputs/outputs traverse the host→GPU and GPU→host boundaries only at\n  the pipeline edges. The internal spatial→per-block gather still uses host\n  memory; closing that gap is the next API addition (GPU gather kernel)."
+        "  All non-DC stages run on-GPU end-to-end. Only DC restoration\n  hops through host (encoder DC-coding path is the proper fix)."
     );
 }
 
