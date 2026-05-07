@@ -560,6 +560,95 @@ impl<R: Runtime> LossyEncoder<R> {
         )
     }
 
+    /// Turnkey content-driven adaptive quantization.
+    ///
+    /// Computes a per-block qac field from the image's mask1x1 (per-
+    /// pixel masking signal that's high in smooth regions and low at
+    /// edges), then encodes with that field. Smooth blocks get heavier
+    /// quant (smaller files), detail blocks get lighter quant
+    /// (preserved edges).
+    ///
+    /// `distance` controls the central quality (libjxl-style; 1.0 =
+    /// reference). The AQ field varies per block in a 4× range around
+    /// it: `qac ∈ [distance_to_qac(distance * 2),
+    /// distance_to_qac(distance / 2)]`.
+    ///
+    /// Costs roughly the same as a single `encode_one` call plus an
+    /// XYB+mask1x1 prepass (~2-5% overhead at 1024² per
+    /// content_driven_aq_demo measurements).
+    pub fn encode_one_with_aq(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        distance: f32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let aq_field = self.compute_aq_field(enc, r, g, b, distance);
+        self.encode_one_adaptive(enc, r, g, b, &aq_field)
+    }
+
+    /// Compute the per-block AQ field that [`Self::encode_one_with_aq`]
+    /// would use, exposed for callers who want to inspect or modify it
+    /// before passing to [`Self::encode_one_adaptive`].
+    pub fn compute_aq_field(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        distance: f32,
+    ) -> Vec<f32> {
+        use crate::forks::adaptive_quant::compute_mask1x1_gpu;
+        let (w, h) = (self.width as usize, self.height as usize);
+        // Run XYB on unpadded input — mask1x1 only needs the Y channel.
+        let (_xx, xy, _xb) = enc.xyb_from_linear_rgb(r, g, b);
+        let mask = compute_mask1x1_gpu(enc, &xy, w, h);
+
+        // Per-block mean of mask, clamped to image bounds.
+        let (pw, _ph) = (self.padded_width as usize, self.padded_height as usize);
+        let blocks_per_row = pw / 8;
+        let blocks_per_col = (self.padded_height as usize) / 8;
+        let nb = blocks_per_row * blocks_per_col;
+        let mut block_means = vec![0.0_f32; nb];
+        for by in 0..blocks_per_col {
+            for bx in 0..blocks_per_row {
+                let mut sum = 0.0_f64;
+                let mut count = 0_usize;
+                for dy in 0..8 {
+                    let y = by * 8 + dy;
+                    if y >= h {
+                        break;
+                    }
+                    for dx in 0..8 {
+                        let x = bx * 8 + dx;
+                        if x >= w {
+                            break;
+                        }
+                        sum += mask[y * w + x] as f64;
+                        count += 1;
+                    }
+                }
+                block_means[by * blocks_per_row + bx] =
+                    if count > 0 { (sum / count as f64) as f32 } else { 1.0 };
+            }
+        }
+
+        // Map block_means' range to [qac_min..qac_max] inversely
+        // (high mask = smooth = heavy quant = LOW qac).
+        let m_min = block_means.iter().copied().fold(f32::INFINITY, f32::min);
+        let m_max = block_means.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let qac_max = distance_to_qac(distance * 0.5); // detail → light quant
+        let qac_min = distance_to_qac(distance * 2.0); // smooth → heavy quant
+        block_means
+            .iter()
+            .map(|&m| {
+                let t = if m_max > m_min { (m - m_min) / (m_max - m_min) } else { 0.5 };
+                qac_max + (qac_min - qac_max) * t
+            })
+            .collect()
+    }
+
     /// (caller crops back to original).
     fn run_pipeline(
         &self,
@@ -739,6 +828,42 @@ mod tests {
         assert_eq!(outputs.len(), 3);
         for out in &outputs {
             assert_eq!(out.len(), n * 3);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_lossy_encoder_with_aq() {
+        // Turnkey content-driven AQ — encode_one_with_aq runs mask1x1
+        // internally and derives the qac field.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy = LossyEncoder::new(&enc, 32, 32);
+        let n = 32 * 32;
+        // Mix of smooth + edges: gradient + a sharp horizontal edge.
+        let mut r = Vec::with_capacity(n);
+        let mut g = Vec::with_capacity(n);
+        let mut b = Vec::with_capacity(n);
+        for y in 0..32 {
+            for x in 0..32 {
+                let v = if y < 16 { 0.2 } else { 0.8 };
+                r.push(v + 0.01 * x as f32);
+                g.push(v + 0.01 * x as f32);
+                b.push(v + 0.01 * x as f32);
+            }
+        }
+        let (rr, gg, bb) = lossy.encode_one_with_aq(&enc, &r, &g, &b, 1.0);
+        assert_eq!(rr.len(), n);
+        assert_eq!(gg.len(), n);
+        assert_eq!(bb.len(), n);
+        for v in rr.iter().chain(&gg).chain(&bb) {
+            assert!(v.is_finite());
+        }
+        // Also test compute_aq_field returns the right shape.
+        let aq = lossy.compute_aq_field(&enc, &r, &g, &b, 1.0);
+        assert_eq!(aq.len(), lossy.num_blocks as usize);
+        for &v in &aq {
+            assert!(v.is_finite() && v > 0.0);
         }
     }
 
