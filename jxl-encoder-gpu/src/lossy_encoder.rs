@@ -101,7 +101,11 @@ pub struct LossyEncoder<R: Runtime> {
     padded_width: u32,
     padded_height: u32,
     num_blocks: u32,
-    weights_g: GpuBlocks<R>,
+    /// Per-channel DCT8 quant weight buffers (X, Y, B). Each holds the
+    /// libjxl DCT8 quant table for that channel, replicated per block.
+    weights_x: GpuBlocks<R>,
+    weights_y: GpuBlocks<R>,
+    weights_b: GpuBlocks<R>,
     weights: GaborishWeights,
     thresholds: [f32; 4],
 }
@@ -278,24 +282,29 @@ impl<R: Runtime> LossyEncoder<R> {
         let padded_width = align_up(width, 8);
         let padded_height = align_up(height, 8);
         let num_blocks = (padded_width / 8) * (padded_height / 8);
-        // libjxl DCT8 Y-channel quant weights, replicated per block.
-        // (X and B channels have different weights; this LossyEncoder
-        // uses Y weights for all 3 channels — proper 3-channel quant
-        // matrices would need per-channel weights_g handles.)
-        let dct8_weights = generate_dct8_quant_weights();
-        let y_weights = &dct8_weights[64..128]; // Y channel slice
-        let mut weights_per_block = Vec::with_capacity((num_blocks as usize) * 64);
-        for _ in 0..num_blocks {
-            weights_per_block.extend_from_slice(y_weights);
-        }
-        let weights_g = enc.upload_blocks(&weights_per_block, num_blocks, 64);
+        // Upload one weights buffer per channel (X, Y, B) using the
+        // libjxl DCT8 per-channel quant matrices. Y has the gentlest
+        // quant (preserves luma); X/B have steeper quant (chroma).
+        let all_weights = generate_dct8_quant_weights();
+        let upload_channel = |slice: &[f32]| {
+            let mut buf = Vec::with_capacity((num_blocks as usize) * 64);
+            for _ in 0..num_blocks {
+                buf.extend_from_slice(slice);
+            }
+            enc.upload_blocks(&buf, num_blocks, 64)
+        };
+        let weights_x = upload_channel(&all_weights[0..64]);
+        let weights_y = upload_channel(&all_weights[64..128]);
+        let weights_b = upload_channel(&all_weights[128..192]);
         Self {
             width,
             height,
             padded_width,
             padded_height,
             num_blocks,
-            weights_g,
+            weights_x,
+            weights_y,
+            weights_b,
             weights: default_gaborish_weights(),
             thresholds: [0.56, 0.62, 0.62, 0.62],
         }
@@ -484,18 +493,18 @@ impl<R: Runtime> LossyEncoder<R> {
         let coeffs_y = enc.dct_8x8_wide_persistent(&by_g);
         let coeffs_b = enc.dct_8x8_wide_persistent(&bb_g);
         let q_x =
-            enc.quantize_dct8_persistent(&coeffs_x, &self.weights_g, &qac_vec, &self.thresholds);
+            enc.quantize_dct8_persistent(&coeffs_x, &self.weights_x, &qac_vec, &self.thresholds);
         let q_y =
-            enc.quantize_dct8_persistent(&coeffs_y, &self.weights_g, &qac_vec, &self.thresholds);
+            enc.quantize_dct8_persistent(&coeffs_y, &self.weights_y, &qac_vec, &self.thresholds);
         let q_b =
-            enc.quantize_dct8_persistent(&coeffs_b, &self.weights_g, &qac_vec, &self.thresholds);
+            enc.quantize_dct8_persistent(&coeffs_b, &self.weights_b, &qac_vec, &self.thresholds);
         let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
             &q_x,
             &q_y,
             &q_b,
-            &self.weights_g,
-            &self.weights_g,
-            &self.weights_g,
+            &self.weights_x,
+            &self.weights_y,
+            &self.weights_b,
             &qac_vec,
             &qac_vec,
             &qac_vec,
