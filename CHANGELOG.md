@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### AdjustQuantBlockAC fully ported as host helpers (`453808d0`, `ebf765ed`, `86886b55`, `6d3c16db`, `99362cc3`, `d1bef643`)
+
+The full upstream `adjust_quant_block_ac` (~250 lines, 6 heuristics
+A-F + pre-scan) is now portable as standalone host helpers in
+`forks::quantize`:
+
+- `adjust_quant_prescan` (`20318810`) — the per-block coefficient
+  pre-scan loop. Returns `None` for the 5 partial block kinds
+  upstream skips.
+- `apply_heuristic_a_thresholds` (`453808d0`) — threshold reduction
+  for `xsize > 1 || ysize > 1`. 0.54 floor, 0.08 cap.
+- `apply_heuristic_c_corner_penalty` (`ebf765ed`) — HF corner
+  penalty with per-channel multipliers `[70, 30, 60]`.
+- `apply_heuristic_d_dct8_flatness` (`ebf765ed`) — DCT8-only
+  flatness detector (`sum(hf_nonzeros) < 11.0`).
+- `apply_heuristic_b_sparse_y` (`86886b55`) — Y-channel sparse
+  block handling with K_LIMIT/K_MUL constants and the if/else if
+  threshold-position cascade (Q3 → Q1/Q2 → Q0).
+- `apply_heuristic_e_large_transform` (`6d3c16db`) — DCT16+ family
+  error correction with K_MUL1/K_MUL2 4×3 tables and
+  K_QUANT_NORMALIZER.
+- `apply_heuristic_f_activity` (`99362cc3`) — activity-based
+  reduction with libjxl's overflow-safe min computation; Y-channel
+  threshold bumps; floor at `max(quant_orig/2, 4)`.
+- `adjust_quant_block_ac_host` (`d1bef643`) — orchestrator
+  composing all of the above in upstream's exact order
+  (A → prescan → B → C → D → E → F). Returns `AdjustQuantOutcome`
+  mirroring upstream's `(heuristics_fired, sum_of_vals,
+  sum_of_error, activity)` 4-tuple.
+
+Each heuristic ships with focused unit tests (4 + 5 + 5 + 3 + 3 +
+4 + 2 = 26 total). With the heuristics standalone, a future
+per-block-parallel `#[cube]` kernel can transcribe them without
+further reverse-engineering.
+
 ### AdjustQuantBlockAC pre-scan helper (`20318810`)
 
 `forks::quantize::adjust_quant_prescan` ports the per-block
