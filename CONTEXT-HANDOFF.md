@@ -1,9 +1,39 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-07 (session 6 part 3 — fuzzy_erosion + AFV0-3 forward port)
+**Last updated:** 2026-05-07 (session 6.3 conclusion — full AC strategy family on GPU)
 **Repo:** https://github.com/imazen/jxl-gpu (live, public)
-**Local:** ~/work/zen/jxl-encoder-gpu/ (191 commits on main, in sync with origin)
+**Local:** ~/work/zen/jxl-encoder-gpu/ (195 commits on main, in sync with origin)
 **Hardware verified:** RTX 5070, CUDA 13.2, jj 0.40, rustc 1.95
+
+## Milestone — every standard JXL AC strategy is now on GPU
+
+Forward + inverse for all of:
+
+```
+DCT8     DCT4×4   DCT4×8   DCT8×4
+DCT16×16 DCT16×8  DCT8×16
+DCT32×32 DCT32×16 DCT16×32
+DCT64×64 DCT64×32 DCT32×64
+IDENTITY DCT2×2
+AFV0     AFV1     AFV2     AFV3
+```
+
+= 16 transform variants × 2 directions = 32 GPU kernels (where
+"AFV" counts as one variant since the four corners share kernels
+with different host-side mirroring). Each kernel matches its
+upstream `jxl_encoder` reference at FP32 noise floor (typical
+parity 1e-8 to 1.5e-7).
+
+Composed through `forks::transform::apply_dct_batch_gpu` and
+`forks::afv::{afv_transform_gpu, inverse_afv_transform_gpu}`.
+
+The transform layer is **closed**. Remaining encoder-side gaps:
+- AFV cost grid integration (transforms done, wrapping pending)
+- AdjustQuantBlockAC heuristics
+- EPF Step 0 (12-tap filter)
+- Non-DCT8 strategies' quantize/dequant kernels
+- `estimate_entropy_full` orchestration
+- Per-(w,h) instance pre-allocation cache for `GpuEncoder`
 
 ## Session 6.3 highlight — fuzzy_erosion + AFV0-3 forward = full standard strategy family on GPU
 
