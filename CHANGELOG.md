@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Quantize + dequant cover the full strategy family (`768e5763`, `c79c3c5d`)
+
+`forks::quantize::quantize_blocks_gpu` dispatches to either the
+DCT8 fast path or the generic `quantize_large` kernel based on the
+`(grid_w, grid_h, llf_x, llf_y)` strategy descriptor. Mirrors the
+shape of `quantize_large_scalar` upstream and works for every block
+size DCT8/16/32/64 family produces.
+
+`forks::dequant::dequant_blocks_gpu` is the symmetric generic
+dequant: `output[i] = quant[i] * weights[i]` for arbitrary
+`block_size`. Promoted from a previously-internal pipeline.rs
+helper to a public module (`kernels::dequant_simple` +
+`launch::dequant_simple`).
+
+The "non-DCT8 strategies for quantize/dequant" item is removed from
+the "CPU path stays" list — production-encoder paths can now
+quantize and dequant any AC strategy on GPU.
+
+### AFV batched APIs (`248dff39`, `15b309eb`)
+
+`forks::afv::{afv_transform_batch_gpu, inverse_afv_transform_batch_gpu}`
+process N same-kind 8×8 blocks in **3 GPU launches per direction**
+(one per sub-transform) instead of 3 launches per block. Per-block
+extraction/composition/DC packing happen on the host. Roundtrip
+test covers all 4 afv_kinds × 8 synthetic blocks at FP32 floor.
+
 ### Phase 5 — AFV0-3 inverse transform — full standard JXL AC strategy family on GPU (`de952f60`, `1d098cbe`)
 
 Closes the AFV port arc. Two new GPU kernels:
