@@ -2,6 +2,52 @@
 
 ## [Unreleased]
 
+### Phase 3 — full 13-strategy 3-channel cost grids + rect-aware selector validated
+
+The Phase 3 strategy-selection stack now exercises the full
+DCT4/8/16/32/64 family with proper 3-channel XYB-weighted +
+mask1x1-modulated cost grids — the same cost the VarDCT encoder
+pays for in production.
+
+**Cost grids added** (sessions 5–6):
+
+- 13 single-channel grids (`compute_cost_grid_*_single_channel`):
+  DCT4x4, DCT4x8, DCT8x4, DCT8, DCT16x8, DCT8x16, DCT16x16,
+  DCT32x16, DCT16x32, DCT32x32, DCT64x32, DCT32x64, DCT64x64.
+- 13 3-channel grids (`compute_cost_grid_*_xyb`): same coverage,
+  with XYB weighting + per-pixel mask1x1 perceptual modulation.
+
+**Validation** (`corpus_rect_picks_demo`, 8 CLIC2025-1024 images,
+32,768 16×16 regions, full 4-strategy 16×16 selector with proper
+3-channel cost grids):
+
+| Strategy           | Aggregate pick % |
+|---|---|
+| DCT16×16           | 21.2% |
+| Two DCT16×8 horiz  | 33.2% |
+| Two DCT8×16 vert   | 26.9% |
+| Four DCT8×8        | 18.8% |
+| **rect total**     | **60.1%** |
+
+Per-image rect% range: 56.7%–65.6% (σ ≈ 2.5pp). Rect strategies
+win the majority of picks on every image in the corpus —
+content-driven selection across the full strategy family is
+robust and generalizes.
+
+**Key commits:** `48a1a207` (3-channel DCT8), `4ddd27b9` (DCT16),
+`e93fcc46` (DCT32), `13d94fb3` (DCT64), `ee44b868` (rect family),
+`7d27b18d` (DCT4 family), `5552e611` (real-image rect demo),
+`3562ac26` (corpus rect picks).
+
+### Phase 1 — denoise port complete (`b0131b8b`, `dc853da3`)
+
+Ported the missing Wiener 5×5 denoise filter
+(`jxl_encoder_simd::noise::denoise_channel_scalar`) to GPU with
+**5.96e-8 abs parity** (FMA-contraction noise floor). Wired into the
+fork pipeline as `forks::noise::denoise_xyb_gpu(enc, x, y, b, w, h,
+lut, quality_coef)` — three sequential GPU launches replacing the
+upstream `rayon::join`. Phase 1 is now **7/7 ✓** (full coverage).
+
 ### Validated — Content-driven AQ wins across CLIC2025 corpus (`a1617849`)
 
 Added fast-ssim2 + imgref dev-deps and SSIMULACRA2 measurement to
