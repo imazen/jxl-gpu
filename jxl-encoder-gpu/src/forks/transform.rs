@@ -1,0 +1,208 @@
+// Copyright (c) Imazen LLC and the JPEG XL Project Authors.
+// Forked from jxl-encoder vardct/transform.rs (BSD-3-Clause via libjxl
+// + AGPL/commercial), reshaped from per-block dispatch to batched
+// per-strategy GPU launches.
+// Licensed under AGPL-3.0-or-later or commercial.
+
+//! GPU-substituted, batched DCT dispatch.
+//!
+//! ## Reshape vs upstream `Transform::apply_dct`
+//!
+//! Upstream `apply_dct` operates on ONE block at a time, dispatched per
+//! block by `raw_strategy`. CPUs love this — branch prediction is good,
+//! ~64 floats per block fits in L1, and the per-block overhead is
+//! sub-microsecond.
+//!
+//! GPUs hate it. Each block is a 64-thread or 256-thread kernel launch
+//! (microseconds of overhead), and tiny launches starve the SMs. The
+//! GPU shape is the *opposite*: gather all blocks of the same strategy
+//! into one contiguous buffer, then run ONE big kernel launch covering
+//! all of them.
+//!
+//! This module provides `apply_dct_batch_gpu`:
+//! - Input: a channel plane + a list of block coordinates `(bx, by)`
+//!   that all use the same `raw_strategy`.
+//! - Output: a contiguous coefficient buffer with `coeff_count_per_strategy`
+//!   floats per block, in the same order as the input list.
+//!
+//! Caller is responsible for the strategy-grouping pre-pass (scan
+//! `ac_strategy`, bucket block coords by strategy). That part is cheap
+//! and stays on CPU.
+//!
+//! ## Currently supported strategies
+//!
+//! `RAW_STRATEGY_DCT` (8x8). The other strategies (16x8, 8x16, 16x16,
+//! 32x32, 32x16, 16x32, 64x64, 64x32, 32x64, 4x8, 8x4, 4x4, IDENTITY,
+//! DCT2x2, AFV0-3) are TODO. The pattern is the same:
+//! 1. Compute `tile_w × tile_h` per block (e.g. 16×16 for DCT16X16).
+//! 2. Extract `tile_w × tile_h` floats per block from the channel plane
+//!    in row-major order.
+//! 3. Concatenate into one big `Vec<f32>` of `block_count * tile_pixels`.
+//! 4. Dispatch to the matching `GpuEncoder::dct_*_blocks` method.
+//!
+//! All the GpuEncoder DCT methods exist already. Only the gather code
+//! is per-strategy.
+
+use alloc::vec::Vec;
+
+use cubecl::Runtime;
+
+use crate::encoder::GpuEncoder;
+
+/// JXL `BLOCK_DIM` constant (8). Each "block coordinate" `(bx, by)`
+/// addresses an 8×8 region; larger transforms cover N×M of those.
+const BLOCK_DIM: usize = 8;
+
+/// raw_strategy=0 → DCT 8×8. Mirrors libjxl `kDCT`.
+pub const RAW_STRATEGY_DCT: u8 = 0;
+
+/// raw_strategy=1,2 → DCT 16×8, 8×16. Mirrors libjxl `kDCT16X8`, `kDCT8X16`.
+pub const RAW_STRATEGY_DCT16X8: u8 = 1;
+pub const RAW_STRATEGY_DCT8X16: u8 = 2;
+/// raw_strategy=3 → DCT 16×16. Mirrors libjxl `kDCT16X16`.
+pub const RAW_STRATEGY_DCT16X16: u8 = 3;
+/// raw_strategy=4 → DCT 32×32. Mirrors libjxl `kDCT32X32`.
+pub const RAW_STRATEGY_DCT32X32: u8 = 4;
+
+/// Number of coefficient floats produced per block by each strategy.
+pub fn coeff_count_per_strategy(raw_strategy: u8) -> usize {
+    match raw_strategy {
+        RAW_STRATEGY_DCT => 64,
+        RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => 128,
+        RAW_STRATEGY_DCT16X16 => 256,
+        RAW_STRATEGY_DCT32X32 => 1024,
+        _ => panic!("unsupported strategy {raw_strategy} (TODO: extend dispatcher)"),
+    }
+}
+
+/// Tile dimensions in PIXELS for each strategy.
+fn tile_dims(raw_strategy: u8) -> (usize, usize) {
+    match raw_strategy {
+        RAW_STRATEGY_DCT => (8, 8),
+        RAW_STRATEGY_DCT16X8 => (8, 16),  // 8 wide × 16 tall
+        RAW_STRATEGY_DCT8X16 => (16, 8),  // 16 wide × 8 tall
+        RAW_STRATEGY_DCT16X16 => (16, 16),
+        RAW_STRATEGY_DCT32X32 => (32, 32),
+        _ => panic!("unsupported strategy {raw_strategy} (TODO: extend dispatcher)"),
+    }
+}
+
+/// Batched DCT dispatch on the GPU. All `block_coords` MUST use the
+/// same `raw_strategy`.
+///
+/// Returns a contiguous Vec<f32> of length
+/// `block_coords.len() * coeff_count_per_strategy(raw_strategy)`,
+/// with one block's coefficients packed after the next in the same
+/// order as `block_coords`.
+pub fn apply_dct_batch_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    channel_data: &[f32],
+    stride: usize,
+    block_coords: &[(usize, usize)],
+    raw_strategy: u8,
+) -> Vec<f32> {
+    if block_coords.is_empty() {
+        return Vec::new();
+    }
+    let (tile_w, tile_h) = tile_dims(raw_strategy);
+    let tile_pixels = tile_w * tile_h;
+
+    // Gather: extract every block's tile into one contiguous buffer.
+    let mut batch = Vec::with_capacity(block_coords.len() * tile_pixels);
+    for &(bx, by) in block_coords {
+        let x0 = bx * BLOCK_DIM;
+        let y0 = by * BLOCK_DIM;
+        for dy in 0..tile_h {
+            let src_off = (y0 + dy) * stride + x0;
+            batch.extend_from_slice(&channel_data[src_off..src_off + tile_w]);
+        }
+    }
+
+    // Dispatch: one GPU launch covers all blocks of this strategy.
+    match raw_strategy {
+        RAW_STRATEGY_DCT => enc.dct_8x8_blocks(&batch),
+        RAW_STRATEGY_DCT16X8 => enc.dct_16x8_blocks(&batch),
+        RAW_STRATEGY_DCT8X16 => enc.dct_8x16_blocks(&batch),
+        RAW_STRATEGY_DCT16X16 => enc.dct_16x16_blocks(&batch),
+        RAW_STRATEGY_DCT32X32 => enc.dct_32x32_blocks(&batch),
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_apply_dct_batch_dct8_matches_per_block() {
+        // Build a synthetic channel plane (64x64 = 8x8 blocks of size 8x8).
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let stride = 64;
+        let height = 64;
+        let n_pixels = stride * height;
+        let plane: Vec<f32> = (0..n_pixels).map(|i| (i as f32 * 0.013).sin()).collect();
+
+        // All 64 blocks use DCT8.
+        let mut block_coords = Vec::new();
+        for by in 0..8 {
+            for bx in 0..8 {
+                block_coords.push((bx, by));
+            }
+        }
+
+        let batched = apply_dct_batch_gpu(&enc, &plane, stride, &block_coords, RAW_STRATEGY_DCT);
+        assert_eq!(batched.len(), 64 * 64); // 64 blocks × 64 coeffs
+
+        // Spot-check: extract one block manually, run DCT8 standalone, compare.
+        let mut single_block = vec![0.0_f32; 64];
+        let (bx, by) = (3, 5);
+        for dy in 0..8 {
+            let src_off = (by * 8 + dy) * stride + bx * 8;
+            single_block[dy * 8..dy * 8 + 8].copy_from_slice(&plane[src_off..src_off + 8]);
+        }
+        let single_dct = enc.dct_8x8_blocks(&single_block);
+        // Find the corresponding block in the batched output.
+        let lin_idx = by * 8 + bx;
+        let batched_block = &batched[lin_idx * 64..(lin_idx + 1) * 64];
+        let mut max_err = 0.0_f32;
+        for i in 0..64 {
+            max_err = max_err.max((single_dct[i] - batched_block[i]).abs());
+        }
+        assert!(
+            max_err < 1e-5,
+            "batched DCT8 differs from single-block DCT8: max|Δ|={max_err:.3e}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_apply_dct_batch_dct16x16() {
+        // 32x32 plane = 4 blocks of 16x16 (each spanning 2x2 = 4 BLOCK_DIM units).
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let stride = 32;
+        let height = 32;
+        let plane: Vec<f32> = (0..stride * height)
+            .map(|i| 0.5 + 0.3 * ((i as f32 * 0.07).cos()))
+            .collect();
+
+        // (0,0), (2,0), (0,2), (2,2) — each 16x16 starts at a 2-block offset.
+        let block_coords = vec![(0, 0), (2, 0), (0, 2), (2, 2)];
+        let batched =
+            apply_dct_batch_gpu(&enc, &plane, stride, &block_coords, RAW_STRATEGY_DCT16X16);
+        assert_eq!(batched.len(), 4 * 256);
+        assert!(batched.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_coeff_count_per_strategy() {
+        assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT), 64);
+        assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT16X8), 128);
+        assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT8X16), 128);
+        assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT16X16), 256);
+        assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT32X32), 1024);
+    }
+}
