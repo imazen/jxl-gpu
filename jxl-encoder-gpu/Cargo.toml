@@ -29,3 +29,4 @@ jxl-encoder-simd = { workspace = true }
 jxl-encoder = { workspace = true, features = ["std"] }
 bytemuck = { workspace = true }
 image = { workspace = true }
+jxl = { workspace = true }

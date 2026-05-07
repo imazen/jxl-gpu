@@ -30,6 +30,9 @@ jxl-encoder = { path = "../jxl-encoder/jxl-encoder", default-features = false }
 bytemuck = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# jxl-rs — primary Rust JXL decoder for roundtrip tests.
+jxl = { path = "/home/lilith/work/third-party/jxl-rs/jxl" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
