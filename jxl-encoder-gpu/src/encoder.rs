@@ -90,13 +90,6 @@ impl<R: Runtime> GpuEncoder<R> {
         &self.client
     }
 
-    /// Test-only accessor mirroring `client_ref`. Used by persistent
-    /// module tests that need to construct GpuI32Blocks directly.
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn client_ref_for_test(&self) -> &ComputeClient<R> {
-        &self.client
-    }
 
     /// Access the underlying cubecl client.
     pub fn client(&self) -> &ComputeClient<R> {

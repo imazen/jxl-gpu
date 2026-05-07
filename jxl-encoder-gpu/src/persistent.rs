@@ -744,6 +744,30 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Upload a host `i32` per-block buffer to GPU. `data.len()` must
+    /// equal `num_blocks * coeffs_per_block`.
+    pub fn upload_i32_blocks(
+        &self,
+        data: &[i32],
+        num_blocks: u32,
+        coeffs_per_block: u32,
+    ) -> GpuI32Blocks<R> {
+        let expected = (num_blocks as usize) * (coeffs_per_block as usize);
+        assert_eq!(
+            data.len(),
+            expected,
+            "data length {} != num_blocks*coeffs_per_block {expected}",
+            data.len()
+        );
+        let handle = self.client_ref().create_from_slice(i32::as_bytes(data));
+        GpuI32Blocks {
+            handle,
+            num_blocks,
+            coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Download a `GpuI32Blocks` back to host memory.
     pub fn download_i32_blocks(&self, blocks: &GpuI32Blocks<R>) -> Vec<i32> {
         let bytes = self
@@ -1133,7 +1157,6 @@ mod tests {
         // match vs split chain (3-channel dequant_dct8 + wide IDCT
         // with CfL=0); here we just confirm the persistent wrapper
         // executes end-to-end on synthetic input.
-        use cubecl::prelude::*;
         type B = cubecl::cuda::CudaRuntime;
         let enc: GpuEncoder<B> = GpuEncoder::new();
         let nb = 8_u32;
@@ -1143,17 +1166,7 @@ mod tests {
         let weights = vec![1.0_f32; n];
         let qac = vec![4.0_f32; nb as usize];
 
-        // Hand-construct a GpuI32Blocks since there's no public
-        // upload_i32_blocks yet (test-only access via client_ref_for_test).
-        let q_handle = enc
-            .client_ref_for_test()
-            .create_from_slice(i32::as_bytes(&quant));
-        let q_buf = GpuI32Blocks {
-            handle: q_handle,
-            num_blocks: nb,
-            coeffs_per_block: 64,
-            _r: core::marker::PhantomData,
-        };
+        let q_buf = enc.upload_i32_blocks(&quant, nb, 64);
         let w_buf = enc.upload_blocks(&weights, nb, 64);
         let recon = enc.dequant_idct8_fused_y_persistent(&q_buf, &w_buf, &qac);
         assert_eq!(recon.coeffs_per_block(), 64);
