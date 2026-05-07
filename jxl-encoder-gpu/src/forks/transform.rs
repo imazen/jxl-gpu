@@ -31,17 +31,18 @@
 //!
 //! ## Currently supported strategies
 //!
-//! `RAW_STRATEGY_DCT` (8x8). The other strategies (16x8, 8x16, 16x16,
-//! 32x32, 32x16, 16x32, 64x64, 64x32, 32x64, 4x8, 8x4, 4x4, IDENTITY,
-//! DCT2x2, AFV0-3) are TODO. The pattern is the same:
-//! 1. Compute `tile_w × tile_h` per block (e.g. 16×16 for DCT16X16).
-//! 2. Extract `tile_w × tile_h` floats per block from the channel plane
-//!    in row-major order.
-//! 3. Concatenate into one big `Vec<f32>` of `block_count * tile_pixels`.
-//! 4. Dispatch to the matching `GpuEncoder::dct_*_blocks` method.
+//! All 15 standard JXL strategies the rest of the GPU port uses:
+//! DCT8, DCT16x8, DCT8x16, DCT16x16, DCT32x32, DCT4x8, DCT8x4, DCT4x4,
+//! DCT32x16, DCT16x32, DCT64x64, DCT64x32, DCT32x64, IDENTITY, DCT2X2.
+//! Both forward (`apply_dct_batch_gpu`) and inverse (`apply_idct_batch_gpu`)
+//! work for every strategy in this list.
 //!
-//! All the GpuEncoder DCT methods exist already. Only the gather code
-//! is per-strategy.
+//! AFV0-3 corner DCTs are NOT routed through this dispatcher because
+//! their composition (DCT4 + DCT4x4 + AFV4x4 + DC merge) is per-block,
+//! not a single uniform GPU launch. Use `forks::afv::afv_transform_batch_gpu`
+//! / `inverse_afv_transform_batch_gpu` for those — they batch all four
+//! sub-transforms across N blocks of the same `afv_kind` into 3 launches
+//! per direction.
 
 use alloc::vec::Vec;
 
@@ -119,14 +120,18 @@ pub fn coeff_count_per_strategy(raw_strategy: u8) -> usize {
         RAW_STRATEGY_DCT32X32 => 1024,
         RAW_STRATEGY_DCT64X32 | RAW_STRATEGY_DCT32X64 => 2048,
         RAW_STRATEGY_DCT64X64 => 4096,
-        _ => panic!("unsupported strategy {raw_strategy} (TODO: extend dispatcher)"),
+        _ => panic!(
+            "unsupported strategy {raw_strategy} \
+             (use forks::afv::afv_transform_batch_gpu for AFV0-3)"
+        ),
     }
 }
 
 /// Tile dimensions (cols, rows) in PIXELS for each strategy.
 ///
-/// IDENTITY/DCT2X2/AFV0-3 also extract from an 8×8 region but
-/// have no GPU kernel yet; not listed here.
+/// IDENTITY/DCT2X2 extract from an 8×8 region (their internal layout
+/// differs but the gather is the same). AFV0-3 also extract from 8×8
+/// but use a per-block composition kernel — see `forks::afv` instead.
 fn tile_dims(raw_strategy: u8) -> (usize, usize) {
     match raw_strategy {
         // 8×8 extraction; transform sub-divides internally
@@ -145,7 +150,10 @@ fn tile_dims(raw_strategy: u8) -> (usize, usize) {
         RAW_STRATEGY_DCT64X32 => (32, 64), // 32 wide × 64 tall
         RAW_STRATEGY_DCT32X64 => (64, 32), // 64 wide × 32 tall
         RAW_STRATEGY_DCT64X64 => (64, 64),
-        _ => panic!("unsupported strategy {raw_strategy} (TODO: extend dispatcher)"),
+        _ => panic!(
+            "unsupported strategy {raw_strategy} \
+             (use forks::afv::afv_transform_batch_gpu for AFV0-3)"
+        ),
     }
 }
 
@@ -244,7 +252,10 @@ pub fn apply_idct_batch_gpu<R: Runtime>(
         RAW_STRATEGY_DCT64X64 => enc.idct_64x64_blocks(coeff_blocks),
         RAW_STRATEGY_IDENTITY => enc.inverse_identity_blocks(coeff_blocks),
         RAW_STRATEGY_DCT2X2 => enc.inverse_dct2x2_blocks(coeff_blocks),
-        _ => panic!("unsupported strategy {raw_strategy}"),
+        _ => panic!(
+            "unsupported strategy {raw_strategy} \
+             (use forks::afv::inverse_afv_transform_batch_gpu for AFV0-3)"
+        ),
     }
 }
 
