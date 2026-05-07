@@ -108,8 +108,7 @@ for GPU-friendly batching.
 
 ## Coverage summary
 
-- Phase 1: 5 of 7 (xyb fwd/inv, gab, gaborish, mask1x1; missing
-  denoise + pad_plane)
+- Phase 1: 7 of 7 ✓ (xyb fwd/inv, gab, gaborish_5x5, mask1x1, denoise, pad_plane)
 - Phase 2 DCT/IDCT: 26 of 26 ✓ (all 8/16/32/64 squares, rectangulars,
   and 4-family sub-block variants)
 - Phase 2 other: 13 of ~13 ✓ (quantize_dct8, quantize_large,
