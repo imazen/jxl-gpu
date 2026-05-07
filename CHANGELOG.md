@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added — Turnkey content-driven AQ + batch sweep (`3cfb4ad9`, `e0634ae4`, `0ebbb22d`)
+
+Top-of-stack one-call interface for content-driven adaptive
+quantization, plus the batch-amortized variant for distance sweeps:
+
+```rust
+// Turnkey: single image, single distance.
+let (r, g, b) = lossy.encode_one_with_aq(&enc, &r, &g, &b, distance);
+
+// Batch: single mask prepass, N distance points.
+let outs = lossy.encode_many_with_aq(&enc, &r, &g, &b, &distances);
+```
+
+Internally runs `XYB → mask1x1 → per-block reduce → derived qac
+field → adaptive encode`. The mask depends only on the image —
+not distance — so the batch variant computes it once and reuses
+across the whole sweep.
+
+Composable building blocks for callers who want a custom prepass:
+
+- `LossyEncoder::compute_block_mask_means(...)` — GPU prepass,
+  one f32 per padded 8×8 block.
+- `block_means_to_qac_field(means, distance)` — pure-CPU mapping,
+  centers on `distance` and varies in a 4× range.
+- `LossyEncoder::compute_aq_field(...)` — composition of the two,
+  for callers who want to inspect/modify the field before passing
+  to `encode_one_adaptive`.
+
+`content_driven_aq_demo` rewritten to use the turnkey API directly
+(was previously inlining the chain).
+
 ### Added — Adaptive quantization API + content-driven AQ demo (`02d80bef`, `c4225cee`, `4400081a`)
 
 New `LossyEncoder::encode_one_adaptive` accepts a per-block `aq_field:
