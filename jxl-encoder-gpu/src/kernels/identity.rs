@@ -15,7 +15,7 @@
 //!   - DC stored at (y, x)
 //!
 //! Final step: 2x2 Hadamard merge of the 4 DC values at positions
-//! [0], [1], [8], [9] (×0.25).
+//! `[0]`, `[1]`, `[8]`, `[9]` (×0.25).
 //!
 //! One thread per 8x8 block.
 
@@ -108,7 +108,7 @@ pub fn identity_forward_kernel(input: &Array<f32>, output: &mut Array<f32>) {
 }
 
 /// Inverse IDENTITY transform. Per-sub-block:
-///   - inverse Hadamard on DC positions [0], [1], [8], [9] (no scaling)
+///   - inverse Hadamard on DC positions `[0]`, `[1]`, `[8]`, `[9]` (no scaling)
 ///   - residual_sum = sum of all coefficients in the sub-block except
 ///     the (0, 0) (DC) position
 ///   - ref_pixel = block_dc - residual_sum / 16
