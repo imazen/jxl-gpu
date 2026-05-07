@@ -121,7 +121,38 @@ fn main() {
         }
     }
 
-    println!("\noverall max|Δ| = {max_diff_overall:.3e}");
+    println!("\noverall forward max|Δ| = {max_diff_overall:.3e}");
+
+    // ── Inverse AFV roundtrip ──
+    use jxl_encoder_gpu::forks::afv::inverse_afv_transform_gpu;
+    println!("\n--- Inverse AFV roundtrip (GPU forward → GPU inverse vs original pixels) ---");
+    for afv_kind in 0..4 {
+        let coeffs = afv_transform_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixels, afv_kind);
+        let recon =
+            inverse_afv_transform_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs, afv_kind);
+        let mut max_diff = 0.0_f32;
+        let mut max_pos = 0usize;
+        for i in 0..64 {
+            let d = (pixels[i] - recon[i]).abs();
+            if d > max_diff {
+                max_diff = d;
+                max_pos = i;
+            }
+        }
+        let ok = max_diff < 1e-3; // basis matrix isn't strictly orthogonal
+        println!(
+            "afv_kind={afv_kind}: roundtrip max|Δ| = {max_diff:.3e} at idx {max_pos} {}",
+            if ok { "✓" } else { "✗" }
+        );
+        if !ok {
+            all_ok = false;
+            eprintln!(
+                "  pix[{max_pos}] = {:.6}, recon[{max_pos}] = {:.6}",
+                pixels[max_pos], recon[max_pos]
+            );
+        }
+    }
+
     if !all_ok {
         std::process::exit(1);
     }

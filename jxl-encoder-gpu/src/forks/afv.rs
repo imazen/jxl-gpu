@@ -201,6 +201,108 @@ pub fn afv_dct_4x4_one<R: Runtime>(
     out
 }
 
+/// Inverse AFV transform on a single 8×8 coefficient block.
+///
+/// Mirrors upstream `inverse_afv_transform`. Three GPU launches (AFV
+/// 4×4 inverse, raw IDCT 4×4, raw IDCT 4×8) plus host-side DC
+/// unpacking and mirroring.
+pub fn inverse_afv_transform_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    basis_t: &[f32; 256],
+    coefficients: &[f32; 64],
+    afv_kind: AfvKind,
+) -> [f32; 64] {
+    use cubecl::prelude::*;
+
+    let mut pixels = [0.0_f32; 64];
+    let client = enc.client_ref();
+    let afv_x = afv_kind & 1;
+    let afv_y = afv_kind >> 1;
+
+    // ── DC unpacking ──
+    let block00 = coefficients[0];
+    let block01 = coefficients[1];
+    let block10 = coefficients[8];
+    let dcs: [f32; 3] = [
+        (block00 + block10 + block01) * 4.0, // AFV4x4 DC
+        block00 + block10 - block01,         // DCT4x4 DC
+        block00 - block10,                   // DCT4x8 DC
+    ];
+
+    // ── Step 1: Inverse AFV 4×4 (with mirroring on output write) ──
+    let mut afv_coeff = [0.0_f32; 16];
+    for iy in 0..4 {
+        for ix in 0..4 {
+            afv_coeff[iy * 4 + ix] = if ix == 0 && iy == 0 {
+                dcs[0]
+            } else {
+                coefficients[iy * 2 * 8 + ix * 2]
+            };
+        }
+    }
+    let h_in_a = client.create_from_slice(f32::as_bytes(&afv_coeff));
+    let h_basis = client.create_from_slice(f32::as_bytes(basis_t));
+    let h_out_a = client.create_from_slice(f32::as_bytes(&[0.0_f32; 16]));
+    crate::launch::afv::afv_idct_4x4::<R>(client, h_in_a, h_basis, h_out_a.clone(), 1);
+    let bytes = client.read_one(h_out_a).expect("afv_inv");
+    let afv_pixels: &[f32] = f32::from_bytes(&bytes);
+    for iy in 0..4 {
+        let block_y = if afv_y == 1 { 3 - iy } else { iy };
+        for ix in 0..4 {
+            let block_x = if afv_x == 1 { 3 - ix } else { ix };
+            pixels[(iy + afv_y * 4) * 8 + afv_x * 4 + ix] =
+                afv_pixels[block_y * 4 + block_x];
+        }
+    }
+
+    // ── Step 2: Inverse raw 4×4 DCT ──
+    let mut dct4_coeff = [0.0_f32; 16];
+    for iy in 0..4 {
+        for ix in 0..4 {
+            dct4_coeff[iy * 4 + ix] = if ix == 0 && iy == 0 {
+                dcs[1]
+            } else {
+                coefficients[iy * 2 * 8 + ix * 2 + 1]
+            };
+        }
+    }
+    let h_in_d = client.create_from_slice(f32::as_bytes(&dct4_coeff));
+    let h_out_d = client.create_from_slice(f32::as_bytes(&[0.0_f32; 16]));
+    crate::launch::idct4_raw::idct_4x4_raw::<R>(client, h_in_d, h_out_d.clone(), 1);
+    let bytes = client.read_one(h_out_d).expect("idct4");
+    let dct4_pixels: &[f32] = f32::from_bytes(&bytes);
+    for iy in 0..4 {
+        for ix in 0..4 {
+            pixels[(iy + afv_y * 4) * 8 + (1 - afv_x) * 4 + ix] =
+                dct4_pixels[iy * 4 + ix];
+        }
+    }
+
+    // ── Step 3: Inverse raw 4×8 DCT ──
+    let mut dct4x8_coeff = [0.0_f32; 32];
+    for iy in 0..4 {
+        for ix in 0..8 {
+            dct4x8_coeff[iy * 8 + ix] = if ix == 0 && iy == 0 {
+                dcs[2]
+            } else {
+                coefficients[(1 + iy * 2) * 8 + ix]
+            };
+        }
+    }
+    let h_in_8 = client.create_from_slice(f32::as_bytes(&dct4x8_coeff));
+    let h_out_8 = client.create_from_slice(f32::as_bytes(&[0.0_f32; 32]));
+    crate::launch::idct4_raw::idct_4x8_raw::<R>(client, h_in_8, h_out_8.clone(), 1);
+    let bytes = client.read_one(h_out_8).expect("idct4x8");
+    let dct4x8_pixels: &[f32] = f32::from_bytes(&bytes);
+    for iy in 0..4 {
+        for ix in 0..8 {
+            pixels[(iy + (1 - afv_y) * 4) * 8 + ix] = dct4x8_pixels[iy * 8 + ix];
+        }
+    }
+
+    pixels
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
