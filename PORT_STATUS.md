@@ -95,8 +95,8 @@ for GPU-friendly batching.
 | `forks::transform` | `vardct::transform::Transform::apply_dct` | ✓ | Per-strategy batched: gather all blocks of one strategy into one Vec<f32>, single GPU launch covers all of them. 13 strategies (DCT8/4/16/32/64 family + rectangulars). Inverse symmetric. |
 | `forks::cfl` | `vardct::chroma_from_luma::find_best_multiplier` | ✓ | Single-tile drop-in API + multi-tile batched (one launch covers all tiles); LS + Newton variants |
 | `forks::epf` | `vardct::epf::{compute_inv_sigma_map, apply_epf step1+step2}` | ✓ | Step 1 + Step 2 GPU; Step 0 (12-tap) and sharpness selection stay CPU |
-| `forks::dequant` | `vardct::quantize::adjust_quant_bias` + `vardct::reconstruct` DequantBlock for DCT8 | ✓ | 3-channel batched DCT8 dequant in one launch; scalar `adjust_quant_bias` bit-for-bit |
-| `forks::quantize` | `vardct::quantize::{default_thresholds, quantize_ac_block (DCT8 path)}` | ✓ | One launch per channel; 3-channel convenience helper computes channel-specific thresholds; non-DCT8 strategies stay CPU |
+| `forks::quantize` | `vardct::quantize::{default_thresholds, quantize_ac_block (full strategy family)}` | ✓ | One launch per channel; 3-channel convenience helper computes channel-specific thresholds; `quantize_blocks_gpu` dispatches DCT8 fast path or `quantize_large` for any (grid_w, grid_h, llf_x, llf_y) tuple |
+| `forks::dequant` | `vardct::quantize::adjust_quant_bias` + `vardct::reconstruct` DequantBlock + generic per-coef dequant | ✓ | DCT8 path with CfL + adjust_quant_bias (`dequant_dct8_blocks_gpu`); generic `dequant_blocks_gpu` for arbitrary block size (DCT16+, AFV/IDENTITY/DCT2X2) |
 
 **Composition demos:**
 - `examples/forks_pipeline_demo.rs` — chains XYB + gaborish + mask1x1 + DCT8 forward+inverse on 64×64 (DCT8 roundtrip 2.4e-7 abs)
@@ -104,7 +104,7 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
-**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, AdjustQuantBlockAC heuristics, non-DCT8 strategies for quantize/dequant, `estimate_entropy_full` orchestration. **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07.
+**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, AdjustQuantBlockAC heuristics, `estimate_entropy_full` orchestration. **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
 
 ## Coverage summary
 
@@ -132,9 +132,9 @@ for GPU-friendly batching.
 DCT/IDCT family complete. CfL complete. EPF Steps 1+2 complete.
 11 fork modules verified composing through GpuEncoder. Remaining
 work concentrates in (a) EPF Step 0 GPU kernel (12-tap), (b) full
-estimate_entropy_full orchestration, (c) GPU kernels for non-DCT8
-strategies' quantize/dequant, (d) AFV0-3 cost grid integration
-(transforms done; needs same wrapper pattern as DCT4/8 family).
+estimate_entropy_full orchestration, (c) AdjustQuantBlockAC
+heuristics, (d) AFV0-3 cost grid integration (transforms done;
+wrappers pending).
 
 ### Note on AC strategy search (Phase 3)
 
