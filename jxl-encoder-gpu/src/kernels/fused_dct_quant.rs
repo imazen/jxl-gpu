@@ -68,10 +68,10 @@ fn dct1d_8_local(mem: &mut SharedMemory<f32>, base: u32) {
     t1 = c0_post;
     t3 = c1;
 
-    t4 = t4 * WC_M8_0;
-    t5 = t5 * WC_M8_1;
-    t6 = t6 * WC_M8_2;
-    t7 = t7 * WC_M8_3;
+    t4 *= WC_M8_0;
+    t5 *= WC_M8_1;
+    t6 *= WC_M8_2;
+    t7 *= WC_M8_3;
 
     let a0 = t4 + t7;
     let a1 = t5 + t6;
@@ -90,8 +90,8 @@ fn dct1d_8_local(mem: &mut SharedMemory<f32>, base: u32) {
     t7 = c1;
 
     t4 = SQRT2 * t4 + t5;
-    t5 = t5 + t6;
-    t6 = t6 + t7;
+    t5 += t6;
+    t6 += t7;
 
     mem[b0] = t0;
     mem[b0 + 1usize] = t4;
@@ -147,8 +147,8 @@ fn idct1d_8_local(mem: &mut SharedMemory<f32>, base: u32) {
     let mut s2 = mem[b0 + 5usize];
     let s3 = mem[b0 + 7usize];
 
-    s2 = s2 - s3;
-    s1 = s1 - s2;
+    s2 -= s3;
+    s1 -= s2;
     s0 = (s0 - s1) * ONE_OVER_SQRT2;
 
     let mut t0 = s0;
@@ -160,8 +160,8 @@ fn idct1d_8_local(mem: &mut SharedMemory<f32>, base: u32) {
     let a1 = t2 - t3;
     t2 = a0;
     t3 = a1;
-    t2 = t2 * INV_WC_M4_0;
-    t3 = t3 * INV_WC_M4_1;
+    t2 *= INV_WC_M4_0;
+    t3 *= INV_WC_M4_1;
     let a0 = t0 + t1;
     let a1 = t0 - t1;
     t0 = a0;
@@ -185,8 +185,8 @@ fn idct1d_8_local(mem: &mut SharedMemory<f32>, base: u32) {
     let a1 = g2 - g3;
     g2 = a0;
     g3 = a1;
-    g2 = g2 * INV_WC_M4_0;
-    g3 = g3 * INV_WC_M4_1;
+    g2 *= INV_WC_M4_0;
+    g3 *= INV_WC_M4_1;
     let a0 = g0 + g1;
     let a1 = g0 - g1;
     g0 = a0;
