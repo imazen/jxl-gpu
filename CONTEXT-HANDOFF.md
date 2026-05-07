@@ -1,9 +1,64 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-07 (session 6 part 2 — IDENTITY/DCT2X2 + per-cell sub-block selector)
+**Last updated:** 2026-05-07 (session 6 part 3 — fuzzy_erosion + AFV0-3 forward port)
 **Repo:** https://github.com/imazen/jxl-gpu (live, public)
-**Local:** ~/work/zen/jxl-encoder-gpu/ (160 commits on main, in sync with origin)
+**Local:** ~/work/zen/jxl-encoder-gpu/ (191 commits on main, in sync with origin)
 **Hardware verified:** RTX 5070, CUDA 13.2, jj 0.40, rustc 1.95
+
+## Session 6.3 highlight — fuzzy_erosion + AFV0-3 forward = full standard strategy family on GPU
+
+### fuzzy_erosion port (`feb0ec97` → `bf89275c`)
+
+Per-pixel min-of-4-from-9 weighted sum + 2× downsample. Per-thread
+gathers 4 input contributions to avoid the unsynchronized `+=` race
+the CPU sequential loop sidesteps. Parity 2.98e-8 abs (FP32 floor).
+
+Wired into `forks::adaptive_quant::fuzzy_erosion_gpu`. The full
+adaptive_quant chain now runs end-to-end on GPU:
+`mask1x1 → pre_erosion → fuzzy_erosion → per_block_modulations`.
+
+### AFV0-3 forward transform (`faf658a6` → `be8b6206`)
+
+Three new GPU kernels:
+- `afv_dct_4x4_kernel` — the unique 16×16 matmul against the libjxl
+  basis matrix. Forward + inverse, both bit-exact.
+- `dct_4x4_raw_kernel` — 16-coeff primitive DCT (NOT the 64-coeff
+  dct_4x4_full). 8.85e-9 parity.
+- `dct_4x8_raw_kernel` — 32-coeff primitive, transposed output.
+  2.24e-8 parity after fixing **dct1d_8 output-ordering bug**: I
+  had been reading upstream's `dct1d_8_val` array as
+  `[r0[0], b0, r0[2], b2, r0[1], b1, r0[3], b3]` — actual layout is
+  `[r0[0], b0, r0[1], b1, r0[2], b2, r0[3], b3]`. Found via the
+  `dct1d_8_debug` example.
+
+Plus host-side composition in `forks::afv`:
+`afv_transform_gpu(enc, basis_t, pixels, afv_kind) -> [f32; 64]`
+mirrors upstream `afv_transform_from_pixels` exactly.
+
+End-to-end parity for all 4 corner variants:
+| afv_kind | max\|Δ\| |
+|---|---|
+| 0 | 3.07e-8 |
+| 1 | 7.45e-8 |
+| 2 | 3.70e-8 |
+| 3 | 3.91e-8 |
+
+### Coverage status after session 6.3
+
+- **Phase 1**: 7/7 ✓
+- **Phase 2 DCT/IDCT**: 30/~31 ✓ (only inverse 4×4 + 4×8 raw DCTs
+  remain for the AFV decoder side)
+- **Phase 3 cost grids**: 30/30 ✓ (15 strategies × 2 flavors)
+- **Phase 3 partition selector**: 7-strategy 16×16 + recursive
+  32×32/64×64 ✓
+- **Phase 5 forks::***: 11 modules ✓ (xyb, gaborish, adaptive_quant
+  full chain incl. fuzzy_erosion, reconstruct, transform incl.
+  IDENTITY+DCT2X2, cfl, epf, dequant, quantize, noise, afv)
+
+The standard JXL AC strategy forward family is now **fully ported
+to GPU**. Remaining work: inverse AFV (decoder side), AFV cost grid
+integration, EPF Step 0, AdjustQuantBlockAC, full
+estimate_entropy_full orchestration.
 
 ## Session 6.2 highlight — sub-block selector + 4-DCT8 dies
 
