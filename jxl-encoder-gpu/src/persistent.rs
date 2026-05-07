@@ -35,7 +35,6 @@
 //! the underlying `ComputeClient` must match. There's no compile-time
 //! check; misuse will panic on the next launch.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use cubecl::Runtime;
@@ -192,7 +191,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = (width as usize) * (height as usize);
         let handle = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         GpuPlane {
             handle,
             width,
@@ -224,13 +223,13 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = r.n_pixels();
         let h_x = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         let h_y = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         let h_b_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         xyb_forward::<R>(
             self.client_ref(),
             r.handle.clone(),
@@ -275,13 +274,13 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = x.n_pixels();
         let h_r = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         let h_g = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         let h_b = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         xyb_inverse::<R>(
             self.client_ref(),
             x.handle.clone(),
@@ -324,7 +323,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = plane.n_pixels();
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         gaborish_5x5::<R>(
             self.client_ref(),
             plane.handle.clone(),
@@ -358,7 +357,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = plane.n_pixels();
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         gab_smooth::<R>(
             self.client_ref(),
             plane.handle.clone(),
@@ -385,7 +384,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let dst_n = (dst_w as usize) * (dst_h as usize);
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; dst_n]));
+            .empty(dst_n * 4);
         pad_plane::<R>(
             self.client_ref(),
             plane.handle.clone(),
@@ -432,7 +431,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = (num_blocks as usize) * (coeffs_per_block as usize);
         let handle = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         GpuBlocks {
             handle,
             num_blocks,
@@ -458,7 +457,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = blocks.total_floats();
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         dct_8x8::<R>(
             self.client_ref(),
             blocks.handle.clone(),
@@ -483,7 +482,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = coeffs.total_floats();
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         idct_8x8::<R>(
             self.client_ref(),
             coeffs.handle.clone(),
@@ -506,7 +505,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = blocks.total_floats();
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         dct_8x8_wide::<R>(
             self.client_ref(),
             blocks.handle.clone(),
@@ -527,7 +526,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = coeffs.total_floats();
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         idct_8x8_wide::<R>(
             self.client_ref(),
             coeffs.handle.clone(),
@@ -571,7 +570,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let h_thr = self.client_ref().create_from_slice(f32::as_bytes(thresholds));
         let h_out = self
             .client_ref()
-            .create_from_slice(i32::as_bytes(&vec![0_i32; n]));
+            .empty(n * 4);
         dct8_quantize_fused_wide::<R>(
             self.client_ref(),
             pixels.handle.clone(),
@@ -613,7 +612,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         dequant_idct8_fused_y_wide::<R>(
             self.client_ref(),
             quant.handle.clone(),
@@ -651,7 +650,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = (blocks.num_blocks as usize) * (out_coeffs_per_block as usize);
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         launch(self.client_ref(), blocks.handle.clone(), h_out.clone(), blocks.num_blocks);
         GpuBlocks {
             handle: h_out,
@@ -747,7 +746,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = (num_blocks as usize) * (coeffs_per_block as usize);
         let handle = self
             .client_ref()
-            .create_from_slice(i32::as_bytes(&vec![0_i32; n]));
+            .empty(n * 4);
         GpuI32Blocks {
             handle,
             num_blocks,
@@ -787,7 +786,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let h_thr = self.client_ref().create_from_slice(f32::as_bytes(thresholds));
         let h_out = self
             .client_ref()
-            .create_from_slice(i32::as_bytes(&vec![0_i32; n]));
+            .empty(n * 4);
         quantize_dct8::<R>(
             self.client_ref(),
             coeffs.handle.clone(),
@@ -849,13 +848,13 @@ impl<R: Runtime> GpuEncoder<R> {
         let h_bf = self.client_ref().create_from_slice(f32::as_bytes(b_factor));
         let h_ox = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         let h_oy = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         let h_ob = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         dequant_dct8::<R>(
             self.client_ref(),
             quant_x.handle.clone(),
@@ -910,7 +909,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n_out = (num_blocks as usize) * (coeffs_per_block as usize);
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_out]));
+            .empty(n_out * 4);
         gather_blocks::<R>(
             self.client_ref(),
             plane.handle.clone(),
@@ -951,7 +950,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n_plane = (width as usize) * (height as usize);
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_plane]));
+            .empty(n_plane * 4);
         scatter_blocks::<R>(
             self.client_ref(),
             blocks.handle.clone(),
@@ -1001,7 +1000,7 @@ impl<R: Runtime> GpuEncoder<R> {
         let n = y.n_pixels();
         let h_out = self
             .client_ref()
-            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+            .empty(n * 4);
         mask1x1::<R>(
             self.client_ref(),
             y.handle.clone(),
