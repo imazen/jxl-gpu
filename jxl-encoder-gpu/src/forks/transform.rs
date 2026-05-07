@@ -77,15 +77,25 @@ pub const RAW_STRATEGY_DCT16X32: u8 = 11;
 pub const RAW_STRATEGY_DCT64X64: u8 = 12;
 pub const RAW_STRATEGY_DCT64X32: u8 = 13;
 pub const RAW_STRATEGY_DCT32X64: u8 = 14;
+/// raw_strategy=15 → IDENTITY (per-sub-block DC + residual on 8×8).
+/// Mirrors libjxl `kIdentity` (whose wire code is 8 — we use a local
+/// dispatcher code to fit alongside the existing rectangular DCTs).
+pub const RAW_STRATEGY_IDENTITY: u8 = 15;
+/// raw_strategy=16 → DCT2X2 (hierarchical 2×2 Hadamard at S=8/4/2).
+/// Mirrors libjxl `kDCT2X2`.
+pub const RAW_STRATEGY_DCT2X2: u8 = 16;
 
 /// Number of coefficient floats produced per block by each strategy.
 ///
 /// ```
 /// use jxl_encoder_gpu::forks::transform::*;
 ///
-/// // 64 coeffs (8×8 input, possibly subdivided): DCT8 + DCT4 family.
+/// // 64 coeffs (8×8 input, possibly subdivided):
+/// // DCT8 + DCT4 family + IDENTITY + DCT2X2.
 /// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT), 64);
 /// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT4X4), 64);
+/// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_IDENTITY), 64);
+/// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT2X2), 64);
 /// // 128: DCT16x8 / DCT8x16 (rectangular 16×8).
 /// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT16X8), 128);
 /// assert_eq!(coeff_count_per_strategy(RAW_STRATEGY_DCT8X16), 128);
@@ -97,7 +107,12 @@ pub const RAW_STRATEGY_DCT32X64: u8 = 14;
 /// ```
 pub fn coeff_count_per_strategy(raw_strategy: u8) -> usize {
     match raw_strategy {
-        RAW_STRATEGY_DCT | RAW_STRATEGY_DCT4X8 | RAW_STRATEGY_DCT8X4 | RAW_STRATEGY_DCT4X4 => 64,
+        RAW_STRATEGY_DCT
+        | RAW_STRATEGY_DCT4X8
+        | RAW_STRATEGY_DCT8X4
+        | RAW_STRATEGY_DCT4X4
+        | RAW_STRATEGY_IDENTITY
+        | RAW_STRATEGY_DCT2X2 => 64,
         RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => 128,
         RAW_STRATEGY_DCT16X16 => 256,
         RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => 512,
@@ -115,9 +130,12 @@ pub fn coeff_count_per_strategy(raw_strategy: u8) -> usize {
 fn tile_dims(raw_strategy: u8) -> (usize, usize) {
     match raw_strategy {
         // 8×8 extraction; transform sub-divides internally
-        RAW_STRATEGY_DCT | RAW_STRATEGY_DCT4X8 | RAW_STRATEGY_DCT8X4 | RAW_STRATEGY_DCT4X4 => {
-            (8, 8)
-        }
+        RAW_STRATEGY_DCT
+        | RAW_STRATEGY_DCT4X8
+        | RAW_STRATEGY_DCT8X4
+        | RAW_STRATEGY_DCT4X4
+        | RAW_STRATEGY_IDENTITY
+        | RAW_STRATEGY_DCT2X2 => (8, 8),
         RAW_STRATEGY_DCT16X8 => (8, 16), // 8 wide × 16 tall
         RAW_STRATEGY_DCT8X16 => (16, 8), // 16 wide × 8 tall
         RAW_STRATEGY_DCT16X16 => (16, 16),
@@ -177,6 +195,8 @@ pub fn apply_dct_batch_gpu<R: Runtime>(
         RAW_STRATEGY_DCT64X32 => enc.dct_64x32_blocks(&batch),
         RAW_STRATEGY_DCT32X64 => enc.dct_32x64_blocks(&batch),
         RAW_STRATEGY_DCT64X64 => enc.dct_64x64_blocks(&batch),
+        RAW_STRATEGY_IDENTITY => enc.identity_blocks(&batch),
+        RAW_STRATEGY_DCT2X2 => enc.dct2x2_blocks(&batch),
         _ => unreachable!(),
     }
 }
@@ -222,6 +242,8 @@ pub fn apply_idct_batch_gpu<R: Runtime>(
         RAW_STRATEGY_DCT64X32 => enc.idct_64x32_blocks(coeff_blocks),
         RAW_STRATEGY_DCT32X64 => enc.idct_32x64_blocks(coeff_blocks),
         RAW_STRATEGY_DCT64X64 => enc.idct_64x64_blocks(coeff_blocks),
+        RAW_STRATEGY_IDENTITY => enc.inverse_identity_blocks(coeff_blocks),
+        RAW_STRATEGY_DCT2X2 => enc.inverse_dct2x2_blocks(coeff_blocks),
         _ => panic!("unsupported strategy {raw_strategy}"),
     }
 }
