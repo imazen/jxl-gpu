@@ -59,6 +59,116 @@ use cubecl::Runtime;
 
 use crate::encoder::GpuEncoder;
 
+/// Per-strategy entropy multipliers consumed by
+/// `estimate_entropy_full`. Bit-for-bit port of upstream
+/// `jxl_encoder::effort::EntropyMulTable` (which itself mirrors the
+/// libjxl `enc_ac_strategy.cc:584` reference table).
+///
+/// The 8x8-class transforms (DCT8 / DCT4x4 / DCT4x8 / DCT8x4 /
+/// IDENTITY / DCT2x2 / AFV0-3) are normalized by `dct8` in
+/// upstream's FindBest8x8Transform — so DCT8 effectively contributes
+/// 1.0. Larger transforms (DCT16+, DCT32+, DCT64+) use raw values
+/// per upstream's TryMergeAcs.
+///
+/// Construct via [`EntropyMulTable::reference`] for the libjxl
+/// defaults or [`EntropyMulTable::experimental`] for libjxl PR #4506
+/// (Jon Sneyers' VarDCT cost tuning that lowers dct4x4 / identity /
+/// afv).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct EntropyMulTable {
+    pub dct8: f32,
+    pub dct4x4: f32,
+    pub dct4x8: f32,
+    pub identity: f32,
+    pub dct2x2: f32,
+    pub afv: f32,
+    pub dct16x8: f32,
+    pub dct16x16: f32,
+    pub dct16x32: f32,
+    pub dct32x32: f32,
+    pub dct64x32: f32,
+    pub dct64x64: f32,
+}
+
+impl EntropyMulTable {
+    /// libjxl reference values (`enc_ac_strategy.cc:584`).
+    pub fn reference() -> Self {
+        Self {
+            dct8: 0.8,
+            dct4x4: 1.08,
+            dct4x8: 0.859_316_37,
+            identity: 1.0428,
+            dct2x2: 0.95,
+            afv: 0.817_794_9,
+            dct16x8: 1.21,
+            dct16x16: 1.34,
+            dct16x32: 1.49,
+            dct32x32: 1.48,
+            dct64x32: 2.25,
+            dct64x64: 2.25,
+        }
+    }
+
+    /// libjxl PR #4506 (Jon Sneyers) experimental tuning. Lowers
+    /// dct4x4 / identity / afv to favor those strategies for
+    /// detail / flat / edge blocks respectively.
+    pub fn experimental() -> Self {
+        Self {
+            dct4x4: 0.88,
+            identity: 0.88,
+            afv: 0.75,
+            ..Self::reference()
+        }
+    }
+}
+
+/// Per-strategy entropy multiplier lookup. Mirrors upstream
+/// `jxl_encoder::vardct::ac_strategy::entropy_mul_for_strategy` —
+/// 8x8-class transforms get `table.X / table.dct8` (so DCT8 = 1.0
+/// after the FindBest8x8Transform normalization), larger transforms
+/// use raw values.
+///
+/// AFV0-3 strategies all share the same `table.afv` slot.
+///
+/// Returns 1.0 for any unknown / out-of-range strategy code (matches
+/// upstream's defensive `_ => 1.0` fallback).
+pub fn entropy_mul_for_strategy(raw_strategy: u8, table: &EntropyMulTable) -> f32 {
+    use crate::forks::transform::{
+        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
+        RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+        RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
+        RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+    };
+    match raw_strategy {
+        RAW_STRATEGY_DCT => 1.0,
+        RAW_STRATEGY_DCT4X8 | RAW_STRATEGY_DCT8X4 => table.dct4x8 / table.dct8,
+        RAW_STRATEGY_DCT4X4 => table.dct4x4 / table.dct8,
+        RAW_STRATEGY_IDENTITY => table.identity / table.dct8,
+        RAW_STRATEGY_DCT2X2 => table.dct2x2 / table.dct8,
+        // AFV0-3 not in our dispatcher's strategy code map; callers
+        // route AFV through forks::afv. Provide the value anyway for
+        // completeness — accessible via forks::cost::afv_entropy_mul.
+        RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => table.dct16x8,
+        RAW_STRATEGY_DCT16X16 => table.dct16x16,
+        RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => table.dct16x32,
+        RAW_STRATEGY_DCT32X32 => table.dct32x32,
+        RAW_STRATEGY_DCT64X32 | RAW_STRATEGY_DCT32X64 => table.dct64x32,
+        RAW_STRATEGY_DCT64X64 => table.dct64x64,
+        _ => 1.0,
+    }
+}
+
+/// AFV0-3 entropy multiplier — exposed separately because AFV
+/// strategies are routed through `forks::afv` rather than the main
+/// strategy dispatcher. Matches upstream's
+/// `entropy_mul_for_strategy(AFV0..3, table)` arm:
+/// `table.afv / table.dct8`.
+#[inline]
+pub fn afv_entropy_mul(table: &EntropyMulTable) -> f32 {
+    table.afv / table.dct8
+}
+
 /// Per-channel offsets for pixel-domain loss masking. Bit-for-bit
 /// from upstream `jxl_encoder::vardct::ac_strategy::MASK_CHANNEL_OFFSET`
 /// (= libjxl `enc_ac_strategy.cc:446`).
@@ -257,6 +367,93 @@ pub fn pixel_loss_blocks_gpu<R: Runtime>(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn test_entropy_mul_table_reference() {
+        let t = EntropyMulTable::reference();
+        assert_eq!(t.dct8, 0.8);
+        assert_eq!(t.dct4x4, 1.08);
+        assert_eq!(t.identity, 1.0428);
+        assert_eq!(t.dct2x2, 0.95);
+        assert_eq!(t.dct16x8, 1.21);
+        assert_eq!(t.dct16x16, 1.34);
+        assert_eq!(t.dct32x32, 1.48);
+        assert_eq!(t.dct64x64, 2.25);
+    }
+
+    #[test]
+    fn test_entropy_mul_table_experimental_overrides() {
+        let r = EntropyMulTable::reference();
+        let e = EntropyMulTable::experimental();
+        // Three fields differ.
+        assert_eq!(e.dct4x4, 0.88);
+        assert_eq!(e.identity, 0.88);
+        assert_eq!(e.afv, 0.75);
+        // Everything else inherits from reference.
+        assert_eq!(e.dct8, r.dct8);
+        assert_eq!(e.dct4x8, r.dct4x8);
+        assert_eq!(e.dct2x2, r.dct2x2);
+        assert_eq!(e.dct16x16, r.dct16x16);
+    }
+
+    #[test]
+    fn test_entropy_mul_for_strategy_dct8_is_one() {
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        let t = EntropyMulTable::reference();
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT, &t), 1.0);
+    }
+
+    #[test]
+    fn test_entropy_mul_for_strategy_normalized_8x8_class() {
+        use crate::forks::transform::{
+            RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
+            RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+        };
+        let t = EntropyMulTable::reference();
+        // 8x8-class transforms get table.X / table.dct8 (= 0.8 in reference).
+        assert!((entropy_mul_for_strategy(RAW_STRATEGY_DCT4X4, &t) - 1.08 / 0.8).abs() < 1e-6);
+        assert!(
+            (entropy_mul_for_strategy(RAW_STRATEGY_DCT4X8, &t) - 0.859_316_37 / 0.8).abs() < 1e-6
+        );
+        assert!(
+            (entropy_mul_for_strategy(RAW_STRATEGY_DCT8X4, &t) - 0.859_316_37 / 0.8).abs() < 1e-6
+        );
+        assert!((entropy_mul_for_strategy(RAW_STRATEGY_IDENTITY, &t) - 1.0428 / 0.8).abs() < 1e-6);
+        assert!((entropy_mul_for_strategy(RAW_STRATEGY_DCT2X2, &t) - 0.95 / 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_entropy_mul_for_strategy_raw_for_large() {
+        use crate::forks::transform::{
+            RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
+            RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+            RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_DCT8X16,
+        };
+        let t = EntropyMulTable::reference();
+        // Larger transforms use raw values per upstream TryMergeAcs.
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT16X8, &t), 1.21);
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT8X16, &t), 1.21);
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT16X16, &t), 1.34);
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT32X16, &t), 1.49);
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT16X32, &t), 1.49);
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT32X32, &t), 1.48);
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT64X32, &t), 2.25);
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT32X64, &t), 2.25);
+        assert_eq!(entropy_mul_for_strategy(RAW_STRATEGY_DCT64X64, &t), 2.25);
+    }
+
+    #[test]
+    fn test_entropy_mul_for_strategy_unknown_returns_one() {
+        let t = EntropyMulTable::reference();
+        // 17, 18 etc. fall through the match's default arm.
+        assert_eq!(entropy_mul_for_strategy(99, &t), 1.0);
+    }
+
+    #[test]
+    fn test_afv_entropy_mul() {
+        let t = EntropyMulTable::reference();
+        assert!((afv_entropy_mul(&t) - 0.817_794_9 / 0.8).abs() < 1e-6);
+    }
 
     #[test]
     fn test_channel_constants_match_upstream() {
