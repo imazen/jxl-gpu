@@ -44,6 +44,7 @@ use crate::launch::dct8::{dct_8x8, idct_8x8};
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
+use crate::launch::denoise::denoise as denoise_launch;
 use crate::launch::dequant::dequant_dct8;
 use crate::launch::entropy::entropy_coeffs_pixel;
 use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
@@ -226,6 +227,50 @@ impl<R: Runtime> GpuEncoder<R> {
             .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
         mask1x1::<R>(&self.client, h_in, h_out.clone(), width, height);
         let bytes = self.client.read_one(h_out).expect("read mask1x1");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Per-pixel Wiener denoise (5×5 local statistics) on one channel.
+    ///
+    /// Mirrors `jxl_encoder_simd::noise::denoise_channel_scalar`. For
+    /// each pixel: noise variance is looked up from `y_channel` via the
+    /// 8-point `noise_lut` (interpolated, scaled by `denoise_scale²`).
+    /// Output is the Wiener-filtered `orig`; pixels where the noise
+    /// estimate falls below `EPS` pass through `orig[idx]` unchanged.
+    ///
+    /// `noise_lut` is the per-frame noise LUT (one of `NoiseParams::lut`
+    /// from `jxl_encoder::vardct::noise`); `denoise_scale = denoise_fraction
+    /// / (quality_coef * 1.4)` (see `denoise_xyb`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn denoise_channel(
+        &self,
+        orig: &[f32],
+        y_channel: &[f32],
+        noise_lut: &[f32; 8],
+        width: u32,
+        height: u32,
+        denoise_scale: f32,
+    ) -> Vec<f32> {
+        let n = (width as usize) * (height as usize);
+        assert_eq!(orig.len(), n, "orig length mismatch");
+        assert_eq!(y_channel.len(), n, "y_channel length mismatch");
+        let h_orig = self.client.create_from_slice(f32::as_bytes(orig));
+        let h_y = self.client.create_from_slice(f32::as_bytes(y_channel));
+        let h_lut = self.client.create_from_slice(f32::as_bytes(noise_lut));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        denoise_launch::<R>(
+            &self.client,
+            h_orig,
+            h_y,
+            h_lut,
+            h_out.clone(),
+            width,
+            height,
+            denoise_scale,
+        );
+        let bytes = self.client.read_one(h_out).expect("read denoise");
         f32::from_bytes(&bytes).to_vec()
     }
 

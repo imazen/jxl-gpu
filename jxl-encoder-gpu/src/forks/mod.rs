@@ -20,6 +20,7 @@
 //! |---|---|---|
 //! | [`xyb`] | `vardct::xyb` | whole-image batch instead of per-row strips |
 //! | [`gaborish`] | `vardct::gaborish` | 3 sequential GPU launches instead of `rayon::join` |
+//! | [`noise`] | `vardct::noise::denoise_xyb` | 3 sequential GPU launches; same Y-snapshot read pattern |
 //! | [`adaptive_quant`] | `vardct::adaptive_quant` (`compute_mask1x1` + `pre_erosion` + `per_block_modulations`) | direct GPU substitution; `fuzzy_erosion` stays CPU |
 //! | [`reconstruct`] | `vardct::reconstruct::{gab_smooth, xyb_to_linear_rgb_planar}` | 3 sequential launches |
 //! | [`transform`] | `vardct::transform::Transform::apply_dct` | per-strategy batched: gather all blocks of one strategy, single launch covers all |
@@ -49,6 +50,7 @@ pub mod cost;
 pub mod dequant;
 pub mod epf;
 pub mod gaborish;
+pub mod noise;
 pub mod pad;
 pub mod quantize;
 pub mod reconstruct;
