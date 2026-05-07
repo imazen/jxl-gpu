@@ -2244,8 +2244,99 @@ pub enum Partition16x16 {
     /// Two DCT8x16 stacked vertically (each is 8 tall × 16 wide; two
     /// stacked fill a 16x16 region).
     TwoDct8x16Vertical,
-    /// Four DCT8×8 blocks (TL, TR, BL, BR).
+    /// Four DCT8×8 blocks (TL, TR, BL, BR). Use this when only the
+    /// DCT8 8×8-tier strategy is being considered. For per-cell choice
+    /// from the full 8×8-tier set (DCT8 / DCT4x4 / DCT4x8 / DCT8x4 /
+    /// IDENTITY / DCT2X2), use [`Partition16x16::FourSubBlocks`].
     FourDct8x8,
+    /// Four 8×8 sub-blocks, each independently picked from the full
+    /// 8×8-tier strategy set. Index order matches `FourDct8x8`:
+    /// `[TL, TR, BL, BR]`.
+    FourSubBlocks([SubStrategy; 4]),
+}
+
+/// Per-cell 8×8-tier AC strategy choice, used inside
+/// [`Partition16x16::FourSubBlocks`] to drive per-cell strategy
+/// selection beyond the all-DCT8 default.
+///
+/// Mirrors the libjxl `RAW_STRATEGY_*` codes for the 64-coeff family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubStrategy {
+    Dct8,
+    Dct4x4,
+    Dct4x8,
+    Dct8x4,
+    Identity,
+    Dct2x2,
+}
+
+/// Optional per-cell 8×8-tier cost grids for use with
+/// [`pick_subblock_strategies`] / [`Partition16x16::FourSubBlocks`].
+///
+/// Each grid is per-8×8-cell, same shape as the canonical DCT8 cost
+/// grid: `(xsize_blocks_8, ysize_blocks_8)` row-major. Pass `None` to
+/// drop a strategy from consideration (it'll be skipped in the picker).
+#[derive(Default, Clone, Copy)]
+pub struct SubBlockCostGrids<'a> {
+    pub dct4x4: Option<&'a [f32]>,
+    pub dct4x8: Option<&'a [f32]>,
+    pub dct8x4: Option<&'a [f32]>,
+    pub identity: Option<&'a [f32]>,
+    pub dct2x2: Option<&'a [f32]>,
+}
+
+/// Pick the lowest-cost 8×8-tier strategy for each of the 4 cells in a
+/// 16×16 region. Always considers DCT8; the optional grids are
+/// considered if present. Returns `(total_cost, [TL, TR, BL, BR])` so
+/// the caller can compare against the larger-transform partitions.
+///
+/// `(bx0, by0)` is the top-left 8×8-block coordinate of the 16×16
+/// region (so the four cells are at offsets (0,0), (1,0), (0,1), (1,1)).
+pub fn pick_subblock_strategies(
+    cost_dct8: &[f32],
+    extra: SubBlockCostGrids<'_>,
+    xsize_blocks_8: usize,
+    bx0: usize,
+    by0: usize,
+) -> (f32, [SubStrategy; 4]) {
+    let cell_idx = |i: usize| {
+        let dx = i % 2;
+        let dy = i / 2;
+        (by0 + dy) * xsize_blocks_8 + bx0 + dx
+    };
+    let pick_one = |i: usize| -> (f32, SubStrategy) {
+        let idx = cell_idx(i);
+        let mut best = (cost_dct8[idx], SubStrategy::Dct8);
+        if let Some(g) = extra.dct4x4 {
+            if g[idx] < best.0 {
+                best = (g[idx], SubStrategy::Dct4x4);
+            }
+        }
+        if let Some(g) = extra.dct4x8 {
+            if g[idx] < best.0 {
+                best = (g[idx], SubStrategy::Dct4x8);
+            }
+        }
+        if let Some(g) = extra.dct8x4 {
+            if g[idx] < best.0 {
+                best = (g[idx], SubStrategy::Dct8x4);
+            }
+        }
+        if let Some(g) = extra.identity {
+            if g[idx] < best.0 {
+                best = (g[idx], SubStrategy::Identity);
+            }
+        }
+        if let Some(g) = extra.dct2x2 {
+            if g[idx] < best.0 {
+                best = (g[idx], SubStrategy::Dct2x2);
+            }
+        }
+        best
+    };
+    let cells = [pick_one(0), pick_one(1), pick_one(2), pick_one(3)];
+    let total = cells[0].0 + cells[1].0 + cells[2].0 + cells[3].0;
+    (total, [cells[0].1, cells[1].1, cells[2].1, cells[3].1])
 }
 
 /// Optional cost grids for extra strategies. Pass `None` to skip
@@ -2720,5 +2811,11 @@ fn partition_16x16_cost(
         // Full Phase 3 would extend select_partitions_32x32 to pass through
         // the extra cost grids and recompute these costs precisely.
         Partition16x16::TwoDct16x8Horizontal | Partition16x16::TwoDct8x16Vertical => f32::INFINITY,
+        // FourSubBlocks isn't reachable from select_partitions_32x32 yet
+        // (32x32 selector currently calls the 2-strategy 16x16 picker
+        // which never emits this variant). Treat as infinite to keep
+        // the selector tie-breaking consistent until the 32x32 path is
+        // extended to pass through the sub-block grids.
+        Partition16x16::FourSubBlocks(_) => f32::INFINITY,
     }
 }
