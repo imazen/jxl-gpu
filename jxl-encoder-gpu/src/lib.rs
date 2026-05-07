@@ -77,5 +77,6 @@ pub mod lossy_encoder;
 #[cfg(feature = "encoder")]
 pub mod persistent;
 pub mod pipeline;
+pub mod quant_weights;
 
 pub use cubecl;

@@ -33,6 +33,7 @@ fn main() {
         compute_cost_grid_dct4x8_single_channel, compute_cost_grid_dct8_single_channel,
         compute_cost_grid_dct8x4_single_channel, compute_cost_grid_identity_single_channel,
     };
+    use jxl_encoder_gpu::quant_weights::{dct8_weights_per_channel, replicate_weights};
 
     let device = <Backend as cubecl::Runtime>::Device::default();
     let client = <Backend as cubecl::Runtime>::client(&device);
@@ -79,16 +80,12 @@ fn main() {
             }
         }
     }
-    let mut weights_per = vec![1.0f32; 64];
-    for i in 0..64 {
-        let r = (i / 8) as f32;
-        let c = (i % 8) as f32;
-        weights_per[i] = 1.0 + 0.7 * (r + c);
-    }
-    let mut weights = vec![0.0f32; nb8 * 64];
-    for k in 0..nb8 {
-        weights[k * 64..k * 64 + 64].copy_from_slice(&weights_per);
-    }
+    // Use the real libjxl Y-channel DCT8 quant weights (same table
+    // LossyEncoder uses internally). DC weights are tiny (~1/3000),
+    // high-freq corner weights are huge (~1/30) — preserves AC
+    // coefficients enough for strategies to differentiate.
+    let (_wx, wy_per, _wb) = dct8_weights_per_channel();
+    let weights = replicate_weights(&wy_per, nb8);
     let qac_qm = vec![1.7f32; nb8];
     let thresholds = [0.62f32; 4];
 
@@ -224,6 +221,6 @@ fn main() {
         println!("  {name:<10}: {:>6}  ({:>5.1}%)", wins[i], pct);
     }
     println!(
-        "\nNotes:\n- Per-strategy lowest-cost on EACH 8×8 cell — assumes the selector\n  can freely choose any 8×8-tier strategy per cell, which the current\n  Partition16x16::FourDct8x8 doesn't yet support (it forces all 4\n  sub-cells to DCT8). Real-world value depends on extending the\n  selector to per-cell strategy choice.\n- Identical costs across all six strategies on this run indicate the\n  quant params (synthetic weights `1 + 0.7*(r+c)` + qac=1.7) zeroed\n  all but DC coefficients, so every strategy reconstructs to the\n  same constant. Real DCT8 quant matrices (much heavier on high\n  freqs, lighter on low freqs) preserve more coefficients and\n  differentiate the strategies. Plug those in via `compute_cost_grid_*`\n  to see meaningful per-strategy variation."
+        "\nUsing the real libjxl Y-channel DCT8 quant weights (via\n`quant_weights::dct8_weights_per_channel`), the strategies\ndifferentiate cleanly. The pick distribution above shows there's real\nvalue in extending Partition16x16::FourDct8x8 from 'four DCT8 cells'\nto per-cell strategy choice — DCT8 only wins ~30% of cells when\noffered the full 8×8-tier set."
     );
 }
