@@ -1,37 +1,33 @@
 //! Persistent-buffer GPU pipeline benchmark.
 //!
-//! Demonstrates the win pattern that the round-trip API can't show:
-//! upload input ONCE, run a multi-stage pipeline on GPU, download
-//! ONCE at the end. The intermediate stages keep their buffers
-//! resident on GPU — no PCIe roundtrip per stage.
+//! Compares 3 paths for a real encoder front-end pipeline at sizes
+//! 256² → 4096²:
 //!
-//! Pipeline (mirrors real encoder front-end):
+//! 1. **CPU AVX2** — `jxl_encoder_simd` dispatched SIMD (one-shot
+//!    sequential, single thread).
+//! 2. **GPU round-trip** — the default `GpuEncoder` facade methods,
+//!    each of which uploads inputs + downloads outputs every call.
+//! 3. **GPU persistent (typed API)** — the new `crate::persistent`
+//!    module: upload R/G/B once via `upload_plane`, chain pipeline
+//!    stages through `*_persistent` methods (returning typed
+//!    `GpuPlane<R>`s that stay on-GPU), download only the final
+//!    mask via `download_plane`.
+//!
+//! Pipeline (mirrors the encoder front-end):
 //!   linear-RGB → XYB (3 channels) → gaborish_5x5 (3 channels) →
 //!   mask1x1 (Y only)
 //!
-//! Compares:
-//! - **GPU persistent**: 1 upload (3×n f32) + 5 launches + 1 download
-//!   (1×n f32 mask). All intermediates stay on-GPU.
-//! - **GPU round-trip** (via GpuEncoder facade): every stage uploads
-//!   AND downloads — the worst case.
-//! - **CPU**: dispatched-SIMD via jxl_encoder_simd.
-//!
-//! Expected: persistent GPU should be much closer to (or beat) CPU
-//! at moderate sizes; round-trip GPU stays slow.
+//! Earlier hand-coded `launch::*`-chain version of (3) showed
+//! 1.7-3.4× speedup over (2). The typed API should match that
+//! speedup with much cleaner code.
 
 #[cfg(all(feature = "cuda", feature = "encoder"))]
 fn main() {
-    use cubecl::Runtime;
-    use cubecl::prelude::*;
     use jxl_encoder_gpu::encoder::GpuEncoder;
-    use jxl_encoder_gpu::launch::gaborish::gaborish_5x5;
-    use jxl_encoder_gpu::launch::mask1x1::mask1x1;
-    use jxl_encoder_gpu::launch::xyb::xyb_forward;
+    use jxl_encoder_gpu::persistent::GaborishWeights;
 
     type Backend = cubecl::cuda::CudaRuntime;
     let enc: GpuEncoder<Backend> = GpuEncoder::new();
-    let device = <Backend as Runtime>::Device::default();
-    let client = <Backend as Runtime>::client(&device);
 
     let sizes: Vec<usize> = std::env::var("SIZES")
         .ok()
@@ -42,7 +38,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(7);
 
-    // Gaborish weights for mul=1.0 (matches forks::gaborish).
+    // Gaborish weights for mul=1.0 (matches forks::gaborish::compute_weights).
     const K_GABORISH: [f64; 5] = [
         -0.094_958_15_67,
         -0.041_031_725,
@@ -54,12 +50,16 @@ fn main() {
         + 4.0
             * (K_GABORISH[0] + K_GABORISH[1] + K_GABORISH[2] + K_GABORISH[4] + 2.0 * K_GABORISH[3]);
     let norm = 1.0 / sum_w;
-    let wc = norm as f32;
-    let wr = (norm * K_GABORISH[0]) as f32;
-    let wd = (norm * K_GABORISH[1]) as f32;
-    let w_big_r = (norm * K_GABORISH[2]) as f32;
-    let wl = (norm * K_GABORISH[3]) as f32;
-    let w_big_d = (norm * K_GABORISH[4]) as f32;
+    let weights_scalar = (
+        norm as f32,
+        (norm * K_GABORISH[0]) as f32,
+        (norm * K_GABORISH[1]) as f32,
+        (norm * K_GABORISH[2]) as f32,
+        (norm * K_GABORISH[3]) as f32,
+        (norm * K_GABORISH[4]) as f32,
+    );
+    let (wc, wr, wd, w_big_r, wl, w_big_d) = weights_scalar;
+    let weights = GaborishWeights { wc, wr, wd, w_big_r, wl, w_big_d };
 
     println!("=== persistent-buffer pipeline: XYB + gaborish + mask1x1 ===");
     println!("Iters per size: {iters} (1 warmup + {} sampled)\n", iters - 1);
@@ -118,7 +118,7 @@ fn main() {
         let mut rt_times = Vec::with_capacity(iters);
         for i in 0..iters {
             let t = std::time::Instant::now();
-            let (xyb_x, mut xyb_y, xyb_b) = enc.xyb_from_linear_rgb(&r, &g, &b);
+            let (xyb_x, xyb_y, xyb_b) = enc.xyb_from_linear_rgb(&r, &g, &b);
             let _gx = enc.gaborish_5x5_channel(
                 &xyb_x, side as u32, side as u32, wc, wr, wd, w_big_r, wl, w_big_d,
             );
@@ -129,8 +129,6 @@ fn main() {
                 &xyb_b, side as u32, side as u32, wc, wr, wd, w_big_r, wl, w_big_d,
             );
             let _ = enc.mask1x1_field(&gy, side as u32, side as u32);
-            // Use xyb_y to suppress unused-mut warning under iteration
-            xyb_y[0] = xyb_y[0];
             let dt = t.elapsed();
             if i > 0 {
                 rt_times.push(dt);
@@ -139,84 +137,22 @@ fn main() {
         rt_times.sort();
         let rt_med = rt_times[rt_times.len() / 2];
 
-        // ── GPU persistent (handles never leave GPU until final read) ──
+        // ── GPU persistent (typed API; data stays on GPU) ──────────
         let mut pers_times = Vec::with_capacity(iters);
         for i in 0..iters {
             let t = std::time::Instant::now();
-            // Upload R, G, B once
-            let h_r = client.create_from_slice(f32::as_bytes(&r));
-            let h_g = client.create_from_slice(f32::as_bytes(&g));
-            let h_b = client.create_from_slice(f32::as_bytes(&b));
-            // Allocate output handles
-            let h_x = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
-            let h_y = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
-            let h_bo = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
-            let h_gx = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
-            let h_gy = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
-            let h_gb = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
-            let h_mask = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
-
-            // Stage 1: XYB
-            xyb_forward::<Backend>(
-                &client,
-                h_r,
-                h_g,
-                h_b,
-                h_x.clone(),
-                h_y.clone(),
-                h_bo.clone(),
-                n as u32,
-            );
-            // Stage 2: gaborish on each channel
-            gaborish_5x5::<Backend>(
-                &client,
-                h_x.clone(),
-                h_gx,
-                side as u32,
-                side as u32,
-                wc,
-                wr,
-                wd,
-                w_big_r,
-                wl,
-                w_big_d,
-            );
-            gaborish_5x5::<Backend>(
-                &client,
-                h_y.clone(),
-                h_gy.clone(),
-                side as u32,
-                side as u32,
-                wc,
-                wr,
-                wd,
-                w_big_r,
-                wl,
-                w_big_d,
-            );
-            gaborish_5x5::<Backend>(
-                &client,
-                h_bo.clone(),
-                h_gb,
-                side as u32,
-                side as u32,
-                wc,
-                wr,
-                wd,
-                w_big_r,
-                wl,
-                w_big_d,
-            );
-            // Stage 3: mask1x1 on the (gaborished) Y channel
-            mask1x1::<Backend>(
-                &client,
-                h_gy,
-                h_mask.clone(),
-                side as u32,
-                side as u32,
-            );
-            // Final download (just the mask)
-            let _ = client.read_one(h_mask).expect("read mask");
+            // Upload R, G, B once.
+            let g_r = enc.upload_plane(&r, side as u32, side as u32);
+            let g_g = enc.upload_plane(&g, side as u32, side as u32);
+            let g_b = enc.upload_plane(&b, side as u32, side as u32);
+            // Pipeline — all intermediates stay on-GPU.
+            let (xx, xy, xbo) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
+            let _xx_g = enc.gaborish_5x5_persistent(&xx, &weights);
+            let xy_g = enc.gaborish_5x5_persistent(&xy, &weights);
+            let _xb_g = enc.gaborish_5x5_persistent(&xbo, &weights);
+            let mask = enc.mask1x1_persistent(&xy_g);
+            // Download only the final mask.
+            let _ = enc.download_plane(&mask);
             let dt = t.elapsed();
             if i > 0 {
                 pers_times.push(dt);
@@ -239,7 +175,7 @@ fn main() {
         "\n  vs CPU: persistent-GPU vs CPU AVX2 (>1.0 = GPU wins)\n  vs rt:  persistent-GPU vs round-trip-GPU API (always >1)"
     );
     println!(
-        "\nThis is the pattern future GpuEncoder work needs to expose: persistent\n  Handle<R>-typed buffers + chained launches + single download at pipeline end."
+        "\n  Persistent path uses the typed API in `crate::persistent`:\n  upload_plane → xyb_from_linear_rgb_persistent →\n  gaborish_5x5_persistent (×3) → mask1x1_persistent → download_plane."
     );
 }
 
