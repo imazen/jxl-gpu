@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Performance — GPU pipeline now FASTER than CPU AVX2 (`d6ef26c7`)
+
+The breakthrough: replacing
+  `client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]))`
+with
+  `client.empty(n * 4)`
+in the persistent API gave a **7.8× pipeline speedup**. Old pattern
+allocated host vec + did real PCIe upload of zeros to a buffer the
+kernel was about to overwrite. empty() reserves GPU memory without
+touching the bus.
+
+End-to-end CPU vs GPU lossy DCT8 (RTX 5070 + Ryzen 9 7950X):
+
+```
+side    CPU ms    GPU ms    ratio        throughput
+ 256     1.61     1.49     1.08× GPU   44 MP/s
+ 512     9.39     4.28     2.19× GPU   61 MP/s
+1024    39.46    17.66     2.23× GPU   59 MP/s
+2048   150.55    41.33     3.64× GPU   101 MP/s vs 28 MP/s
+```
+
+Parity preserved at 4e-6 max abs delta. Win grows with size.
+
+Also: per-kernel fusion wins documented in fused_dct_quant_bench
+(2.84× DCT+quant fused) and fused_dequant_idct_bench (3.07× inverse).
+
+### Added — Fused DCT+quant kernels (`b1bc500c`, `53bbae07`)
+
+Two new kernels that combine consecutive stages into one launch:
+- dct8_quantize_fused_wide_kernel (forward: DCT → quant in one pass,
+  intermediate coeffs stay in shared memory)
+- dequant_idct8_fused_y_wide_kernel (inverse: dequant → IDCT, Y
+  channel only, no CfL)
+
+Both bit-exact vs split chains. 2-3× speedup at sweet spot (1024²)
+for the per-kernel measurements; pipeline-level use is gated on
+having a real DC handling path (real encoders use dc_coding).
+
+### Added — Wide-cube DCT8 (`a9ecc28b`, `32377a60`)
+
+cube_dim=64 variant of DCT8 (one block per thread, per-thread
+private slice in shared memory). 2.9× faster than naive cube_dim=1
+at 1024² sweet spot. Tuned via sweep: cube_dim ∈ {16, 32, 64} →
+64 wins by small margin at 1024² and 4096².
+
 ### Added — Persistent GPU buffer API + full-GPU lossy roundtrip
 
 The biggest single architectural addition since the kernel library
