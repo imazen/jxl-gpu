@@ -19,6 +19,7 @@ pub mod idct4_raw;
 pub mod dct64;
 pub mod dct8;
 pub mod dequant;
+pub mod dequant_simple;
 pub mod entropy;
 pub mod epf;
 pub mod fused_dct_quant;

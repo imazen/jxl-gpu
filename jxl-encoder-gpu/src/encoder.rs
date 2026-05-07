@@ -520,6 +520,40 @@ impl<R: Runtime> GpuEncoder<R> {
         i32::from_bytes(&bytes).to_vec()
     }
 
+    /// Generic per-coefficient dequant: `output[i] = quant[i] * weights[i]`
+    /// for `num_blocks * block_size` coefficients.
+    ///
+    /// Used by larger-strategy decode paths (DCT16+, AFV/IDENTITY/DCT2X2)
+    /// where the simpler `dequant_dct8` (which folds in CfL +
+    /// adjust_quant_bias) isn't applicable.
+    pub fn dequant_simple_blocks(
+        &self,
+        quant: &[i32],
+        weights: &[f32],
+        block_size: u32,
+    ) -> Vec<f32> {
+        let bs = block_size as usize;
+        let n = quant.len();
+        assert!(n.is_multiple_of(bs));
+        assert_eq!(weights.len(), n);
+        let num_blocks = (n / bs) as u32;
+        let h_q = self.client.create_from_slice(i32::as_bytes(quant));
+        let h_w = self.client.create_from_slice(f32::as_bytes(weights));
+        let h_o = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        crate::launch::dequant_simple::dequant_simple::<R>(
+            &self.client,
+            h_q,
+            h_w,
+            h_o.clone(),
+            num_blocks,
+            block_size,
+        );
+        let bytes = self.client.read_one(h_o).expect("read dequant_simple");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
     /// Quantize a contiguous batch of larger-strategy blocks (DCT16,
     /// DCT16x8/8x16, DCT32, DCT32x16/16x32, DCT64, DCT64x32/32x64).
     ///

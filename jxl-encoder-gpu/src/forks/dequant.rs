@@ -125,6 +125,21 @@ pub fn dequant_dct8_blocks_gpu<R: Runtime>(
     )
 }
 
+/// Strategy-aware simple dequant (no CfL, no adjust_quant_bias).
+/// Computes `output[i] = quant[i] * weights[i]` for arbitrary
+/// `block_size` (DCT8 → 64, DCT16x16 → 256, DCT32x32 → 1024, etc.).
+///
+/// Use this for the larger-strategy decoder paths where the
+/// DCT8-specific CfL + adjust_quant_bias adjustments don't apply.
+pub fn dequant_blocks_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    quant: &[i32],
+    weights: &[f32],
+    block_size: u32,
+) -> Vec<f32> {
+    enc.dequant_simple_blocks(quant, weights, block_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
