@@ -45,6 +45,7 @@ use cubecl::server::Handle;
 use crate::encoder::GpuEncoder;
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
 use crate::launch::dequant::dequant_dct8;
+use crate::launch::gather::{gather_blocks, scatter_blocks};
 use crate::launch::quantize::quantize_dct8;
 use crate::launch::dct32::{
     dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32,
@@ -748,6 +749,94 @@ impl<R: Runtime> GpuEncoder<R> {
         (mk(h_ox), mk(h_oy), mk(h_ob))
     }
 
+    /// GPU spatial-plane → per-block gather. Reshapes a `GpuPlane`
+    /// (W×H spatial layout) into a `GpuBlocks` of `num_blocks × tile_w
+    /// × tile_h` floats, with raster-grid block ordering.
+    ///
+    /// Plane dimensions must be exact multiples of `tile_w` × `tile_h`
+    /// (no fractional/edge blocks). For non-multiple sizes, pad the
+    /// plane first via [`Self::pad_plane_persistent`].
+    ///
+    /// Replaces the host-side `download_plane` + manual gather +
+    /// `upload_blocks` round-trip used by the lossy_roundtrip_persistent
+    /// example, keeping all data on-GPU through the spatial→per-block
+    /// boundary.
+    pub fn gather_blocks_persistent(
+        &self,
+        plane: &GpuPlane<R>,
+        tile_w: u32,
+        tile_h: u32,
+    ) -> GpuBlocks<R> {
+        assert!(plane.width % tile_w == 0, "plane width {} not multiple of tile_w {tile_w}", plane.width);
+        assert!(plane.height % tile_h == 0, "plane height {} not multiple of tile_h {tile_h}", plane.height);
+        let blocks_per_row = plane.width / tile_w;
+        let blocks_per_col = plane.height / tile_h;
+        let num_blocks = blocks_per_row * blocks_per_col;
+        let coeffs_per_block = tile_w * tile_h;
+        let n_out = (num_blocks as usize) * (coeffs_per_block as usize);
+        let h_out = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_out]));
+        gather_blocks::<R>(
+            self.client_ref(),
+            plane.handle.clone(),
+            h_out.clone(),
+            plane.n_pixels(),
+            n_out,
+            plane.width,
+            blocks_per_row,
+            tile_w,
+            tile_h,
+        );
+        GpuBlocks {
+            handle: h_out,
+            num_blocks,
+            coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Inverse of [`Self::gather_blocks_persistent`]: scatter a per-block
+    /// buffer back into a spatial `GpuPlane`. Reverses the layout
+    /// transformation; useful for putting reconstructed IDCT output
+    /// back into a plane shape.
+    pub fn scatter_blocks_persistent(
+        &self,
+        blocks: &GpuBlocks<R>,
+        width: u32,
+        height: u32,
+        tile_w: u32,
+        tile_h: u32,
+    ) -> GpuPlane<R> {
+        assert!(width % tile_w == 0);
+        assert!(height % tile_h == 0);
+        assert_eq!(blocks.coeffs_per_block, tile_w * tile_h);
+        let blocks_per_row = width / tile_w;
+        let blocks_per_col = height / tile_h;
+        assert_eq!(blocks.num_blocks, blocks_per_row * blocks_per_col);
+        let n_plane = (width as usize) * (height as usize);
+        let h_out = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_plane]));
+        scatter_blocks::<R>(
+            self.client_ref(),
+            blocks.handle.clone(),
+            h_out.clone(),
+            blocks.total_floats(),
+            n_plane,
+            width,
+            blocks_per_row,
+            tile_w,
+            tile_h,
+        );
+        GpuPlane {
+            handle: h_out,
+            width,
+            height,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Persistent-API mask1x1 field on the Y channel.
     pub fn mask1x1_persistent(&self, y: &GpuPlane<R>) -> GpuPlane<R> {
         let n = y.n_pixels();
@@ -899,6 +988,63 @@ mod tests {
             max_err = max_err.max((input[i] - recon_host[i]).abs());
         }
         assert!(max_err < 5e-4, "DCT32x32 persistent roundtrip drift: {max_err:.3e}");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gather_scatter_roundtrip() {
+        // Gather a 16×16 plane into per-8×8 blocks then scatter back
+        // → bit-exact roundtrip.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let w = 16_u32;
+        let h = 16_u32;
+        let n = (w * h) as usize;
+        let plane_data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.013).collect();
+        let plane = enc.upload_plane(&plane_data, w, h);
+        let blocks = enc.gather_blocks_persistent(&plane, 8, 8);
+        // 16x16 = 4 blocks of 8x8.
+        assert_eq!(blocks.num_blocks(), 4);
+        assert_eq!(blocks.coeffs_per_block(), 64);
+        let plane2 = enc.scatter_blocks_persistent(&blocks, w, h, 8, 8);
+        let back = enc.download_plane(&plane2);
+        assert_eq!(back, plane_data, "gather→scatter must be bit-exact");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gather_layout_correctness() {
+        // Verify the gather places pixels in the expected per-block order.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // Small 8x8 single-block test: gather should produce identical
+        // per-block buffer because there's only one 8×8 block.
+        let plane_data: Vec<f32> = (0..64).map(|i| i as f32).collect();
+        let plane = enc.upload_plane(&plane_data, 8, 8);
+        let blocks = enc.gather_blocks_persistent(&plane, 8, 8);
+        let host = enc.download_blocks(&blocks);
+        assert_eq!(host, plane_data);
+
+        // Now 16×8 (2 blocks of 8×8 in a row): block 0 should be the
+        // first 8 columns, block 1 the second 8 columns.
+        let mut p2 = vec![0.0_f32; 16 * 8];
+        for y in 0..8 {
+            for x in 0..16 {
+                p2[y * 16 + x] = (y * 16 + x) as f32;
+            }
+        }
+        let plane2 = enc.upload_plane(&p2, 16, 8);
+        let blocks2 = enc.gather_blocks_persistent(&plane2, 8, 8);
+        assert_eq!(blocks2.num_blocks(), 2);
+        let host2 = enc.download_blocks(&blocks2);
+        // Block 0 row 0: pixels p2[0..8] = 0..8.
+        for x in 0..8 {
+            assert_eq!(host2[x], x as f32);
+        }
+        // Block 1 row 0: pixels p2[8..16] = 8..16.
+        for x in 0..8 {
+            assert_eq!(host2[64 + x], (8 + x) as f32);
+        }
     }
 
     #[cfg(feature = "cuda")]

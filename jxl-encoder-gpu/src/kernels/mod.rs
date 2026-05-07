@@ -17,6 +17,7 @@ pub mod entropy;
 pub mod epf;
 pub mod gab;
 pub mod gaborish;
+pub mod gather;
 pub mod mask1x1;
 pub mod pixel_loss;
 pub mod quantize;
