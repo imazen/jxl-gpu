@@ -29,7 +29,6 @@
 //! The clamping to i8 happens here (the GPU returns i32 for runtime
 //! convenience).
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use cubecl::Runtime;

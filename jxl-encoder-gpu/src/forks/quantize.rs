@@ -35,7 +35,6 @@
 //! - Error diffusion in zigzag order — stay on CPU (libjxl never
 //!   uses ED in QuantizeBlockAC anyway, despite accepting the param)
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use cubecl::Runtime;
@@ -127,7 +126,7 @@ pub fn quantize_dct8_xyb_gpu<R: Runtime>(
 /// care about the actual quant matrix.
 #[doc(hidden)]
 pub fn unit_weights(num_blocks: usize) -> Vec<f32> {
-    vec![1.0_f32; num_blocks * 64]
+    alloc::vec![1.0_f32; num_blocks * 64]
 }
 
 #[cfg(test)]
