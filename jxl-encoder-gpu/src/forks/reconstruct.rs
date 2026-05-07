@@ -65,6 +65,89 @@ pub fn dequant_dc_channel(quant_dc: f32, quant_dc_y: f32, channel: usize, scale_
     (quant_dc + quant_dc_y * dc_cfl_factor) / inv_factor
 }
 
+/// `DCT_RESAMPLE_SCALE_32_TO_4[i]` — scale factors for the 4-point
+/// resample used by the DC-from-DCT32 forward operation.
+/// Bit-for-bit from upstream.
+pub const DCT_RESAMPLE_SCALE_32_TO_4: [f32; 4] =
+    [1.0, 0.974_886_8, 0.901_764_2, 0.787_054_9];
+
+/// In-place 4-point DCT (libjxl `dct1d_4`). Pure scalar, used by the
+/// DCT32 LLF restoration.
+fn dct1d_4(mem: &mut [f32]) {
+    const SQRT2: f32 = 1.414_213_5;
+    const WC4: [f32; 2] = [0.541_196_1, 1.306_563_0];
+    let (a, b, c, d) = (mem[0], mem[1], mem[2], mem[3]);
+    let t0 = a + d;
+    let t1 = b + c;
+    let t2 = a - d;
+    let t3 = b - c;
+    let u0 = t0 + t1;
+    let u1 = t0 - t1;
+    let v0 = t2 * WC4[0];
+    let v1 = t3 * WC4[1];
+    let w0 = v0 + v1;
+    let w1 = v0 - v1;
+    let b0 = SQRT2 * w0 + w1;
+    mem[0] = u0;
+    mem[1] = b0;
+    mem[2] = u1;
+    mem[3] = w1;
+}
+
+/// Restore the 4×4 LLF coefficients of a DCT32×32 block from the 4×4
+/// stored DC grid. Mirrors upstream `restore_llf_from_dc` for
+/// `RAW_STRATEGY_DCT32X32` (reconstruct.rs lines 600-641).
+///
+/// `dc_grid[iy * 4 + ix]` is the dequantized DC value at sub-block
+/// `(iy, ix)` within the 4×4 region the DCT32×32 covers (already
+/// produced by [`dequant_dc_channel`] for each of `(by..by+4, bx..bx+4)`).
+///
+/// Output layout: returns `[f32; 16]` ordered to be written at
+/// coefficient positions `coeffs[iy * 32 + ix]` for `iy, ix in 0..4`.
+/// The caller is responsible for placing the 16 values at the right
+/// positions in the larger 32×32 coefficient buffer.
+///
+/// Math (inverse of `dc_from_dct_32x32`):
+/// ```text
+///   Forward: scale + 4×4 IDCT (idct1d_4 on rows, transpose,
+///            idct1d_4 on rows). The 4×4 IDCT is the inverse of
+///            our 4-point DCT divided by 4 (libjxl IDCT
+///            normalization).
+///   Inverse: forward 4-point DCT on rows, transpose, forward
+///            4-point DCT on rows, then divide by (scale * 16).
+/// ```
+/// where `scale = DCT_RESAMPLE_SCALE_32_TO_4[iy] *
+///                DCT_RESAMPLE_SCALE_32_TO_4[ix]`.
+pub fn restore_llf_dct32x32(dc_grid: [f32; 16]) -> [f32; 16] {
+    let mut block = dc_grid;
+    // Forward 4pt DCT on rows.
+    dct1d_4(&mut block[0..4]);
+    dct1d_4(&mut block[4..8]);
+    dct1d_4(&mut block[8..12]);
+    dct1d_4(&mut block[12..16]);
+    // Transpose 4×4.
+    let mut transposed = [0.0_f32; 16];
+    for iy in 0..4 {
+        for ix in 0..4 {
+            transposed[ix * 4 + iy] = block[iy * 4 + ix];
+        }
+    }
+    // Forward 4pt DCT on rows.
+    dct1d_4(&mut transposed[0..4]);
+    dct1d_4(&mut transposed[4..8]);
+    dct1d_4(&mut transposed[8..12]);
+    dct1d_4(&mut transposed[12..16]);
+    // Apply per-position scale + 1/16 normalization.
+    let mut out = [0.0_f32; 16];
+    for iy in 0..4 {
+        for ix in 0..4 {
+            let scale = DCT_RESAMPLE_SCALE_32_TO_4[iy] * DCT_RESAMPLE_SCALE_32_TO_4[ix];
+            out[iy * 4 + ix] = transposed[iy * 4 + ix] / (scale * 16.0);
+        }
+    }
+    out
+}
+
 /// Restore the 2 LLF coefficients of a DCT16×8 or DCT8×16 block from
 /// the 2 stored DC values. Mirrors upstream
 /// `restore_llf_from_dc` for `RAW_STRATEGY_DCT16X8` /
@@ -456,6 +539,31 @@ mod tests {
         let [r0, r1] = restore_llf_dct16x8_or_8x16(dc0, dc1);
         assert!((r0 - llf0).abs() < 1e-5, "got {r0} expected {llf0}");
         assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
+    }
+
+    #[test]
+    fn test_restore_llf_dct32x32_zero_in_zero_out() {
+        let r = restore_llf_dct32x32([0.0; 16]);
+        for &v in &r {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_restore_llf_dct32x32_constant_dc() {
+        // dc_grid = constant c. Forward 4-pt DCT of [c,c,c,c] is
+        // [4c, 0, 0, 0] (DC tap = sum, others zero by symmetry).
+        // Per-row → block = [[4c,0,0,0],[4c,0,0,0],...]. Transpose →
+        // [[4c,4c,4c,4c],[0,...],[0,...],[0,...]]. Forward 4-pt DCT
+        // of row 0 [4c,4c,4c,4c] → [16c,0,0,0]; rows 1..3 stay zero.
+        // After / (scale * 16): out[0] = 16c / (1*1*16) = c, others 0
+        // (or scaled by 0).
+        let c = 0.5_f32;
+        let r = restore_llf_dct32x32([c; 16]);
+        assert!((r[0] - c).abs() < 1e-5);
+        for i in 1..16 {
+            assert!(r[i].abs() < 1e-5, "pos {i}: got {} expected 0", r[i]);
+        }
     }
 
     #[test]
