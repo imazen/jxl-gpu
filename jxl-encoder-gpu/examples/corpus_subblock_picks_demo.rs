@@ -42,7 +42,9 @@ fn main() {
         compute_cost_grid_dct16x8_single_channel, compute_cost_grid_dct16x16_single_channel,
         compute_cost_grid_identity_single_channel, select_partitions_16x16_full,
     };
-    use jxl_encoder_gpu::quant_weights::{dct8_weights_per_channel, replicate_weights};
+    use jxl_encoder_gpu::quant_weights::{
+        dct8_weights_per_channel, dct16x16_weights, dct16x8_weights, replicate_weights,
+    };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
     let client = <Backend as cubecl::Runtime>::client(&device);
@@ -185,20 +187,13 @@ fn main() {
         let y_8x16 = repack_8x16(&xy);
 
         let weights8 = replicate_weights(&wy_per, nb8);
-        // Mock weights for non-DCT8 grids (no public dct16/32 weight
-        // helpers yet). Same shape as strategy_cost_comparison_demo.
-        let mk_w = |size: usize, side: usize| {
-            let mut w = vec![1.0f32; size];
-            for i in 0..size {
-                let r = (i / side) as f32;
-                let c = (i % side) as f32;
-                w[i] = 1.0 / (50.0 + 200.0 * (r + c));
-            }
-            w
-        };
-        let weights16 = replicate_weights(&mk_w(256, 16), nb16);
-        let weights16x8 = replicate_weights(&mk_w(128, 8), nb_16x8);
-        let weights8x16 = replicate_weights(&mk_w(128, 16), nb_8x16);
+        // Real DCT16x16 / DCT16x8 / DCT8x16 weights via quant_weights —
+        // single-channel cost grids use the Y-channel slices.
+        let dct16_all = dct16x16_weights();
+        let weights16 = replicate_weights(&dct16_all[256..512], nb16);
+        let dct16x8_all = dct16x8_weights();
+        let weights16x8 = replicate_weights(&dct16x8_all[128..256], nb_16x8);
+        let weights8x16 = replicate_weights(&dct16x8_all[128..256], nb_8x16);
         let qac8 = vec![1.7f32; nb8];
         let qac16 = vec![1.7f32; nb16];
         let qac_16x8 = vec![1.7f32; nb_16x8];
