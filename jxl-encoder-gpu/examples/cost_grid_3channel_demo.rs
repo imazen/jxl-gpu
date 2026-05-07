@@ -30,6 +30,7 @@ fn main() {
     use jxl_encoder_gpu::forks::adaptive_quant::compute_mask1x1_gpu;
     use jxl_encoder_gpu::pipeline::{
         compute_cost_grid_dct8_single_channel, compute_cost_grid_dct8_xyb,
+        compute_cost_grid_dct32x32_xyb,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -184,5 +185,91 @@ fn main() {
         eprintln!("\n✗ Cost grid distribution unexpectedly flat — check input?");
         std::process::exit(1);
     }
-    println!("\n✓ Both cost grids produced varying costs on real content.");
+    println!("\n✓ DCT8 cost grids (proxy + 3-channel) produced varying costs on real content.");
+
+    // ---- DCT32x32 3-channel (per-region) ----
+    // Repack each XYB plane into 32x32 region layout (1024 floats each).
+    let xb32 = xb_blocks / 4;
+    let yb32 = yb_blocks / 4;
+    let nb32 = xb32 * yb32;
+    let repack32 = |plane: &[f32]| {
+        let mut out = vec![0.0f32; nb32 * 1024];
+        for ry in 0..yb32 {
+            for rx in 0..xb32 {
+                for ly in 0..32 {
+                    for lx in 0..32 {
+                        out[(ry * xb32 + rx) * 1024 + ly * 32 + lx] =
+                            plane[(ry * 32 + ly) * (w as usize) + (rx * 32 + lx)];
+                    }
+                }
+            }
+        }
+        out
+    };
+    let bx32 = repack32(&xx);
+    let by32 = repack32(&xy);
+    let bb32 = repack32(&xb);
+    let mut wts32 = vec![1.0f32; 1024];
+    for i in 0..1024 {
+        wts32[i] = 1.0 + 0.5 * (i as f32 / 1024.0);
+    }
+    let wx32: Vec<f32> = wts32.iter().map(|w| w * 0.6).collect();
+    let wy32 = wts32.clone();
+    let wb32: Vec<f32> = wts32.iter().map(|w| w * 1.3).collect();
+    let replicate32 = |per: &[f32]| {
+        let mut out = vec![0.0f32; nb32 * per.len()];
+        for k in 0..nb32 {
+            out[k * per.len()..(k + 1) * per.len()].copy_from_slice(per);
+        }
+        out
+    };
+    let qac32 = vec![1.7f32; nb32];
+    let cg32 = compute_cost_grid_dct32x32_xyb::<Backend>(
+        &client,
+        client.create_from_slice(f32::as_bytes(&bx32)),
+        client.create_from_slice(f32::as_bytes(&by32)),
+        client.create_from_slice(f32::as_bytes(&bb32)),
+        client.create_from_slice(f32::as_bytes(&replicate32(&wx32))),
+        client.create_from_slice(f32::as_bytes(&replicate32(&wy32))),
+        client.create_from_slice(f32::as_bytes(&replicate32(&wb32))),
+        client.create_from_slice(f32::as_bytes(&qac32)),
+        client.create_from_slice(f32::as_bytes(&qac32)),
+        client.create_from_slice(f32::as_bytes(&qac32)),
+        client.create_from_slice(f32::as_bytes(&thr_xb[..])),
+        client.create_from_slice(f32::as_bytes(&thr_y[..])),
+        client.create_from_slice(f32::as_bytes(&thr_xb[..])),
+        client.create_from_slice(f32::as_bytes(&mask1x1)),
+        xb32 as u32,
+        yb32 as u32,
+    );
+    let costs32_raw: Vec<f32> = {
+        let bytes = client.read_one(cg32.costs).expect("dct32 xyb");
+        f32::from_bytes(&bytes).to_vec()
+    };
+    // Aggregate 16 sub-cells per 32x32 region.
+    let xb_sub = xb32 * 4;
+    let mut costs32 = vec![0.0f32; nb32];
+    for ry in 0..yb32 {
+        for rx in 0..xb32 {
+            let by = ry * 4;
+            let bx = rx * 4;
+            let mut s = 0.0_f32;
+            for dy in 0..4 {
+                for dx in 0..4 {
+                    s += costs32_raw[(by + dy) * xb_sub + bx + dx];
+                }
+            }
+            costs32[ry * xb32 + rx] = s;
+        }
+    }
+    let (mn, me, mx, sd) = stats(&costs32);
+    println!(
+        "\nDCT32x32 (3-ch XYB+mask):  min={mn:.4}  mean={me:.4}  max={mx:.4}  std={sd:.4}  (std/mean={:.3})",
+        sd / me.max(1e-9)
+    );
+    if sd / me.max(1e-9) < 0.05 {
+        eprintln!("✗ DCT32x32 cost grid distribution unexpectedly flat");
+        std::process::exit(1);
+    }
+    println!("✓ DCT32x32 3-channel cost grid produced varying costs on real content.");
 }
