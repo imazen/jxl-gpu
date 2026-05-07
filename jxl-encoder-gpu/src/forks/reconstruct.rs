@@ -43,6 +43,99 @@ use crate::encoder::GpuEncoder;
 /// the DC override step of `reconstruct_xyb_impl`.
 pub const INV_DC_QUANT: [f32; 3] = [4096.0, 512.0, 256.0];
 
+/// `DCT_RESAMPLE_SCALE_16_TO_2[i]` — scale factors for the 2-point
+/// resample used by the DC-from-DCT16 forward operation. Bit-for-bit
+/// from upstream `jxl_encoder::vardct::dct::constants::DCT_RESAMPLE_SCALE_16_TO_2`.
+pub const DCT_RESAMPLE_SCALE_16_TO_2: [f32; 2] = [1.000_000_000_0, 0.901_764_2];
+
+/// Dequantize a single channel's DC value with the channel-specific
+/// CfL contribution from Y. Mirrors the inline `dequant_dc` closure in
+/// upstream's `restore_llf_from_dc`.
+///
+/// - `channel == 0` (X) or `channel == 1` (Y): no CfL → returns
+///   `quant_dc / inv_factor`.
+/// - `channel == 2` (B): adds `quant_dc_y * 0.5 / inv_factor` (the
+///   fixed B-channel DC-level CfL contribution).
+///
+/// `inv_factor = INV_DC_QUANT[channel] * scale_dc`.
+#[inline]
+pub fn dequant_dc_channel(quant_dc: f32, quant_dc_y: f32, channel: usize, scale_dc: f32) -> f32 {
+    let dc_cfl_factor: f32 = if channel == 2 { 0.5 } else { 0.0 };
+    let inv_factor = INV_DC_QUANT[channel] * scale_dc;
+    (quant_dc + quant_dc_y * dc_cfl_factor) / inv_factor
+}
+
+/// Restore the 2 LLF coefficients of a DCT16×8 or DCT8×16 block from
+/// the 2 stored DC values. Mirrors upstream
+/// `restore_llf_from_dc` for `RAW_STRATEGY_DCT16X8` /
+/// `RAW_STRATEGY_DCT8X16` (reconstruct.rs lines 546-570).
+///
+/// Inputs:
+/// - `dc0`, `dc1`: the two stored DC values (already dequantized via
+///   [`dequant_dc_channel`]). For DCT16×8 these come from the
+///   vertically-adjacent pair `(by, by+1)`; for DCT8×16 the
+///   horizontally-adjacent pair `(bx, bx+1)`.
+///
+/// Returns `[llf0, llf1]` as a `[f32; 2]` ready to be written into
+/// `coeffs[0]` and `coeffs[1]` of the rectangular coefficient block.
+///
+/// Math (inverse of `dc_from_dct_16x8` / `dc_from_dct_8x16`):
+/// ```text
+///   Forward: dc0 = llf0 * s0 + llf1 * s1
+///            dc1 = llf0 * s0 - llf1 * s1
+///   Inverse: llf0 = (dc0 + dc1) / (2 * s0)
+///            llf1 = (dc0 - dc1) / (2 * s1)
+/// ```
+/// where `s0 = DCT_RESAMPLE_SCALE_16_TO_2[0] = 1.0` and
+/// `s1 = DCT_RESAMPLE_SCALE_16_TO_2[1] ≈ 0.9018`. The factor 2 comes
+/// from the 2-point Hadamard's `H * H = 2 * I` self-product.
+#[inline]
+pub fn restore_llf_dct16x8_or_8x16(dc0: f32, dc1: f32) -> [f32; 2] {
+    let s0 = DCT_RESAMPLE_SCALE_16_TO_2[0];
+    let s1 = DCT_RESAMPLE_SCALE_16_TO_2[1];
+    [(dc0 + dc1) / (2.0 * s0), (dc0 - dc1) / (2.0 * s1)]
+}
+
+/// Restore the 2×2 LLF coefficients of a DCT16×16 block from the
+/// 2×2 stored DC grid. Mirrors upstream `restore_llf_from_dc` for
+/// `RAW_STRATEGY_DCT16X16` (reconstruct.rs lines 572-598).
+///
+/// `dc_grid[iy * 2 + ix]` is the dequantized DC value at sub-block
+/// `(iy, ix)` within the 2×2 region the DCT16×16 covers (already
+/// produced by [`dequant_dc_channel`] for each of `(by..by+2, bx..bx+2)`).
+///
+/// Returns `[llf00, llf01, llf10, llf11]` to be written at coefficient
+/// positions `[0, 1, 16, 17]` of the 16×16 coefficient block.
+///
+/// Math (inverse of `dc_from_dct_16x16` — 2-point row+column DCT
+/// followed by SCALE_16_TO_2 scaling, where the 2-point DCT is
+/// Hadamard with `H * H = 4 * I` for the 2×2):
+/// ```text
+///   h00 = dc00 + dc01 + dc10 + dc11
+///   h01 = dc00 + dc01 - dc10 - dc11
+///   h10 = dc00 - dc01 + dc10 - dc11
+///   h11 = dc00 - dc01 - dc10 + dc11
+///   llf00 = h00 / (4 * s0 * s0)
+///   llf01 = h01 / (4 * s0 * s1)
+///   llf10 = h10 / (4 * s1 * s0)
+///   llf11 = h11 / (4 * s1 * s1)
+/// ```
+#[inline]
+pub fn restore_llf_dct16x16(dc_grid: [f32; 4]) -> [f32; 4] {
+    let h00 = dc_grid[0] + dc_grid[1] + dc_grid[2] + dc_grid[3];
+    let h01 = dc_grid[0] + dc_grid[1] - dc_grid[2] - dc_grid[3];
+    let h10 = dc_grid[0] - dc_grid[1] + dc_grid[2] - dc_grid[3];
+    let h11 = dc_grid[0] - dc_grid[1] - dc_grid[2] + dc_grid[3];
+    let s0 = DCT_RESAMPLE_SCALE_16_TO_2[0];
+    let s1 = DCT_RESAMPLE_SCALE_16_TO_2[1];
+    [
+        h00 / (4.0 * s0 * s0),
+        h01 / (4.0 * s0 * s1),
+        h10 / (4.0 * s1 * s0),
+        h11 / (4.0 * s1 * s1),
+    ]
+}
+
 /// DC restoration for the DCT8 fast path of upstream's
 /// `reconstruct_xyb`. Pure scalar — bit-for-bit copy of upstream
 /// (reconstruct.rs lines 297-317).
@@ -330,6 +423,61 @@ pub fn xyb_to_linear_rgb_gpu<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dequant_dc_channel_x_y_no_cfl() {
+        // X / Y channels: no CfL contribution. Output = quant_dc / inv_factor.
+        // X: inv_factor = 4096 * 0.5 = 2048; 100 / 2048 = 0.04883
+        let v = dequant_dc_channel(100.0, 999.0, 0, 0.5);
+        assert!((v - (100.0 / 2048.0)).abs() < 1e-6);
+        // Y: inv_factor = 512 * 1.0 = 512; 50 / 512 = 0.09766
+        let v = dequant_dc_channel(50.0, 999.0, 1, 1.0);
+        assert!((v - (50.0 / 512.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dequant_dc_channel_b_includes_y_cfl() {
+        // B: dc_cfl_factor = 0.5. inv_factor = 256.
+        // (10 + 100 * 0.5) / 256 = 60 / 256 = 0.234375
+        let v = dequant_dc_channel(10.0, 100.0, 2, 1.0);
+        assert!((v - 0.234_375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_restore_llf_dct16x8_roundtrip() {
+        // Forward dc_from_dct_16x8 followed by inverse should be identity.
+        let s0 = DCT_RESAMPLE_SCALE_16_TO_2[0];
+        let s1 = DCT_RESAMPLE_SCALE_16_TO_2[1];
+        // Pick arbitrary llf0/llf1 values, project forward to dc0/dc1, then invert.
+        let llf0 = 1.7_f32;
+        let llf1 = -0.4_f32;
+        let dc0 = llf0 * s0 + llf1 * s1;
+        let dc1 = llf0 * s0 - llf1 * s1;
+        let [r0, r1] = restore_llf_dct16x8_or_8x16(dc0, dc1);
+        assert!((r0 - llf0).abs() < 1e-5, "got {r0} expected {llf0}");
+        assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
+    }
+
+    #[test]
+    fn test_restore_llf_dct16x16_zero_dc_yields_zero_llf() {
+        // All zeros in → all zeros out.
+        let r = restore_llf_dct16x16([0.0; 4]);
+        for &v in &r {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_restore_llf_dct16x16_constant_dc_yields_dc_only() {
+        // dc_grid = [c, c, c, c] → h00 = 4c, h01=h10=h11=0.
+        // llf00 = 4c / (4 * s0^2) = c (since s0 = 1.0)
+        let c = 0.5_f32;
+        let r = restore_llf_dct16x16([c, c, c, c]);
+        assert!((r[0] - c).abs() < 1e-6);
+        assert!(r[1].abs() < 1e-6);
+        assert!(r[2].abs() < 1e-6);
+        assert!(r[3].abs() < 1e-6);
+    }
 
     #[test]
     fn test_restore_dct8_dc_override_y() {
