@@ -522,6 +522,44 @@ impl<R: Runtime> LossyEncoder<R> {
     /// downloads the reconstructed RGB at the end.
     /// Pipeline body. Operates on already-padded planes (dimensions
     /// `padded_width × padded_height`); returns padded reconstruction
+    /// Run the pipeline with a per-block adaptive `qac_qm` field (one
+    /// scalar per padded block in raster order). Returns reconstructed
+    /// padded RGB.
+    ///
+    /// Use this when you want adaptive quantization — e.g., flatten
+    /// quant on smooth regions and tighten it on detail. The `aq_field`
+    /// length must equal `num_blocks` (= `padded_w/8 * padded_h/8`).
+    pub fn encode_one_adaptive(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        aq_field: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        assert_eq!(
+            aq_field.len(),
+            self.num_blocks as usize,
+            "aq_field length {} != num_blocks {}",
+            aq_field.len(),
+            self.num_blocks
+        );
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (pw, ph) = (self.padded_width as usize, self.padded_height as usize);
+        let r_pad = pad_to_alignment(r, w, h, pw, ph);
+        let g_pad = pad_to_alignment(g, w, h, pw, ph);
+        let b_pad = pad_to_alignment(b, w, h, pw, ph);
+        let g_r = enc.upload_plane(&r_pad, self.padded_width, self.padded_height);
+        let g_g = enc.upload_plane(&g_pad, self.padded_width, self.padded_height);
+        let g_b = enc.upload_plane(&b_pad, self.padded_width, self.padded_height);
+        let (rec_r, rec_g, rec_b) = self.run_pipeline_with_qac(enc, &g_r, &g_g, &g_b, aq_field);
+        (
+            crop_to_original(&rec_r, pw, w, h),
+            crop_to_original(&rec_g, pw, w, h),
+            crop_to_original(&rec_b, pw, w, h),
+        )
+    }
+
     /// (caller crops back to original).
     fn run_pipeline(
         &self,
@@ -532,6 +570,19 @@ impl<R: Runtime> LossyEncoder<R> {
         qac_qm: f32,
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let qac_vec = vec![qac_qm; self.num_blocks as usize];
+        self.run_pipeline_with_qac(enc, g_r, g_g, g_b, &qac_vec)
+    }
+
+    /// Per-block adaptive variant of `run_pipeline`. Takes a precomputed
+    /// per-block qac_qm field instead of broadcasting a scalar.
+    fn run_pipeline_with_qac(
+        &self,
+        enc: &GpuEncoder<R>,
+        g_r: &GpuPlane<R>,
+        g_g: &GpuPlane<R>,
+        g_b: &GpuPlane<R>,
+        qac_vec: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let xf = vec![0.0_f32; self.num_blocks as usize];
         let bf = vec![0.0_f32; self.num_blocks as usize];
 
@@ -546,11 +597,11 @@ impl<R: Runtime> LossyEncoder<R> {
         let coeffs_y = enc.dct_8x8_wide_persistent(&by_g);
         let coeffs_b = enc.dct_8x8_wide_persistent(&bb_g);
         let q_x =
-            enc.quantize_dct8_persistent(&coeffs_x, &self.weights_x, &qac_vec, &self.thresholds_x);
+            enc.quantize_dct8_persistent(&coeffs_x, &self.weights_x, qac_vec, &self.thresholds_x);
         let q_y =
-            enc.quantize_dct8_persistent(&coeffs_y, &self.weights_y, &qac_vec, &self.thresholds_y);
+            enc.quantize_dct8_persistent(&coeffs_y, &self.weights_y, qac_vec, &self.thresholds_y);
         let q_b =
-            enc.quantize_dct8_persistent(&coeffs_b, &self.weights_b, &qac_vec, &self.thresholds_b);
+            enc.quantize_dct8_persistent(&coeffs_b, &self.weights_b, qac_vec, &self.thresholds_b);
         let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
             &q_x,
             &q_y,
@@ -558,9 +609,9 @@ impl<R: Runtime> LossyEncoder<R> {
             &self.weights_x,
             &self.weights_y,
             &self.weights_b,
-            &qac_vec,
-            &qac_vec,
-            &qac_vec,
+            qac_vec,
+            qac_vec,
+            qac_vec,
             &xf,
             &bf,
         );
@@ -688,6 +739,31 @@ mod tests {
         assert_eq!(outputs.len(), 3);
         for out in &outputs {
             assert_eq!(out.len(), n * 3);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_lossy_encoder_adaptive_qac() {
+        // Per-block adaptive qac field — different qac per block.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy = LossyEncoder::new(&enc, 32, 16);
+        let n = 32 * 16;
+        let nb = (32 / 8) * (16 / 8); // 8 blocks
+        let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.5 * (i as f32 / n as f32)).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * (i as f32 / n as f32)).collect();
+        // Half blocks get gentle quant (qac=1.5), half get aggressive (qac=0.2).
+        let aq_field: Vec<f32> = (0..nb)
+            .map(|i| if i < nb / 2 { 1.5 } else { 0.2 })
+            .collect();
+        let (rr, gg, bb) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &aq_field);
+        assert_eq!(rr.len(), n);
+        assert_eq!(gg.len(), n);
+        assert_eq!(bb.len(), n);
+        for v in rr.iter().chain(&gg).chain(&bb) {
+            assert!(v.is_finite());
         }
     }
 
