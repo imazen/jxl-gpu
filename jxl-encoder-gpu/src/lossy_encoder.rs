@@ -217,6 +217,46 @@ impl<R: Runtime> LossyEncoder<R> {
         )
     }
 
+    /// sRGB U8 convenience wrapper for [`Self::encode_one`].
+    ///
+    /// Takes interleaved RGB U8 (`width * height * 3` bytes), converts
+    /// to linear f32 internally, runs the lossy roundtrip, returns
+    /// reconstructed RGB U8 (linearized output clamped + sRGB-encoded
+    /// + rounded). Saves the caller the per-channel sRGB↔linear
+    /// boilerplate.
+    ///
+    /// sRGB transfer function: gamma 2.4 (matches the simple model
+    /// used elsewhere in the repo). For the IEC 61966-2-1 piecewise
+    /// curve, deinterleave + linearize on the host before calling
+    /// `encode_one` directly with f32 planes.
+    pub fn encode_one_srgb_u8(
+        &self,
+        enc: &GpuEncoder<R>,
+        rgb: &[u8],
+        qac_qm: f32,
+    ) -> Vec<u8> {
+        let n = (self.width as usize) * (self.height as usize);
+        assert_eq!(rgb.len(), n * 3, "rgb.len() must be width*height*3");
+        let to_linear = |c: u8| (c as f32 / 255.0).powf(2.4);
+        let mut r = Vec::with_capacity(n);
+        let mut g = Vec::with_capacity(n);
+        let mut b = Vec::with_capacity(n);
+        for chunk in rgb.chunks_exact(3) {
+            r.push(to_linear(chunk[0]));
+            g.push(to_linear(chunk[1]));
+            b.push(to_linear(chunk[2]));
+        }
+        let (rr, gg, bb) = self.encode_one(enc, &r, &g, &b, qac_qm);
+        let to_srgb_u8 = |v: f32| (v.clamp(0.0, 1.0).powf(1.0 / 2.4) * 255.0).round() as u8;
+        let mut out = Vec::with_capacity(n * 3);
+        for i in 0..n {
+            out.push(to_srgb_u8(rr[i]));
+            out.push(to_srgb_u8(gg[i]));
+            out.push(to_srgb_u8(bb[i]));
+        }
+        out
+    }
+
     /// Run the full pipeline at multiple `qac_qm` settings on the same
     /// input. Input uploaded ONCE; all subsequent iterations re-use the
     /// uploaded handles.
@@ -341,6 +381,41 @@ mod tests {
         for v in rr.iter().chain(&gg).chain(&bb) {
             assert!(v.is_finite());
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_lossy_encoder_srgb_u8() {
+        // sRGB U8 convenience wrapper executes end-to-end on synthetic
+        // RGB U8 input. Doesn't assert on reconstruction quality — at
+        // qac=4 on adversarial high-freq sawtooth input, DCT8 produces
+        // large errors. The point is to verify the API contract:
+        // input length, output length, no panic, all output bytes
+        // are valid u8 (which they always are by construction).
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy = LossyEncoder::new(&enc, 64, 48);
+        let n = 64 * 48;
+        // Smooth gradient input (low freq → bounded reconstruction).
+        let mut rgb = Vec::with_capacity(n * 3);
+        for y in 0..48 {
+            for x in 0..64 {
+                rgb.push((x * 4) as u8);
+                rgb.push((y * 5) as u8);
+                rgb.push(((x + y) * 2) as u8);
+            }
+        }
+        let out = lossy.encode_one_srgb_u8(&enc, &rgb, 1.0);
+        assert_eq!(out.len(), n * 3);
+        // Smooth gradient at qac=1 should reconstruct within ~32 (LSBs).
+        let mut max_diff = 0_i32;
+        for i in 0..(n * 3) {
+            max_diff = max_diff.max((rgb[i] as i32 - out[i] as i32).abs());
+        }
+        assert!(
+            max_diff < 64,
+            "smooth-gradient reconstruction max byte diff = {max_diff}, expected < 64 at qac=1"
+        );
     }
 
     #[cfg(feature = "cuda")]
