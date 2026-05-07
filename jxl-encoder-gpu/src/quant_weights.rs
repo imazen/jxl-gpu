@@ -23,6 +23,129 @@ pub const DCT8_PARAMS: [[f64; 6]; 3] = [
     [512.0, -2.0, -1.0, 0.0, -1.0, -2.0],    // B channel
 ];
 
+/// libjxl DCT16x8 band parameters from `quant_weights.cc:716-745`.
+/// `[X, Y, B]` × 7 bands per channel. Used for BOTH the DCT16X8 and
+/// DCT8X16 strategies (they share the rotated table — the weight
+/// generator uses `(rows=8, cols=16)`).
+pub const DCT16X8_PARAMS: [[f64; 7]; 3] = [
+    [7240.773_439_350_2, -0.7, -0.7, -0.2, -0.2, -0.2, -0.5],
+    [1448.154_687_870_04, -0.5, -0.5, -0.5, -0.2, -0.2, -0.2],
+    [506.854_140_754_517, -1.4, -0.2, -0.5, -0.5, -1.5, -3.6],
+];
+
+/// libjxl DCT32x32 band parameters from `quant_weights.cc:680-712`.
+/// `[X, Y, B]` × 8 bands per channel.
+pub const DCT32X32_PARAMS: [[f64; 8]; 3] = [
+    [
+        15718.408_309_825_19,
+        -1.025,
+        -0.98,
+        -0.9012,
+        -0.4,
+        -0.488_193_954_64,
+        -0.421_064,
+        -0.27,
+    ],
+    [
+        7305.763_681_069_598,
+        -0.804_195_821_230_640_1,
+        -0.763_303_645_748_753_9,
+        -0.556_603_799_901_114_64,
+        -0.497_853_046_588_576_26,
+        -0.436_995_926_835_124_67,
+        -0.401_808_665_262_421_09,
+        -0.273_216_831_253_580_37,
+    ],
+    [
+        3803.531_737_212_150_5,
+        -3.060_733_579_805_728,
+        -2.041_327_013_249_034_6,
+        -2.023_565_015_972_741_7,
+        -0.549_538_950_995_499_3,
+        -0.4,
+        -0.4,
+        -0.3,
+    ],
+];
+
+/// libjxl DCT16x32 band parameters from jxl-rs `quant_weights.rs:561-590`.
+/// `[X, Y, B]` × 8 bands per channel. Used for BOTH DCT32x16 and DCT16x32.
+pub const DCT16X32_PARAMS: [[f64; 8]; 3] = [
+    [
+        13844.970_764_423_006,
+        -0.971_138,
+        -0.658,
+        -0.420_26,
+        -0.227_12,
+        -0.220_6,
+        -0.226,
+        -0.6,
+    ],
+    [
+        4798.964_084_220_744_5,
+        -0.611_253_089_827_670_57,
+        -0.837_707_865_524_913_6,
+        -0.790_148_620_794_986_3,
+        -0.269_272_745_970_482_9,
+        -0.382_727_694_653_885_5,
+        -0.229_242_226_530_914_53,
+        -0.207_190_988_261_995_78,
+    ],
+    [1807.236_946_760_964_4, -1.2, -1.2, -0.7, -0.7, -0.7, -0.4, -0.5],
+];
+
+/// libjxl DCT64x64 band parameters from `quant_weights.cc:899-931`.
+/// `[X, Y, B]` × 8 bands per channel.
+pub const DCT64X64_PARAMS: [[f64; 8]; 3] = [
+    [
+        23966.166_529_844_86,
+        -1.025,
+        -0.78,
+        -0.650_12,
+        -0.190_415_740_842_864_72,
+        -0.208_193_954_64,
+        -0.421_064,
+        -0.327_338_455_358_486_71,
+    ],
+    [
+        8380.191_483_900_904,
+        -0.304_195_821_230_640_1,
+        -0.363_303_645_748_753_9,
+        -0.356_603_799_901_114_64,
+        -0.344_307_445_542_440_3,
+        -0.336_995_926_835_124_67,
+        -0.301_808_665_262_421_09,
+        -0.273_216_831_253_580_37,
+    ],
+    [4493.023_780_098_477, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
+];
+
+/// libjxl DCT32x64 band parameters from `quant_weights.cc:935-968`.
+/// `[X, Y, B]` × 8 bands per channel. Used for BOTH DCT64x32 and DCT32x64.
+pub const DCT32X64_PARAMS: [[f64; 8]; 3] = [
+    [
+        15358.898_049_332_4,
+        -1.025,
+        -0.78,
+        -0.650_12,
+        -0.190_415_740_842_864_72,
+        -0.208_193_954_64,
+        -0.421_064,
+        -0.327_338_455_358_486_71,
+    ],
+    [
+        5597.360_516_150_653,
+        -0.304_195_821_230_640_1,
+        -0.363_303_645_748_753_9,
+        -0.356_603_799_901_114_64,
+        -0.344_307_445_542_440_3,
+        -0.336_995_926_835_124_67,
+        -0.301_808_665_262_421_09,
+        -0.273_216_831_253_580_37,
+    ],
+    [2919.961_618_960_011, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
+];
+
 /// libjxl DCT16x16 band parameters from `quant_weights.cc:647-676`.
 /// `[X, Y, B]` × 7 bands per channel.
 pub const DCT16X16_PARAMS: [[f64; 7]; 3] = [
@@ -181,6 +304,75 @@ pub fn dct16x16_weights_per_channel() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     (x, y, b)
 }
 
+/// Generate DCT16x8 quant weights (8 rows × 16 cols = 128 per channel,
+/// 384 total). Same table also used for DCT8x16.
+pub fn dct16x8_weights() -> Vec<f32> {
+    generate_quant_weights_rect(
+        8,
+        16,
+        &[&DCT16X8_PARAMS[0], &DCT16X8_PARAMS[1], &DCT16X8_PARAMS[2]],
+        7,
+    )
+}
+
+/// Generate DCT32x32 quant weights (1024 per channel, 3072 total).
+pub fn dct32x32_weights() -> Vec<f32> {
+    generate_quant_weights_rect(
+        32,
+        32,
+        &[
+            &DCT32X32_PARAMS[0],
+            &DCT32X32_PARAMS[1],
+            &DCT32X32_PARAMS[2],
+        ],
+        8,
+    )
+}
+
+/// Generate DCT16x32 quant weights (16 rows × 32 cols = 512 per channel,
+/// 1536 total). Same table also used for DCT32x16.
+pub fn dct16x32_weights() -> Vec<f32> {
+    generate_quant_weights_rect(
+        16,
+        32,
+        &[
+            &DCT16X32_PARAMS[0],
+            &DCT16X32_PARAMS[1],
+            &DCT16X32_PARAMS[2],
+        ],
+        8,
+    )
+}
+
+/// Generate DCT64x64 quant weights (4096 per channel, 12288 total).
+pub fn dct64x64_weights() -> Vec<f32> {
+    generate_quant_weights_rect(
+        64,
+        64,
+        &[
+            &DCT64X64_PARAMS[0],
+            &DCT64X64_PARAMS[1],
+            &DCT64X64_PARAMS[2],
+        ],
+        8,
+    )
+}
+
+/// Generate DCT32x64 quant weights (32 rows × 64 cols = 2048 per channel,
+/// 6144 total). Same table also used for DCT64x32.
+pub fn dct32x64_weights() -> Vec<f32> {
+    generate_quant_weights_rect(
+        32,
+        64,
+        &[
+            &DCT32X64_PARAMS[0],
+            &DCT32X64_PARAMS[1],
+            &DCT32X64_PARAMS[2],
+        ],
+        8,
+    )
+}
+
 /// Convenience: per-channel DCT8 weights as 3 separate `[f32; 64]`
 /// blocks. Equivalent to slicing `dct8_weights()` into thirds.
 pub fn dct8_weights_per_channel() -> ([f32; 64], [f32; 64], [f32; 64]) {
@@ -274,6 +466,30 @@ mod tests {
         assert_eq!(direct.len(), via_generic.len());
         for i in 0..direct.len() {
             assert_eq!(direct[i], via_generic[i]);
+        }
+    }
+
+    #[test]
+    fn test_larger_weights_shapes() {
+        assert_eq!(dct16x8_weights().len(), 384);
+        assert_eq!(dct32x32_weights().len(), 3072);
+        assert_eq!(dct16x32_weights().len(), 1536);
+        assert_eq!(dct64x64_weights().len(), 12288);
+        assert_eq!(dct32x64_weights().len(), 6144);
+    }
+
+    #[test]
+    fn test_dct32x32_dc_vs_corner() {
+        // Sanity: DC (position 0) weight should be much smaller than the
+        // high-freq corner (position 1023) — encoder weights = 1/dequant.
+        let w = dct32x32_weights();
+        for c in 0..3 {
+            let dc = w[c * 1024];
+            let hf = w[c * 1024 + 1023];
+            assert!(
+                dc < hf,
+                "DCT32 channel {c}: DC={dc} should be < HF={hf}"
+            );
         }
     }
 
