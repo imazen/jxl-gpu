@@ -229,6 +229,137 @@ pub fn apply_epf_step2_gpu<R: Runtime>(
     )
 }
 
+/// Composed `compute_epf_sharpness` for the DCT8-only reconstruct
+/// path. Mirrors upstream `jxl_encoder::vardct::epf::compute_epf_sharpness`
+/// shape exactly — runs the candidate list (`[0, 4]` at high distance,
+/// `[0, 2, 7]` otherwise), applies the EPF chain per candidate using
+/// the same shared base reconstruction, computes per-block masked L2
+/// error maps, then selects via the two-pass picker.
+///
+/// Pipeline per call:
+///   1. base_recon = reconstruct_xyb_dct8_only_gpu(...)
+///   2. if enable_gaborish: gab_smooth_gpu(&mut base_recon)
+///   3. for each candidate ci in [0, 2, 7] / [0, 4]:
+///        - inv_sigma = compute_inv_sigma_map(uniform_sharpness=ci)
+///        - recon = base_recon.clone()
+///        - apply_epf_chain_gpu(&recon, inv_sigma, ...)
+///        - error_maps[ci] = block_l2_errors(original, recon, mask)
+///   4. sharpness_map = select_sharpness_two_pass(error_maps,
+///                          candidates, distance.clamp(0.5, 10.0))
+///
+/// **DCT8-only constraint**: this caller assumes every block in the
+/// image uses the DCT8 strategy (which is the common case for
+/// straightforward distance values). Mixed-strategy images need
+/// the full per-strategy IDCT dispatch + scatter still pending in
+/// `forks::reconstruct`.
+///
+/// Returns one `u8` sharpness value per 8×8 block in row-major
+/// order; values are drawn from the candidate list.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_epf_sharpness_dct8_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    original_x: &[f32],
+    original_y: &[f32],
+    original_b: &[f32],
+    quant_dc_x: &[f32],
+    quant_dc_y: &[f32],
+    quant_dc_b: &[f32],
+    quant_ac_x: &[i32],
+    quant_ac_y: &[i32],
+    quant_ac_b: &[i32],
+    weights_x_per_block: &[f32; 64],
+    weights_y_per_block: &[f32; 64],
+    weights_b_per_block: &[f32; 64],
+    qac_qm_x: &[f32],
+    qac_qm_y: &[f32],
+    qac_qm_b: &[f32],
+    x_factor: &[f32],
+    b_factor: &[f32],
+    quant_field: &[u8],
+    quant_scale: f32,
+    scale_dc: f32,
+    distance: f32,
+    epf_iters: u32,
+    enable_gaborish: bool,
+    mask1x1: &[f32],
+    xsize_blocks: usize,
+    ysize_blocks: usize,
+) -> alloc::vec::Vec<u8> {
+    use crate::forks::reconstruct::{gab_smooth_gpu, reconstruct_xyb_dct8_only_gpu};
+
+    let candidates = epf_sharpness_candidates(distance);
+    let padded_w = xsize_blocks * 8;
+    let padded_h = ysize_blocks * 8;
+    let nblocks = xsize_blocks * ysize_blocks;
+
+    debug_assert_eq!(original_x.len(), padded_w * padded_h);
+    debug_assert_eq!(original_y.len(), padded_w * padded_h);
+    debug_assert_eq!(original_b.len(), padded_w * padded_h);
+    debug_assert_eq!(mask1x1.len(), padded_w * padded_h);
+    debug_assert_eq!(quant_field.len(), nblocks);
+
+    // Step 1: base reconstruction (4 GPU launches for the DCT8-only path).
+    let mut base = reconstruct_xyb_dct8_only_gpu(
+        enc,
+        quant_dc_x, quant_dc_y, quant_dc_b,
+        quant_ac_x, quant_ac_y, quant_ac_b,
+        weights_x_per_block, weights_y_per_block, weights_b_per_block,
+        qac_qm_x, qac_qm_y, qac_qm_b,
+        x_factor, b_factor,
+        scale_dc, xsize_blocks, ysize_blocks,
+    );
+
+    // Step 2: optional gaborish smoothing (3 launches if enabled).
+    if enable_gaborish {
+        gab_smooth_gpu(enc, &mut base, padded_w, padded_h);
+    }
+
+    // Steps 3 + 4: per-candidate EPF + L2.
+    let mut error_maps: alloc::vec::Vec<alloc::vec::Vec<f32>> =
+        alloc::vec::Vec::with_capacity(candidates.len());
+    for &cand in candidates {
+        let uniform_sharpness = alloc::vec![cand; nblocks];
+        let inv_sigma = compute_inv_sigma_map(
+            quant_field,
+            &uniform_sharpness,
+            quant_scale,
+            xsize_blocks,
+            ysize_blocks,
+        );
+
+        let recon = apply_epf_chain_gpu(
+            enc,
+            &base[0], &base[1], &base[2],
+            &inv_sigma,
+            epf_iters,
+            padded_w as u32,
+            padded_h as u32,
+            xsize_blocks as u32,
+            ysize_blocks as u32,
+        );
+
+        // Per-block masked L2 — uses the existing GpuEncoder method.
+        let costs = enc.block_l2_errors(
+            original_x, original_y, original_b,
+            &recon[0], &recon[1], &recon[2],
+            mask1x1,
+            xsize_blocks as u32,
+            ysize_blocks as u32,
+            padded_w as u32,
+        );
+        error_maps.push(costs);
+    }
+
+    // Step 5: two-pass selection.
+    select_sharpness_two_pass(
+        &error_maps,
+        candidates,
+        distance,
+        xsize_blocks,
+        ysize_blocks,
+    )
+}
+
 /// EPF candidate-list selector. Mirrors upstream
 /// `compute_epf_sharpness` lines 774-778 — chooses
 /// `[0, 4]` at high distance (> 4.5) and `[0, 2, 7]` otherwise.
@@ -520,6 +651,54 @@ pub fn select_sharpness_two_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_compute_epf_sharpness_dct8_gpu_smoke() {
+        // 4×4 blocks (= 32×32 pixels), DCT8 everywhere, zero coefficients.
+        // Output must be a finite value drawn from the candidate set.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        let xb = 4_usize;
+        let yb = 4_usize;
+        let nb = xb * yb;
+        let n_pix = xb * 8 * yb * 8;
+
+        let original = alloc::vec![0.5_f32; n_pix];
+        let dc_zero = alloc::vec![0.0_f32; nb];
+        let ac_zero = alloc::vec![0_i32; nb * 64];
+        let weights_one = [1.0_f32; 64];
+        let qac_qm = alloc::vec![1.0_f32; nb];
+        let zero_factor = alloc::vec![0.0_f32; nb];
+        let quant_field = alloc::vec![128_u8; nb];
+        let mask = alloc::vec![1.0_f32; n_pix];
+
+        let sharpness = compute_epf_sharpness_dct8_gpu(
+            &enc,
+            &original, &original, &original,
+            &dc_zero, &dc_zero, &dc_zero,
+            &ac_zero, &ac_zero, &ac_zero,
+            &weights_one, &weights_one, &weights_one,
+            &qac_qm, &qac_qm, &qac_qm,
+            &zero_factor, &zero_factor,
+            &quant_field,
+            1.0,    // quant_scale
+            1.0,    // scale_dc
+            1.0,    // distance → candidates [0, 2, 7]
+            2,      // epf_iters: step 1 + step 2
+            true,   // gaborish on
+            &mask,
+            xb,
+            yb,
+        );
+        assert_eq!(sharpness.len(), nb);
+        // Every value must be drawn from the candidate set.
+        let cands = epf_sharpness_candidates(1.0);
+        for &v in &sharpness {
+            assert!(cands.contains(&v), "sharpness {v} not in {cands:?}");
+        }
+    }
 
     #[test]
     fn test_epf_sharpness_candidates_normal() {
