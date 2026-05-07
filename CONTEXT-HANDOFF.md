@@ -1,9 +1,65 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-07 (session 5 — content-driven AQ + corpus validation)
+**Last updated:** 2026-05-07 (session 6 — Phase 1 complete + full 13-strategy 3-channel cost grids)
 **Repo:** https://github.com/imazen/jxl-gpu (live, public)
-**Local:** ~/work/zen/jxl-encoder-gpu/ (124 commits on main, in sync with origin)
+**Local:** ~/work/zen/jxl-encoder-gpu/ (141 commits on main, in sync with origin)
 **Hardware verified:** RTX 5070, CUDA 13.2, jj 0.40, rustc 1.95
+
+## Session 6 highlight — Phase 1 complete + 13-strategy 3-channel cost grids
+
+Two parallel arcs landed:
+
+### Phase 1 — denoise port (Wiener 5×5 filter)
+
+`compute_mask1x1_scalar`'s missing sibling `denoise_channel` was
+listed as ❌ in PORT_STATUS — turned out the `_scalar` variant DID
+exist in `jxl-encoder-simd`. Ported to GPU with `5.96e-8 abs` parity
+on a 257×191 test (FMA-contraction noise floor).
+
+Wired into the fork pipeline: `forks::noise::denoise_xyb_gpu(enc,
+x, y, b, w, h, lut, quality_coef)` — three sequential GPU launches
+replacing the upstream `rayon::join` over CPU SIMD. Phase 1 is now
+**7/7 ✓** (full coverage of the per-pixel + per-row kernels).
+
+### Phase 3 — full 13-strategy 3-channel cost grids
+
+Single-image proxy cost grids (Y-only, simplified weighting) had
+been there since session 4. This session added the proper 3-channel
+XYB-weighted + mask1x1-modulated cost grids — what the VarDCT
+encoder actually pays for in production:
+
+```
+ Strategy   Single-channel  3-channel  std/mean    Discrimination
+                                       (3-channel)  vs proxy
+ DCT8       ✓               ✓          0.945       1.86×
+ DCT16x8    ✓               ✓          (rect)
+ DCT8x16    ✓               ✓          (rect)
+ DCT16x16   ✓               ✓          0.879       1.78×
+ DCT32x16   ✓               ✓          (rect)
+ DCT16x32   ✓               ✓          (rect)
+ DCT32x32   ✓               ✓          0.824
+ DCT64x32   ✓               ✓          (rect)
+ DCT32x64   ✓               ✓          (rect)
+ DCT64x64   ✓               ✓          0.785
+ DCT4x4     ✓               ✓          (DCT4 fam)
+ DCT4x8     ✓               ✓          (DCT4 fam)
+ DCT8x4     ✓               ✓          (DCT4 fam)
+```
+
+Both single-channel and 3-channel variants now cover the full
+DCT4/8/16/32/64 family — every standard rectangular and sub-block
+strategy that libjxl evaluates through effort 9.
+
+End-to-end validation on a real CLIC2025 image
+(`phase3_xyb_real_image_demo`):
+- Cost grids show meaningful variation (std/mean ~0.8-0.95)
+- 16×16 partition selector picks 50.8% DCT16×16 + 49.2% 4-DCT8×8
+- Pick distribution nearly identical to single-channel proxy on
+  this image — proxy is a surprisingly good predictor on natural
+  photos. 3-channel cost matters more when rect strategies enter
+  the mix.
+
+Remaining cost-grid work: CfL-aware variants + IDENTITY/DCT2X2/AFV.
 
 ## Session 5 highlight — content-driven AQ validated across CLIC2025
 
