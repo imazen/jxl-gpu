@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Phase 3 — IDENTITY + DCT2X2 ported, 15-strategy cost grid coverage
+
+Two new GPU AC-strategy kernels with **bit-exact parity** vs the
+upstream scalar reference (`8550f846` IDENTITY, `fc8b8603` DCT2X2):
+
+- IDENTITY 8×8 forward + inverse: per-sub-block DC + residual layout
+  (4 4×4 sub-blocks) + 2×2 Hadamard merge of the 4 DCs. Pure scalar
+  arithmetic, no butterflies. Forward + inverse both bit-exact;
+  roundtrip 1.04e-7.
+- DCT2X2 8×8 forward + inverse: hierarchical 2×2 Hadamard at scales
+  S=8/4/2 (forward) and S=2/4/8 (inverse). Forward + inverse both
+  bit-exact; roundtrip 1.19e-7.
+
+Exposed on `GpuEncoder` (`identity_blocks`, `inverse_identity_blocks`,
+`dct2x2_blocks`, `inverse_dct2x2_blocks`) and wired into Phase 3
+cost grids in both single-channel and 3-channel flavors
+(`compute_cost_grid_{identity,dct2x2}_{single_channel,xyb}`)
+(`36342558`, `4734522b`).
+
+**Total Phase 3 cost-grid coverage now 15 strategies × 2 flavors =
+30 functions**: full DCT4/8/16/32/64 family + IDENTITY + DCT2X2.
+All standard JXL AC strategies except AFV0-3 are wired.
+
 ### Phase 3 — full 13-strategy 3-channel cost grids + rect-aware selector validated
 
 The Phase 3 strategy-selection stack now exercises the full

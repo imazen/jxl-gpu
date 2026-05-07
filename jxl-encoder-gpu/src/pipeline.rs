@@ -37,9 +37,13 @@
 //! | DCT4×4     | `*_dct4x4_*`     | `*_dct4x4_xyb`   | 1 (sub-block)      |
 //! | DCT4×8     | `*_dct4x8_*`     | `*_dct4x8_xyb`   | 1 (sub-block)      |
 //! | DCT8×4     | `*_dct8x4_*`     | `*_dct8x4_xyb`   | 1 (sub-block)      |
+//! | IDENTITY   | `*_identity_*`   | `*_identity_xyb` | 1 (sub-block DC)   |
+//! | DCT2X2     | `*_dct2x2_*`     | `*_dct2x2_xyb`   | 1 (Hadamard cascade)|
 //!
-//! Full DCT4/8/16/32/64 family covered (square + rect + sub-block).
-//! Remaining: CfL-aware variants + IDENTITY/DCT2X2/AFV.
+//! Full DCT4/8/16/32/64 family + IDENTITY + DCT2X2 covered (15
+//! strategies × 2 flavors = 30 cost-grid functions). All standard
+//! JXL AC strategies except AFV0-3 are wired. Remaining:
+//! CfL-aware variants + AFV (kernels not yet ported).
 //!
 //! ## Partition selectors
 //!
