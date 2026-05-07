@@ -686,6 +686,338 @@ pub fn compute_cost_grid_dct64x64_xyb<R: Runtime>(
     }
 }
 
+// =============================================================================
+// 3-channel cost grids — rectangular DCT16/32/64 family
+// =============================================================================
+//
+// All six functions share the same shape as their square 3-channel
+// counterparts, differing only in DCT/IDCT kernel + quantize_large grid
+// + sub-cell layout. Each one runs the per-channel pipeline (DCT →
+// quantize → dequant → IDCT) three times then calls block_l2 with all
+// six channel handles + per-pixel mask. block_l2 returns per-8×8
+// sub-cell costs; caller aggregates per rect block.
+
+/// 3-channel DCT16×8 cost grid (16-tall × 8-wide rect, 128 floats per
+/// rect block, 2×1 = 2 sub-cells per rect).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_cost_grid_dct16x8_xyb<R: Runtime>(
+    client: &ComputeClient<R>,
+    orig_x: Handle,
+    orig_y: Handle,
+    orig_b: Handle,
+    weights_x: Handle,
+    weights_y: Handle,
+    weights_b: Handle,
+    qac_qm_x: Handle,
+    qac_qm_y: Handle,
+    qac_qm_b: Handle,
+    thresholds_x: Handle,
+    thresholds_y: Handle,
+    thresholds_b: Handle,
+    mask1x1: Handle,
+    xsize_blocks_16x8: u32,
+    ysize_blocks_16x8: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks_16x8 * ysize_blocks_16x8;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 128;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+    let h_dct_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_q_x = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_y = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_b = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dq_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    dct_16x8::<R>(client, orig_x.clone(), h_dct_x.clone(), num_blocks);
+    dct_16x8::<R>(client, orig_y.clone(), h_dct_y.clone(), num_blocks);
+    dct_16x8::<R>(client, orig_b.clone(), h_dct_b.clone(), num_blocks);
+    let qlarge = |dct: Handle, w: Handle, qac: Handle, thr: Handle, q: Handle| {
+        quantize_large::<R>(client, dct, w, qac, thr, q, num_blocks, 16, 8, 2, 1);
+    };
+    qlarge(h_dct_x.clone(), weights_x.clone(), qac_qm_x, thresholds_x, h_q_x.clone());
+    qlarge(h_dct_y.clone(), weights_y.clone(), qac_qm_y, thresholds_y, h_q_y.clone());
+    qlarge(h_dct_b.clone(), weights_b.clone(), qac_qm_b, thresholds_b, h_q_b.clone());
+    dequant_simple_generic::<R>(client, h_q_x, weights_x, h_dq_x.clone(), num_blocks, 128);
+    dequant_simple_generic::<R>(client, h_q_y, weights_y, h_dq_y.clone(), num_blocks, 128);
+    dequant_simple_generic::<R>(client, h_q_b, weights_b, h_dq_b.clone(), num_blocks, 128);
+    idct_16x8::<R>(client, h_dq_x, h_recon_x.clone(), num_blocks);
+    idct_16x8::<R>(client, h_dq_y, h_recon_y.clone(), num_blocks);
+    idct_16x8::<R>(client, h_dq_b, h_recon_b.clone(), num_blocks);
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb * 2]));
+    block_l2::<R>(
+        client, orig_x, orig_y, orig_b, h_recon_x, h_recon_y, h_recon_b, mask1x1, h_costs.clone(),
+        xsize_blocks_16x8 * 2, ysize_blocks_16x8, xsize_blocks_16x8 * 16,
+    );
+    CostGrid { costs: h_costs, xsize_blocks: xsize_blocks_16x8, ysize_blocks: ysize_blocks_16x8 }
+}
+
+/// 3-channel DCT8×16 cost grid (8-tall × 16-wide rect, 128 floats per
+/// rect block, 1×2 = 2 sub-cells per rect).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_cost_grid_dct8x16_xyb<R: Runtime>(
+    client: &ComputeClient<R>,
+    orig_x: Handle, orig_y: Handle, orig_b: Handle,
+    weights_x: Handle, weights_y: Handle, weights_b: Handle,
+    qac_qm_x: Handle, qac_qm_y: Handle, qac_qm_b: Handle,
+    thresholds_x: Handle, thresholds_y: Handle, thresholds_b: Handle,
+    mask1x1: Handle,
+    xsize_blocks_8x16: u32, ysize_blocks_8x16: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks_8x16 * ysize_blocks_8x16;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 128;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+    let h_dct_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_q_x = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_y = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_b = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dq_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    dct_8x16::<R>(client, orig_x.clone(), h_dct_x.clone(), num_blocks);
+    dct_8x16::<R>(client, orig_y.clone(), h_dct_y.clone(), num_blocks);
+    dct_8x16::<R>(client, orig_b.clone(), h_dct_b.clone(), num_blocks);
+    let qlarge = |dct: Handle, w: Handle, qac: Handle, thr: Handle, q: Handle| {
+        quantize_large::<R>(client, dct, w, qac, thr, q, num_blocks, 8, 16, 1, 2);
+    };
+    qlarge(h_dct_x.clone(), weights_x.clone(), qac_qm_x, thresholds_x, h_q_x.clone());
+    qlarge(h_dct_y.clone(), weights_y.clone(), qac_qm_y, thresholds_y, h_q_y.clone());
+    qlarge(h_dct_b.clone(), weights_b.clone(), qac_qm_b, thresholds_b, h_q_b.clone());
+    dequant_simple_generic::<R>(client, h_q_x, weights_x, h_dq_x.clone(), num_blocks, 128);
+    dequant_simple_generic::<R>(client, h_q_y, weights_y, h_dq_y.clone(), num_blocks, 128);
+    dequant_simple_generic::<R>(client, h_q_b, weights_b, h_dq_b.clone(), num_blocks, 128);
+    idct_8x16::<R>(client, h_dq_x, h_recon_x.clone(), num_blocks);
+    idct_8x16::<R>(client, h_dq_y, h_recon_y.clone(), num_blocks);
+    idct_8x16::<R>(client, h_dq_b, h_recon_b.clone(), num_blocks);
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb * 2]));
+    block_l2::<R>(
+        client, orig_x, orig_y, orig_b, h_recon_x, h_recon_y, h_recon_b, mask1x1, h_costs.clone(),
+        xsize_blocks_8x16, ysize_blocks_8x16 * 2, xsize_blocks_8x16 * 8,
+    );
+    CostGrid { costs: h_costs, xsize_blocks: xsize_blocks_8x16, ysize_blocks: ysize_blocks_8x16 }
+}
+
+/// 3-channel DCT32×16 cost grid (32-tall × 16-wide rect, 512 floats
+/// per rect, 4×2 = 8 sub-cells per rect).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_cost_grid_dct32x16_xyb<R: Runtime>(
+    client: &ComputeClient<R>,
+    orig_x: Handle, orig_y: Handle, orig_b: Handle,
+    weights_x: Handle, weights_y: Handle, weights_b: Handle,
+    qac_qm_x: Handle, qac_qm_y: Handle, qac_qm_b: Handle,
+    thresholds_x: Handle, thresholds_y: Handle, thresholds_b: Handle,
+    mask1x1: Handle,
+    xsize_blocks_32x16: u32, ysize_blocks_32x16: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks_32x16 * ysize_blocks_32x16;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 512;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+    let h_dct_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_q_x = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_y = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_b = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dq_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    dct_32x16::<R>(client, orig_x.clone(), h_dct_x.clone(), num_blocks);
+    dct_32x16::<R>(client, orig_y.clone(), h_dct_y.clone(), num_blocks);
+    dct_32x16::<R>(client, orig_b.clone(), h_dct_b.clone(), num_blocks);
+    let qlarge = |dct: Handle, w: Handle, qac: Handle, thr: Handle, q: Handle| {
+        quantize_large::<R>(client, dct, w, qac, thr, q, num_blocks, 32, 16, 4, 2);
+    };
+    qlarge(h_dct_x.clone(), weights_x.clone(), qac_qm_x, thresholds_x, h_q_x.clone());
+    qlarge(h_dct_y.clone(), weights_y.clone(), qac_qm_y, thresholds_y, h_q_y.clone());
+    qlarge(h_dct_b.clone(), weights_b.clone(), qac_qm_b, thresholds_b, h_q_b.clone());
+    dequant_simple_generic::<R>(client, h_q_x, weights_x, h_dq_x.clone(), num_blocks, 512);
+    dequant_simple_generic::<R>(client, h_q_y, weights_y, h_dq_y.clone(), num_blocks, 512);
+    dequant_simple_generic::<R>(client, h_q_b, weights_b, h_dq_b.clone(), num_blocks, 512);
+    idct_32x16::<R>(client, h_dq_x, h_recon_x.clone(), num_blocks);
+    idct_32x16::<R>(client, h_dq_y, h_recon_y.clone(), num_blocks);
+    idct_32x16::<R>(client, h_dq_b, h_recon_b.clone(), num_blocks);
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb * 8]));
+    block_l2::<R>(
+        client, orig_x, orig_y, orig_b, h_recon_x, h_recon_y, h_recon_b, mask1x1, h_costs.clone(),
+        xsize_blocks_32x16 * 4, ysize_blocks_32x16 * 2, xsize_blocks_32x16 * 32,
+    );
+    CostGrid { costs: h_costs, xsize_blocks: xsize_blocks_32x16, ysize_blocks: ysize_blocks_32x16 }
+}
+
+/// 3-channel DCT16×32 cost grid (16-tall × 32-wide rect, 512 floats
+/// per rect, 2×4 = 8 sub-cells per rect).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_cost_grid_dct16x32_xyb<R: Runtime>(
+    client: &ComputeClient<R>,
+    orig_x: Handle, orig_y: Handle, orig_b: Handle,
+    weights_x: Handle, weights_y: Handle, weights_b: Handle,
+    qac_qm_x: Handle, qac_qm_y: Handle, qac_qm_b: Handle,
+    thresholds_x: Handle, thresholds_y: Handle, thresholds_b: Handle,
+    mask1x1: Handle,
+    xsize_blocks_16x32: u32, ysize_blocks_16x32: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks_16x32 * ysize_blocks_16x32;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 512;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+    let h_dct_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_q_x = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_y = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_b = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dq_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    dct_16x32::<R>(client, orig_x.clone(), h_dct_x.clone(), num_blocks);
+    dct_16x32::<R>(client, orig_y.clone(), h_dct_y.clone(), num_blocks);
+    dct_16x32::<R>(client, orig_b.clone(), h_dct_b.clone(), num_blocks);
+    let qlarge = |dct: Handle, w: Handle, qac: Handle, thr: Handle, q: Handle| {
+        quantize_large::<R>(client, dct, w, qac, thr, q, num_blocks, 16, 32, 2, 4);
+    };
+    qlarge(h_dct_x.clone(), weights_x.clone(), qac_qm_x, thresholds_x, h_q_x.clone());
+    qlarge(h_dct_y.clone(), weights_y.clone(), qac_qm_y, thresholds_y, h_q_y.clone());
+    qlarge(h_dct_b.clone(), weights_b.clone(), qac_qm_b, thresholds_b, h_q_b.clone());
+    dequant_simple_generic::<R>(client, h_q_x, weights_x, h_dq_x.clone(), num_blocks, 512);
+    dequant_simple_generic::<R>(client, h_q_y, weights_y, h_dq_y.clone(), num_blocks, 512);
+    dequant_simple_generic::<R>(client, h_q_b, weights_b, h_dq_b.clone(), num_blocks, 512);
+    idct_16x32::<R>(client, h_dq_x, h_recon_x.clone(), num_blocks);
+    idct_16x32::<R>(client, h_dq_y, h_recon_y.clone(), num_blocks);
+    idct_16x32::<R>(client, h_dq_b, h_recon_b.clone(), num_blocks);
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb * 8]));
+    block_l2::<R>(
+        client, orig_x, orig_y, orig_b, h_recon_x, h_recon_y, h_recon_b, mask1x1, h_costs.clone(),
+        xsize_blocks_16x32 * 2, ysize_blocks_16x32 * 4, xsize_blocks_16x32 * 16,
+    );
+    CostGrid { costs: h_costs, xsize_blocks: xsize_blocks_16x32, ysize_blocks: ysize_blocks_16x32 }
+}
+
+/// 3-channel DCT64×32 cost grid (64-tall × 32-wide rect, 2048 floats
+/// per rect, 8×4 = 32 sub-cells per rect).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_cost_grid_dct64x32_xyb<R: Runtime>(
+    client: &ComputeClient<R>,
+    orig_x: Handle, orig_y: Handle, orig_b: Handle,
+    weights_x: Handle, weights_y: Handle, weights_b: Handle,
+    qac_qm_x: Handle, qac_qm_y: Handle, qac_qm_b: Handle,
+    thresholds_x: Handle, thresholds_y: Handle, thresholds_b: Handle,
+    mask1x1: Handle,
+    xsize_blocks_64x32: u32, ysize_blocks_64x32: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks_64x32 * ysize_blocks_64x32;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 2048;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+    let h_dct_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_q_x = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_y = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_b = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dq_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    dct_64x32::<R>(client, orig_x.clone(), h_dct_x.clone(), num_blocks);
+    dct_64x32::<R>(client, orig_y.clone(), h_dct_y.clone(), num_blocks);
+    dct_64x32::<R>(client, orig_b.clone(), h_dct_b.clone(), num_blocks);
+    let qlarge = |dct: Handle, w: Handle, qac: Handle, thr: Handle, q: Handle| {
+        quantize_large::<R>(client, dct, w, qac, thr, q, num_blocks, 64, 32, 8, 4);
+    };
+    qlarge(h_dct_x.clone(), weights_x.clone(), qac_qm_x, thresholds_x, h_q_x.clone());
+    qlarge(h_dct_y.clone(), weights_y.clone(), qac_qm_y, thresholds_y, h_q_y.clone());
+    qlarge(h_dct_b.clone(), weights_b.clone(), qac_qm_b, thresholds_b, h_q_b.clone());
+    dequant_simple_generic::<R>(client, h_q_x, weights_x, h_dq_x.clone(), num_blocks, 2048);
+    dequant_simple_generic::<R>(client, h_q_y, weights_y, h_dq_y.clone(), num_blocks, 2048);
+    dequant_simple_generic::<R>(client, h_q_b, weights_b, h_dq_b.clone(), num_blocks, 2048);
+    idct_64x32::<R>(client, h_dq_x, h_recon_x.clone(), num_blocks);
+    idct_64x32::<R>(client, h_dq_y, h_recon_y.clone(), num_blocks);
+    idct_64x32::<R>(client, h_dq_b, h_recon_b.clone(), num_blocks);
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb * 32]));
+    block_l2::<R>(
+        client, orig_x, orig_y, orig_b, h_recon_x, h_recon_y, h_recon_b, mask1x1, h_costs.clone(),
+        xsize_blocks_64x32 * 8, ysize_blocks_64x32 * 4, xsize_blocks_64x32 * 64,
+    );
+    CostGrid { costs: h_costs, xsize_blocks: xsize_blocks_64x32, ysize_blocks: ysize_blocks_64x32 }
+}
+
+/// 3-channel DCT32×64 cost grid (32-tall × 64-wide rect, 2048 floats
+/// per rect, 4×8 = 32 sub-cells per rect).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_cost_grid_dct32x64_xyb<R: Runtime>(
+    client: &ComputeClient<R>,
+    orig_x: Handle, orig_y: Handle, orig_b: Handle,
+    weights_x: Handle, weights_y: Handle, weights_b: Handle,
+    qac_qm_x: Handle, qac_qm_y: Handle, qac_qm_b: Handle,
+    thresholds_x: Handle, thresholds_y: Handle, thresholds_b: Handle,
+    mask1x1: Handle,
+    xsize_blocks_32x64: u32, ysize_blocks_32x64: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks_32x64 * ysize_blocks_32x64;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 2048;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+    let h_dct_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dct_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_q_x = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_y = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_q_b = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dq_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_dq_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_x = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_y = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon_b = client.create_from_slice(f32::as_bytes(&zero_f));
+    dct_32x64::<R>(client, orig_x.clone(), h_dct_x.clone(), num_blocks);
+    dct_32x64::<R>(client, orig_y.clone(), h_dct_y.clone(), num_blocks);
+    dct_32x64::<R>(client, orig_b.clone(), h_dct_b.clone(), num_blocks);
+    let qlarge = |dct: Handle, w: Handle, qac: Handle, thr: Handle, q: Handle| {
+        quantize_large::<R>(client, dct, w, qac, thr, q, num_blocks, 32, 64, 4, 8);
+    };
+    qlarge(h_dct_x.clone(), weights_x.clone(), qac_qm_x, thresholds_x, h_q_x.clone());
+    qlarge(h_dct_y.clone(), weights_y.clone(), qac_qm_y, thresholds_y, h_q_y.clone());
+    qlarge(h_dct_b.clone(), weights_b.clone(), qac_qm_b, thresholds_b, h_q_b.clone());
+    dequant_simple_generic::<R>(client, h_q_x, weights_x, h_dq_x.clone(), num_blocks, 2048);
+    dequant_simple_generic::<R>(client, h_q_y, weights_y, h_dq_y.clone(), num_blocks, 2048);
+    dequant_simple_generic::<R>(client, h_q_b, weights_b, h_dq_b.clone(), num_blocks, 2048);
+    idct_32x64::<R>(client, h_dq_x, h_recon_x.clone(), num_blocks);
+    idct_32x64::<R>(client, h_dq_y, h_recon_y.clone(), num_blocks);
+    idct_32x64::<R>(client, h_dq_b, h_recon_b.clone(), num_blocks);
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb * 32]));
+    block_l2::<R>(
+        client, orig_x, orig_y, orig_b, h_recon_x, h_recon_y, h_recon_b, mask1x1, h_costs.clone(),
+        xsize_blocks_32x64 * 4, ysize_blocks_32x64 * 8, xsize_blocks_32x64 * 32,
+    );
+    CostGrid { costs: h_costs, xsize_blocks: xsize_blocks_32x64, ysize_blocks: ysize_blocks_32x64 }
+}
+
 /// Compute the DCT4×4 strategy's whole-image cost grid for a single channel.
 ///
 /// DCT4×4 is a sub-block transform: each 8×8 block is treated as 4
