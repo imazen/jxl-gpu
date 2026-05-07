@@ -9,21 +9,31 @@
 //! Currently covers:
 //! - `compute_inv_sigma_map` — pure scalar, duplicated bit-for-bit
 //!   (~10 microseconds for a 1024×1024 image; no GPU win)
-//! - `apply_epf_step1_gpu` — 5×5 plus-shaped kernel (the strong pass)
-//! - `apply_epf_step2_gpu` — 3×3 cross kernel (the weak pass)
+//! - `apply_epf_step0_gpu` — 5×5 plus kernel with 12-neighbor SAD
+//!   (the heaviest pass)
+//! - `apply_epf_step1_gpu` — 3×3 cross kernel with 3×3-plus SAD
+//!   (the strong pass)
+//! - `apply_epf_step2_gpu` — 3×3 cross kernel with single-pixel SAD
+//!   (the weak pass)
+//! - `select_sharpness_two_pass` — pure-CPU two-pass sharpness
+//!   selection (greedy with neighbor bias + context refinement),
+//!   ready to plug into `compute_epf_sharpness_gpu` once a
+//!   reconstruct_xyb GPU orchestrator exists.
 //!
-//! Not yet covered (no GPU kernel for these):
-//! - `epf_step0` — 12-tap kernel (the strongest pass, between two passes
-//!   of EPF in the decoder). Used at higher EPF iter counts.
-//! - `compute_epf_sharpness` — per-block sharpness selection
+//! Not yet covered (no orchestrator wrapper for this):
+//! - `compute_epf_sharpness` — needs a `reconstruct_xyb` callable
+//!   to produce the per-candidate base reconstructions. The
+//!   per-candidate EPF + L2 chain is fully GPU-resident already
+//!   (steps 0/1/2 + `block_l2_errors`); the missing piece is a
+//!   reconstruct fork.
 //!
 //! Reshape vs upstream `apply_epf`:
 //! - Upstream orchestrates step0 + step1 + step2 via the SIMD dispatch
 //!   trampoline, with one scratch buffer per step.
-//! - Our forks expose step1 and step2 as INDIVIDUAL passes the caller
-//!   chains. Because GPU launches return new `Vec<f32>`, the caller can
-//!   feed step1's output directly into step2's input without managing
-//!   intermediate scratch.
+//! - Our forks expose each step as an INDIVIDUAL pass the caller
+//!   chains. Because GPU launches return new `Vec<f32>`, the caller
+//!   can feed one step's output directly into the next step's input
+//!   without managing intermediate scratch.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -219,9 +229,222 @@ pub fn apply_epf_step2_gpu<R: Runtime>(
     )
 }
 
+/// Two-pass per-block sharpness selection.
+///
+/// Pure-CPU port of the selection logic from
+/// `jxl_encoder::vardct::epf::compute_epf_sharpness` — *only* the
+/// part that consumes per-candidate error maps. The expensive part
+/// (running EPF + block_l2 per candidate) is the caller's job:
+/// run the full GPU EPF chain once per `candidate` value with a
+/// uniform sharpness map, then call `block_l2_errors` to get the
+/// per-block errors for that candidate.
+///
+/// `candidates` is the candidate sharpness list (typically `[0, 2, 7]`
+/// or `[0, 4]` at high distance). `error_maps[ci][block_idx]` is the
+/// per-block reconstruction error when the entire image was filtered
+/// with `candidates[ci]`. `clamped_distance` is `params.distance`
+/// clamped to `[0.5, 10.0]`.
+///
+/// Returns one `u8` per block in row-major order; values are
+/// drawn from `candidates`.
+///
+/// Mirrors upstream's two-pass algorithm exactly:
+/// 1. Greedy pass with `K_FAVOR_NO_SMOOTHING = 0.99` bias toward
+///    sharpness=0 and a neighbor-preference fallback.
+/// 2. Context-based reweighting using top/left neighbor sharpness as
+///    context, with libjxl's signature `size_t / size_t` integer
+///    division (which makes the entropy term a no-op for most
+///    contexts — only the `c3` bias on sharpness=0 has real effect).
+pub fn select_sharpness_two_pass(
+    error_maps: &[Vec<f32>],
+    candidates: &[u8],
+    clamped_distance: f32,
+    xsize_blocks: usize,
+    ysize_blocks: usize,
+) -> Vec<u8> {
+    let nblocks = xsize_blocks * ysize_blocks;
+    let num_candidates = candidates.len();
+    debug_assert_eq!(error_maps.len(), num_candidates);
+    for em in error_maps {
+        debug_assert_eq!(em.len(), nblocks);
+    }
+
+    // Map candidate value → context-LUT index.
+    let candidate_lut: Vec<usize> = candidates
+        .iter()
+        .map(|&v| match v {
+            0 => 0,
+            2 | 4 => 1,
+            7 => 2,
+            _ => 0,
+        })
+        .collect();
+
+    // Pass 1: greedy with neighbor preference + favor-no-smoothing bias.
+    const K_FAVOR_NO_SMOOTHING: f32 = 0.99;
+    let mut sharpness_map = vec![4_u8; nblocks];
+    let num_contexts = num_candidates * num_candidates;
+    let mut histo = vec![vec![0_u32; num_candidates]; num_contexts];
+
+    for by in 0..ysize_blocks {
+        for bx in 0..xsize_blocks {
+            let block_idx = by * xsize_blocks + bx;
+
+            let (top_val, top_err) = if by > 0 {
+                let top_idx = (by - 1) * xsize_blocks + bx;
+                let top_s = sharpness_map[top_idx];
+                let top_ci = candidates.iter().position(|&c| c == top_s).unwrap_or(0);
+                (top_ci, error_maps[top_ci][top_idx])
+            } else {
+                (0, f32::MAX)
+            };
+            let (left_val, left_err) = if bx > 0 {
+                let left_idx = by * xsize_blocks + bx - 1;
+                let left_s = sharpness_map[left_idx];
+                let left_ci = candidates.iter().position(|&c| c == left_s).unwrap_or(0);
+                (left_ci, error_maps[left_ci][left_idx])
+            } else {
+                (0, f32::MAX)
+            };
+
+            let mut best_ci = 0;
+            let mut best_err = f32::MAX;
+            for ci in 0..num_candidates {
+                let mut err = error_maps[ci][block_idx];
+                if candidates[ci] == 0 {
+                    err *= K_FAVOR_NO_SMOOTHING;
+                }
+                if err < best_err {
+                    best_err = err;
+                    best_ci = ci;
+                }
+            }
+            let selected_ci = if best_err < top_err.min(left_err) {
+                best_ci
+            } else if top_err < left_err {
+                top_val
+            } else {
+                left_val
+            };
+            sharpness_map[block_idx] = candidates[selected_ci];
+            let ctx = candidate_lut[top_val] * num_candidates + candidate_lut[left_val];
+            if ctx < num_contexts {
+                histo[ctx][selected_ci] += 1;
+            }
+        }
+    }
+
+    // Pass 2: context-based reweighting.
+    let clamped_d = clamped_distance.clamp(0.5, 10.0);
+    let c3base: f32 = 0.980_172;
+    let c3clamp: f32 = 0.859_703_4;
+    let c3 = c3clamp.max(c3base.powf(clamped_d));
+    let c5: f32 = 0.108_769_04;
+
+    // libjxl init: size_t totals[ctx] = 1, then accumulate counts.
+    let mut totals = vec![1_usize; num_contexts];
+    for ctx in 0..num_contexts {
+        for &count in &histo[ctx][..num_candidates] {
+            totals[ctx] += count as usize;
+        }
+    }
+
+    // Multipliers per (ctx, ci). Integer division matches libjxl exactly:
+    // for count < total → ratio = 0 → log1p(0) = 0 → mul stays 1.0
+    // (which makes the entropy term a no-op for most contexts).
+    let mut muls = vec![vec![1.0_f32; num_candidates]; num_contexts];
+    for ctx in 0..num_contexts {
+        for ci in 0..num_candidates {
+            let count = histo[ctx][ci] as usize;
+            let ratio = count / totals[ctx]; // integer division
+            let mut mul = 1.0 / (1.0 + c5 * (1.0 + ratio as f32).ln() / clamped_d);
+            if candidates[ci] == 0 {
+                mul *= c3;
+            }
+            muls[ctx][ci] = mul;
+        }
+    }
+
+    // Re-scan with context multipliers.
+    for by in 0..ysize_blocks {
+        for bx in 0..xsize_blocks {
+            let block_idx = by * xsize_blocks + bx;
+            let top_ci = if by > 0 {
+                let top_s = sharpness_map[(by - 1) * xsize_blocks + bx];
+                candidates.iter().position(|&c| c == top_s).unwrap_or(0)
+            } else {
+                0
+            };
+            let left_ci = if bx > 0 {
+                let left_s = sharpness_map[by * xsize_blocks + bx - 1];
+                candidates.iter().position(|&c| c == left_s).unwrap_or(0)
+            } else {
+                0
+            };
+            let ctx = candidate_lut[top_ci] * num_candidates + candidate_lut[left_ci];
+            let ctx_clamped = ctx.min(num_contexts - 1);
+            let mut best_ci = 0;
+            let mut best_err = f32::MAX;
+            for ci in 0..num_candidates {
+                let err = error_maps[ci][block_idx] * muls[ctx_clamped][ci];
+                if err < best_err {
+                    best_err = err;
+                    best_ci = ci;
+                }
+            }
+            sharpness_map[block_idx] = candidates[best_ci];
+        }
+    }
+
+    sharpness_map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_select_sharpness_two_pass_clear_winner() {
+        // Construct a 4×3 grid where candidate 1 (sharpness=2) is
+        // strictly best for every block. The selector must pick it
+        // for every block on both passes.
+        let xb = 4_usize;
+        let yb = 3_usize;
+        let nb = xb * yb;
+        let candidates = [0_u8, 2_u8, 7_u8];
+        // Errors: candidate 0 = 10.0, candidate 1 = 1.0, candidate 2 = 50.0
+        // (candidate 0 gets * K_FAVOR_NO_SMOOTHING = 0.99 → 9.9 still > 1.0).
+        let error_maps = vec![
+            vec![10.0_f32; nb],
+            vec![1.0_f32; nb],
+            vec![50.0_f32; nb],
+        ];
+        let out = select_sharpness_two_pass(&error_maps, &candidates, 1.0, xb, yb);
+        assert_eq!(out.len(), nb);
+        for &v in &out {
+            assert_eq!(v, 2);
+        }
+    }
+
+    #[test]
+    fn test_select_sharpness_two_pass_no_smoothing_bias() {
+        // Candidate 0 (sharpness=0) error = 1.005, candidate 1 = 1.000.
+        // After 0.99 bias: 1.005 * 0.99 = 0.99495 < 1.0 → picks 0.
+        let xb = 2_usize;
+        let yb = 2_usize;
+        let nb = xb * yb;
+        let candidates = [0_u8, 2_u8, 7_u8];
+        let error_maps = vec![
+            vec![1.005_f32; nb],
+            vec![1.0_f32; nb],
+            vec![100.0_f32; nb],
+        ];
+        let out = select_sharpness_two_pass(&error_maps, &candidates, 1.0, xb, yb);
+        // Pass-2 c3 multiplier on sharpness=0 only strengthens this.
+        for &v in &out {
+            assert_eq!(v, 0);
+        }
+    }
 
     #[test]
     fn test_inv_sigma_map_zero_quant_safe() {
