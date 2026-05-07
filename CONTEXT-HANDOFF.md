@@ -1,8 +1,8 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-06 (session 3 — perf breakthrough)
+**Last updated:** 2026-05-07 (session 4 — LossyEncoder polish)
 **Repo:** https://github.com/imazen/jxl-gpu (live, public)
-**Local:** ~/work/zen/jxl-encoder-gpu/ (~85 commits on main, in sync with origin)
+**Local:** ~/work/zen/jxl-encoder-gpu/ (111 commits on main, in sync with origin)
 **Hardware verified:** RTX 5070, CUDA 13.2, jj 0.40, rustc 1.95
 
 ## Bottom line — GPU now BEATS CPU AVX2 at every measured size
