@@ -1,11 +1,69 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-07 (session 6 — Phase 1 complete + full 13-strategy 3-channel cost grids)
+**Last updated:** 2026-05-07 (session 6 part 2 — IDENTITY/DCT2X2 + per-cell sub-block selector)
 **Repo:** https://github.com/imazen/jxl-gpu (live, public)
-**Local:** ~/work/zen/jxl-encoder-gpu/ (141 commits on main, in sync with origin)
+**Local:** ~/work/zen/jxl-encoder-gpu/ (160 commits on main, in sync with origin)
 **Hardware verified:** RTX 5070, CUDA 13.2, jj 0.40, rustc 1.95
 
-## Session 6 highlight — Phase 1 complete + 13-strategy 3-channel cost grids
+## Session 6.2 highlight — sub-block selector + 4-DCT8 dies
+
+Built on the cost grid foundation from session 6.1 by adding the
+two remaining sub-block kernels (IDENTITY + DCT2X2) and extending
+the 16×16 partition selector with per-cell strategy choice.
+
+### New kernels (bit-exact parity)
+
+- **IDENTITY 8×8** (`8550f846`): per-sub-block DC + residual layout
+  with 2×2 Hadamard merge of 4 DCs. Fwd + inv both 0.0 abs diff,
+  roundtrip 1.04e-7.
+- **DCT2X2 8×8** (`fc8b8603`): hierarchical 2×2 Hadamard at scales
+  S=8/4/2 (fwd) and 2/4/8 (inv). Fwd + inv both 0.0 abs diff,
+  roundtrip 1.19e-7.
+
+Phase 3 cost-grid coverage is now **15 strategies × 2 flavors = 30
+functions** (full DCT4/8/16/32/64 family + IDENTITY + DCT2X2). The
+only remaining standard JXL AC strategies not covered are AFV0-3
+(corner DCTs, kernel not yet ported).
+
+### Per-cell sub-block selector (`6c61103d`, `6345f558`)
+
+Added `Partition16x16::FourSubBlocks([SubStrategy; 4])` enabling
+per-cell choice from `{DCT8, DCT4×4, DCT4×8, DCT8×4, IDENTITY,
+DCT2X2}`. Extension of `select_partitions_16x16_full` is backwards
+compatible (defaults to all-None sub_blocks).
+
+### Real DCT8 weights helper (`939b400b`)
+
+`pub mod quant_weights` exposes `dct8_weights()` /
+`dct8_weights_per_channel()` (lifted from LossyEncoder's previously-
+private code). Cost grid demos now produce content-driven strategy
+distributions instead of degenerate identical costs.
+
+### Corpus validation: pure 4-DCT8 dies (`6b7411cb`)
+
+Across 8 CLIC2025-1024 photos (32,768 16×16 regions) with the
+full 7-strategy selector:
+
+```
+ Strategy           Pick %
+ DCT16×16          25.5%
+ Two DCT16×8 horiz 13.7%
+ Two DCT8×16 vert  26.2%
+ Four DCT8×8        0.1%   ← essentially DEAD
+ Four SubBlocks    34.5%
+```
+
+Within 45,272 sub-block cells:
+- DCT8: 25.9%
+- DCT4×4: 14.3%, DCT4×8: 19.4%, DCT8×4: 21.0%
+- IDENTITY: 7.9%, DCT2X2: 11.5%
+
+Pure 4-DCT8 picks 0.0–0.1% on every image. The selector picks
+NOT-DCT8 in 74% of sub-block cells. Robust, content-agnostic
+finding that per-cell strategy choice is substantively useful for
+natural-image VarDCT encoding.
+
+## Session 6.1 highlight — Phase 1 complete + 13-strategy 3-channel cost grids
 
 Two parallel arcs landed:
 
