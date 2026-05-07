@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Added — Persistent GPU buffer API + full-GPU lossy roundtrip
+
+The biggest single architectural addition since the kernel library
+landed. Closes the round-trip-API perf gap by exposing typed handles
+that keep data on-GPU across many pipeline stages.
+
+- `crate::persistent` module with `GpuPlane<R>`, `GpuBlocks<R>`,
+  `GpuI32Blocks<R>` typed handles. (`a146601f`, `2a596b40`, `a1f99672`)
+- ~25 persistent-API methods on `GpuEncoder<R>` covering full
+  encoder front+back: XYB fwd/inv, gaborish, gab smooth, mask1x1,
+  pad_plane, all 13 DCT/IDCT strategies, DCT8 quantize+dequant,
+  spatial↔per-block gather/scatter, DC restore.
+- 3 new GPU kernels closing mid-pipeline host hops:
+  - `gather_blocks_kernel` / `scatter_blocks_kernel` (`7d4fef19`)
+  - `restore_dc_kernel` (`75298a62`)
+- Cooperative DCT8 (`dct_8x8_coop_kernel`, cube_dim=8). Sub-ulp
+  parity with naive; no significant speedup. (`1c882573`)
+
+### Added — fork-and-modify of jxl-encoder pipeline (`forks::*`)
+
+Per user authorization to fork-and-modify upstream source. 11 fork
+modules + `forks_pipeline_demo` + `lossy_roundtrip_demo`:
+xyb, gaborish, adaptive_quant, reconstruct, transform (13
+DCT strategies), cfl (LS+Newton, batched), epf (Step 1+2),
+dequant, quantize, cost (entropy/block_l2/pixel_loss), pad.
+
+### Added — examples + benchmarks
+
+- `forks_pipeline_demo` (`f4bf2be2`), `lossy_roundtrip_demo` (`a5640970`)
+- `lossy_roundtrip_persistent` (`6ef942f7`, `75298a62`)
+- `real_image_encode` (1024×1024 CLIC, djxl-verified) (`89a8bf4c`)
+- `jxl_rs_roundtrip` (pure-Rust roundtrip via jxl-rs) (`a6bf966a`)
+- `xyb_throughput_bench` / `xyb_scaling_bench` (`66f1a6ea`, `0da14544`)
+- `persistent_buffer_pipeline` (1.7-3.4× faster than round-trip API) (`532ba90c`)
+- `lossy_pipeline_throughput` (full pipeline parity 4e-6) (`7af4c3f9`)
+- `dct8_coop_bench` (cooperative vs naive vs CPU) (`1c882573`)
+
 ### Added
 - Initial repo scaffold: workspace, `jxl-encoder-gpu` crate skeleton with
   cubecl 0.10.0-pre.4 dependency, feature flags for cuda/wgpu/hip/cpu backends.
