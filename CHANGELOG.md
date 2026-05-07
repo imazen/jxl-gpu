@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### AFV0-3 cost grid integration — last per-strategy gap closed (`1f25c7c3`, `f6c3e45e`, `2ef97a2e`)
+
+The AFV0-3 corner-DCT family is now wired through the cost-grid path
+the AC strategy search consumes. Three pieces:
+
+1. `quant_weights::afv_weights() -> Vec<f32>` (192 floats: 64 per
+   channel; same table for AFV0-AFV3). Bit-for-bit port of upstream
+   `jxl_encoder::vardct::quant::generate_afv_weights`.
+2. `forks::afv::afv_cost_grid_single_channel` — host-side, all 4
+   afv_kinds in one call. Per kind: forward AFV batch → quantize
+   (DCT8-shape with afv_weights) → dequant (generic) → inverse AFV
+   batch → host L2 reduction. Output `Vec<f32>` of length
+   `4 * n_blocks`, indexed by `[kind * n_blocks + b]`.
+3. `forks::afv::afv_cost_grid_xyb_host` — 3-channel mask1x1-modulated
+   counterpart, matching the shape of the GPU-resident
+   `compute_cost_grid_*_xyb` family in pipeline.rs. Stays host-side
+   because the AFV transform composition itself is host-orchestrated
+   (3 GPU launches per direction with per-block DC pack/unpack and
+   corner mirroring on the host).
+
+This closes the last per-strategy cost grid gap. The remaining
+items in PORT_STATUS are the three CPU-bits-inside-existing-forks:
+EPF Step 0, full `estimate_entropy_full` orchestration, and
+AdjustQuantBlockAC heuristics.
+
 ### Quantize + dequant cover the full strategy family (`768e5763`, `c79c3c5d`)
 
 `forks::quantize::quantize_blocks_gpu` dispatches to either the
