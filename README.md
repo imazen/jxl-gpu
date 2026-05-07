@@ -12,20 +12,47 @@ fallback. Mirrors [`jxl-encoder-simd`](https://crates.io/crates/jxl-encoder-simd
 1:1 — every kernel here has a sub-ulp parity target against the scalar function
 in `jxl-encoder-simd`.
 
-## Status
+## Status — GPU pipeline now FASTER than CPU AVX2
 
-**Pre-alpha**, work in progress. **45 of ~52 deliverables verified (~87%)**.
-See [`PORT_STATUS.md`](PORT_STATUS.md) for the per-kernel grid.
+End-to-end CPU vs GPU lossy DCT8 throughput (RTX 5070 + Ryzen 9 7950X):
 
-The DCT/IDCT family is complete (26 sub-kernels: DCT8/16/32/64 squares +
-rectangulars + DCT4 sub-block variants). Phase 2 non-DCT primitives done
-(quantize, dequant, pixel_loss, block_l2, cfl, epf, entropy, adaptive_quant).
-Phase 3 (whole-image AC strategy search) prototyped: cost-grid composition
-+ host-side partition selector with 12 unit tests covering 3 region tiers ×
-4 strategies each.
+```
+side    CPU ms    GPU ms    ratio        throughput
+ 256     1.61     1.49     1.08× GPU    44 MP/s
+ 512     9.39     4.28     2.19× GPU    61 MP/s
+1024    39.46    17.66     2.23× GPU    59 MP/s
+2048   150.55    41.33     3.64× GPU   101 MP/s vs 28 MP/s
+```
 
-Phase 4 (`jxl-encoder` integration) requires modifying the sibling
-`jxl-encoder` repository — pending user authorization.
+Parity 4e-6 max abs delta. **For batch workloads** (encoding the
+same image at multiple settings), input-handle reuse delivers an
+additional **5.28× speedup** at 2048² × 5 settings (366 MP/s
+aggregate vs 69 MP/s naive).
+
+**Implemented:**
+- 11 fork modules covering the full lossy DCT8 pipeline
+- Persistent GPU buffer API (`crate::persistent`) — typed `GpuPlane`
+  / `GpuBlocks` / `GpuI32Blocks` handles with chained-launch methods
+- High-level `LossyEncoder` API (`crate::lossy_encoder`) —
+  `encode_one` + `encode_many` for one-shot and batch use cases
+- 26 GPU kernels: 13 DCT/IDCT strategies + supporting (XYB,
+  gaborish, mask1x1, gather/scatter, DC restore, fused DCT+quant,
+  fused dequant+IDCT-Y, etc.)
+- 55 unit tests passing (cuda) + 12 partition selector tests (cpu)
+- 13 example demos covering composition, real-image roundtrips
+  (djxl + jxl-rs verified), and throughput benchmarks at 64²-4096²
+
+**What it does NOT yet do:**
+- Produce JXL bitstream bytes directly (use
+  `GpuEncoder::encode_lossy_via_cpu` which delegates to jxl-encoder
+  for the full encode; GPU path is for the parallel pipeline stages,
+  not entropy coding / container muxing).
+- DC quant + entropy coding (DC restore is a passthrough).
+- Strategy-search dispatch above DCT8 in the high-level encoder.
+
+See [`PORT_STATUS.md`](PORT_STATUS.md) for the per-kernel grid +
+[`CONTEXT-HANDOFF.md`](CONTEXT-HANDOFF.md) for the perf breakthrough
+write-up.
 
 ## Quick start
 
