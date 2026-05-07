@@ -124,6 +124,188 @@ fn round_ties_even_to_i32(x: f32) -> i32 {
     }
 }
 
+// IDCT inverse-mantissa constants — bit-identical with kernels::dct8.
+const ONE_OVER_SQRT2: f32 = 0.707_106_77;
+const INV_WC_M4_0: f32 = 1.0 / WC_M4_0;
+const INV_WC_M4_1: f32 = 1.0 / WC_M4_1;
+const INV_WC_M8_0: f32 = 1.0 / WC_M8_0;
+const INV_WC_M8_1: f32 = 1.0 / WC_M8_1;
+const INV_WC_M8_2: f32 = 1.0 / WC_M8_2;
+const INV_WC_M8_3: f32 = 1.0 / WC_M8_3;
+
+/// IDCT1d_8 — bit-identical butterfly copy of `kernels::dct8::idct1d_8`.
+/// Duplicated here to avoid changing dct8 module visibility.
+#[cube]
+fn idct1d_8_local(mem: &mut SharedMemory<f32>, base: u32) {
+    let b0 = base as usize;
+    let f0 = mem[b0];
+    let f1 = mem[b0 + 2usize];
+    let f2 = mem[b0 + 4usize];
+    let f3 = mem[b0 + 6usize];
+    let mut s0 = mem[b0 + 1usize];
+    let mut s1 = mem[b0 + 3usize];
+    let mut s2 = mem[b0 + 5usize];
+    let s3 = mem[b0 + 7usize];
+
+    s2 = s2 - s3;
+    s1 = s1 - s2;
+    s0 = (s0 - s1) * ONE_OVER_SQRT2;
+
+    let mut t0 = s0;
+    let mut t1 = s2;
+    let mut t2 = s1;
+    let mut t3 = s3;
+    t2 = (t2 - t3) * ONE_OVER_SQRT2;
+    let a0 = t2 + t3;
+    let a1 = t2 - t3;
+    t2 = a0;
+    t3 = a1;
+    t2 = t2 * INV_WC_M4_0;
+    t3 = t3 * INV_WC_M4_1;
+    let a0 = t0 + t1;
+    let a1 = t0 - t1;
+    t0 = a0;
+    t1 = a1;
+    let so0 = t0 + t2;
+    let so1 = t1 + t3;
+    let so2 = t1 - t3;
+    let so3 = t0 - t2;
+
+    let sa0 = so0 * INV_WC_M8_0;
+    let sa1 = so1 * INV_WC_M8_1;
+    let sa2 = so2 * INV_WC_M8_2;
+    let sa3 = so3 * INV_WC_M8_3;
+
+    let mut g0 = f0;
+    let mut g1 = f2;
+    let mut g2 = f1;
+    let mut g3 = f3;
+    g2 = (g2 - g3) * ONE_OVER_SQRT2;
+    let a0 = g2 + g3;
+    let a1 = g2 - g3;
+    g2 = a0;
+    g3 = a1;
+    g2 = g2 * INV_WC_M4_0;
+    g3 = g3 * INV_WC_M4_1;
+    let a0 = g0 + g1;
+    let a1 = g0 - g1;
+    g0 = a0;
+    g1 = a1;
+    let fo0 = g0 + g2;
+    let fo1 = g1 + g3;
+    let fo2 = g1 - g3;
+    let fo3 = g0 - g2;
+
+    mem[b0] = fo0 + sa0;
+    mem[b0 + 1usize] = fo1 + sa1;
+    mem[b0 + 2usize] = fo2 + sa2;
+    mem[b0 + 3usize] = fo3 + sa3;
+    mem[b0 + 4usize] = fo3 - sa3;
+    mem[b0 + 5usize] = fo2 - sa2;
+    mem[b0 + 6usize] = fo1 - sa1;
+    mem[b0 + 7usize] = fo0 - sa0;
+}
+
+const BIAS_Y: f32 = 0.929_945_5;
+const BIAS_RECIP: f32 = 0.145;
+
+#[cube]
+fn adjust_quant_bias_y(q_int: i32) -> f32 {
+    if q_int == 0i32 {
+        f32::new(0.0)
+    } else {
+        let q = q_int as f32;
+        if f32::abs(q) < 1.125f32 {
+            // sign(q) * BIAS_Y
+            if q > 0.0f32 {
+                f32::new(BIAS_Y)
+            } else {
+                f32::new(-BIAS_Y)
+            }
+        } else {
+            q - f32::new(BIAS_RECIP) / q
+        }
+    }
+}
+
+/// Fused dequant + IDCT8 for the Y channel only (no CfL adjustment).
+///
+/// Mirror of [`dct8_quantize_fused_wide_kernel`] for the inverse
+/// direction: takes quantized i32 + weights + per-block scale,
+/// produces recon pixels f32. Coefficients live in shared memory
+/// only — no global write+read of intermediate dequantized f32.
+///
+/// DC (slot 0) is forced to 0 (caller restores from LF / dc_coding).
+/// For X and B channels with CfL, use the 3-channel dequant + IDCT
+/// chain instead — this kernel doesn't model CfL.
+#[cube(launch_unchecked)]
+pub fn dequant_idct8_fused_y_wide_kernel(
+    quant: &Array<i32>,
+    weights: &Array<f32>,
+    qac_qm: &Array<f32>,
+    output: &mut Array<f32>,
+) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = qac_qm.len();
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+    let unit = UNIT_POS;
+    let private_base = unit * 64u32;
+    let private_base_us = private_base as usize;
+    let inv_q = 1.0f32 / qac_qm[block_idx];
+
+    let mut scratch = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut transposed = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+
+    // ── Dequantize directly into shared memory ─────────────────────
+    scratch[private_base_us] = f32::new(0.0); // DC = 0 (caller restores)
+    let mut i: u32 = 1u32;
+    while i < 64u32 {
+        let iu = i as usize;
+        let biased = adjust_quant_bias_y(quant[off + iu]);
+        scratch[private_base_us + iu] = biased * weights[off + iu] * inv_q;
+        i += 1u32;
+    }
+
+    // ── IDCT row pass ──────────────────────────────────────────────
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        idct1d_8_local(&mut scratch, private_base + r * 8u32);
+        r += 1u32;
+    }
+
+    // Transpose into transposed.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            transposed[private_base_us + cu * 8usize + ru] =
+                scratch[private_base_us + ru * 8usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // Column pass (= row pass on transposed).
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        idct1d_8_local(&mut transposed, private_base + r * 8u32);
+        r += 1u32;
+    }
+
+    // Write out.
+    let mut i: u32 = 0u32;
+    while i < 64u32 {
+        let iu = i as usize;
+        output[off + iu] = transposed[private_base_us + iu];
+        i += 1u32;
+    }
+}
+
 /// Fused DCT8 + quantize-DCT8. cube_dim=64, one block per thread.
 ///
 /// Inputs:
