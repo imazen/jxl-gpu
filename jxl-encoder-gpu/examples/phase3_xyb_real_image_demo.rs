@@ -32,8 +32,10 @@ fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::adaptive_quant::compute_mask1x1_gpu;
     use jxl_encoder_gpu::pipeline::{
-        Partition16x16, compute_cost_grid_dct8_xyb, compute_cost_grid_dct16x16_xyb,
-        select_partitions_16x16,
+        CostGrids16x16, Partition16x16, compute_cost_grid_dct8_xyb,
+        compute_cost_grid_dct8x16_xyb, compute_cost_grid_dct16x8_xyb,
+        compute_cost_grid_dct16x16_xyb, select_partitions_16x16,
+        select_partitions_16x16_full,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -249,4 +251,163 @@ fn main() {
     println!("  Two DCT8×16 vert  : {:>5}  ({:>5.1}%)", counts[2], 100.0 * counts[2] as f32 / partitions.len() as f32);
     println!("  Four DCT8×8       : {:>5}  ({:>5.1}%)", counts[3], 100.0 * counts[3] as f32 / partitions.len() as f32);
     println!("\n(Compare with phase3_real_image_demo — single-channel proxy on the same image.)");
+
+    // ---- Now add the rect 3-channel cost grids and re-pick. ----
+    // DCT16×8 (16-tall × 8-wide rect): repack each XYB plane into
+    // [rect_y * xb_rect + rect_x][16 rows × 8 cols].
+    let xb_16x8 = (w as usize) / 8;
+    let yb_16x8 = (h as usize) / 16;
+    let nb_16x8 = xb_16x8 * yb_16x8;
+    let repack_16x8 = |plane: &[f32]| {
+        let mut out = vec![0.0f32; nb_16x8 * 128];
+        for ry in 0..yb_16x8 {
+            for rx in 0..xb_16x8 {
+                for ly in 0..16 {
+                    for lx in 0..8 {
+                        out[(ry * xb_16x8 + rx) * 128 + ly * 8 + lx] =
+                            plane[(ry * 16 + ly) * (w as usize) + (rx * 8 + lx)];
+                    }
+                }
+            }
+        }
+        out
+    };
+    // DCT8×16 (8-tall × 16-wide rect): [rect_y * xb_rect + rect_x][8 rows × 16 cols].
+    let xb_8x16 = (w as usize) / 16;
+    let yb_8x16 = (h as usize) / 8;
+    let nb_8x16 = xb_8x16 * yb_8x16;
+    let repack_8x16 = |plane: &[f32]| {
+        let mut out = vec![0.0f32; nb_8x16 * 128];
+        for ry in 0..yb_8x16 {
+            for rx in 0..xb_8x16 {
+                for ly in 0..8 {
+                    for lx in 0..16 {
+                        out[(ry * xb_8x16 + rx) * 128 + ly * 16 + lx] =
+                            plane[(ry * 8 + ly) * (w as usize) + (rx * 16 + lx)];
+                    }
+                }
+            }
+        }
+        out
+    };
+    let bx_16x8 = repack_16x8(&xx);
+    let by_16x8 = repack_16x8(&xy);
+    let bb_16x8 = repack_16x8(&xb);
+    let bx_8x16 = repack_8x16(&xx);
+    let by_8x16 = repack_8x16(&xy);
+    let bb_8x16 = repack_8x16(&xb);
+
+    let wx_rect = replicate(&mk_w(128, 8, 0.6), nb_16x8);
+    let wy_rect = replicate(&mk_w(128, 8, 1.0), nb_16x8);
+    let wb_rect = replicate(&mk_w(128, 8, 1.3), nb_16x8);
+    let qac_16x8 = vec![1.7f32; nb_16x8];
+    let cg_16x8 = compute_cost_grid_dct16x8_xyb::<Backend>(
+        &client,
+        upload(&bx_16x8),
+        upload(&by_16x8),
+        upload(&bb_16x8),
+        upload(&wx_rect),
+        upload(&wy_rect),
+        upload(&wb_rect),
+        upload(&qac_16x8),
+        upload(&qac_16x8),
+        upload(&qac_16x8),
+        upload(&thr_xb[..]),
+        upload(&thr_y[..]),
+        upload(&thr_xb[..]),
+        upload(&mask1x1),
+        xb_16x8 as u32,
+        yb_16x8 as u32,
+    );
+    // block_l2 returns per-8×8 sub-cell costs; aggregate 2 per rect.
+    let cost_dct16x8: Vec<f32> = {
+        let bytes = client.read_one(cg_16x8.costs).expect("dct16x8");
+        let raw: &[f32] = f32::from_bytes(&bytes);
+        let mut out = vec![0.0f32; nb_16x8];
+        for ry in 0..yb_16x8 {
+            for rx in 0..xb_16x8 {
+                out[ry * xb_16x8 + rx] =
+                    raw[ry * (xb_16x8 * 2) + 2 * rx]
+                        + raw[ry * (xb_16x8 * 2) + 2 * rx + 1];
+            }
+        }
+        out
+    };
+
+    let wx_rect2 = replicate(&mk_w(128, 16, 0.6), nb_8x16);
+    let wy_rect2 = replicate(&mk_w(128, 16, 1.0), nb_8x16);
+    let wb_rect2 = replicate(&mk_w(128, 16, 1.3), nb_8x16);
+    let qac_8x16 = vec![1.7f32; nb_8x16];
+    let cg_8x16 = compute_cost_grid_dct8x16_xyb::<Backend>(
+        &client,
+        upload(&bx_8x16),
+        upload(&by_8x16),
+        upload(&bb_8x16),
+        upload(&wx_rect2),
+        upload(&wy_rect2),
+        upload(&wb_rect2),
+        upload(&qac_8x16),
+        upload(&qac_8x16),
+        upload(&qac_8x16),
+        upload(&thr_xb[..]),
+        upload(&thr_y[..]),
+        upload(&thr_xb[..]),
+        upload(&mask1x1),
+        xb_8x16 as u32,
+        yb_8x16 as u32,
+    );
+    let cost_dct8x16: Vec<f32> = {
+        let bytes = client.read_one(cg_8x16.costs).expect("dct8x16");
+        let raw: &[f32] = f32::from_bytes(&bytes);
+        let mut out = vec![0.0f32; nb_8x16];
+        for ry in 0..yb_8x16 {
+            for rx in 0..xb_8x16 {
+                out[ry * xb_8x16 + rx] =
+                    raw[2 * ry * xb_8x16 + rx] + raw[(2 * ry + 1) * xb_8x16 + rx];
+            }
+        }
+        out
+    };
+
+    let extra = CostGrids16x16 {
+        dct_16x8: Some(&cost_dct16x8),
+        dct_8x16: Some(&cost_dct8x16),
+    };
+    let partitions_full =
+        select_partitions_16x16_full(&cost_dct8, &cost_dct16x16, extra, xb8, yb8);
+    let mut counts_full = [0_usize; 4];
+    for &p in &partitions_full {
+        counts_full[match p {
+            Partition16x16::Dct16x16 => 0,
+            Partition16x16::TwoDct16x8Horizontal => 1,
+            Partition16x16::TwoDct8x16Vertical => 2,
+            Partition16x16::FourDct8x8 => 3,
+        }] += 1;
+    }
+
+    let (mn1, me1, mx1, sd1) = stats(&cost_dct16x8);
+    let (mn2, me2, mx2, sd2) = stats(&cost_dct8x16);
+    println!(
+        "\nRect 3-channel cost grids:"
+    );
+    println!(
+        "  DCT16×8:  min={mn1:.4}  mean={me1:.4}  max={mx1:.4}  std={sd1:.4}  (std/mean={:.3})",
+        sd1 / me1.max(1e-9)
+    );
+    println!(
+        "  DCT8×16:  min={mn2:.4}  mean={me2:.4}  max={mx2:.4}  std={sd2:.4}  (std/mean={:.3})",
+        sd2 / me2.max(1e-9)
+    );
+    println!("\nFull 4-strategy 16×16 partition decisions over {} regions:", partitions_full.len());
+    let pct = |c: usize| 100.0 * c as f32 / partitions_full.len() as f32;
+    println!("  DCT16×16          : {:>5}  ({:>5.1}%)", counts_full[0], pct(counts_full[0]));
+    println!("  Two DCT16×8 horiz : {:>5}  ({:>5.1}%)", counts_full[1], pct(counts_full[1]));
+    println!("  Two DCT8×16 vert  : {:>5}  ({:>5.1}%)", counts_full[2], pct(counts_full[2]));
+    println!("  Four DCT8×8       : {:>5}  ({:>5.1}%)", counts_full[3], pct(counts_full[3]));
+    println!(
+        "\n2-strategy → 4-strategy delta:\n  DCT16×16: {} → {} ({:+})\n  4-DCT8×8: {} → {} ({:+})\n  +rect picks: {}",
+        counts[0], counts_full[0], counts_full[0] as i64 - counts[0] as i64,
+        counts[3], counts_full[3], counts_full[3] as i64 - counts[3] as i64,
+        counts_full[1] + counts_full[2],
+    );
 }
