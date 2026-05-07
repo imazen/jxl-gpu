@@ -174,6 +174,50 @@ pub const DCT_RESAMPLE_SCALE_64_TO_8: [f32; 8] = [
     0.717_108_1,
 ];
 
+/// Batched IDCT + scatter for many blocks of the SAME AC strategy.
+/// One GPU launch for the IDCT regardless of `n_blocks`, then a per-
+/// block host-side scatter.
+///
+/// `coeffs_batched.len()` must equal `n_blocks * coeff_count`, where
+/// `coeff_count = forks::transform::coeff_count_per_strategy(raw_strategy)`
+/// (DCT8 → 64, DCT16×16 → 256, DCT32×32 → 1024, DCT64×64 → 4096, etc.).
+/// `block_coords[i] = (bx, by)` is where the i-th block's coefficients
+/// (slice `[i * coeff_count .. (i+1) * coeff_count]`) should land in
+/// the padded plane.
+///
+/// This is the efficient form for mixed-strategy reconstruct: the
+/// caller groups blocks by strategy and calls this once per group.
+/// Per-block GPU dispatch overhead is amortized across N blocks.
+pub fn batched_reconstruct_same_strategy_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    coeffs_batched: &[f32],
+    block_coords: &[(usize, usize)],
+    raw_strategy: u8,
+    plane: &mut [f32],
+    padded_width: usize,
+) {
+    use crate::forks::transform::{apply_idct_batch_gpu, coeff_count_per_strategy};
+
+    if block_coords.is_empty() {
+        return;
+    }
+    let coeff_count = coeff_count_per_strategy(raw_strategy);
+    debug_assert_eq!(coeffs_batched.len(), block_coords.len() * coeff_count);
+
+    // One GPU launch covers ALL blocks of this strategy.
+    let pixels_batched = apply_idct_batch_gpu(enc, coeffs_batched, raw_strategy);
+
+    let (block_w, block_h) = crate::forks::transform::tile_dims_pixels(raw_strategy);
+    let block_pixels = block_w * block_h;
+    debug_assert_eq!(pixels_batched.len(), block_coords.len() * block_pixels);
+
+    // Per-block host-side scatter (cheap memcpy).
+    for (i, &(bx, by)) in block_coords.iter().enumerate() {
+        let src = &pixels_batched[i * block_pixels..(i + 1) * block_pixels];
+        scatter_block_to_plane(plane, src, bx, by, raw_strategy, padded_width);
+    }
+}
+
 /// IDCT a single block's coefficient buffer and scatter the resulting
 /// pixels into the padded plane at `(bx * 8, by * 8)`. Composes
 /// [`crate::forks::transform::apply_idct_batch_gpu`] (with batch
@@ -1081,6 +1125,55 @@ mod tests {
         let [r0, r1] = restore_llf_dct16x8_or_8x16(dc0, dc1);
         assert!((r0 - llf0).abs() < 1e-5, "got {r0} expected {llf0}");
         assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_batched_reconstruct_same_strategy_gpu_dct8_zero() {
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        // 4 blocks placed at non-trivial positions on a 64×32 plane.
+        let padded_w = 64_usize;
+        let padded_h = 32_usize;
+        let mut plane = alloc::vec![0.42_f32; padded_w * padded_h]; // seeded
+        let coords = [(0_usize, 0_usize), (3, 1), (5, 2), (7, 0)];
+        let coeffs = alloc::vec![0.0_f32; coords.len() * 64];
+
+        batched_reconstruct_same_strategy_gpu(
+            &enc, &coeffs, &coords, RAW_STRATEGY_DCT, &mut plane, padded_w,
+        );
+
+        // For each placed block, the destination region should be ~0.
+        for &(bx, by) in &coords {
+            for row in 0..8 {
+                for col in 0..8 {
+                    let v = plane[(by * 8 + row) * padded_w + bx * 8 + col];
+                    assert!(v.abs() < 1e-5, "block ({bx},{by}) row {row} col {col} = {v}");
+                }
+            }
+        }
+        // A block coordinate that wasn't in the recipe stays seeded
+        // (e.g., (1, 0) was not in coords).
+        let untouched = plane[0 * padded_w + 1 * 8 + 3];
+        assert_eq!(untouched, 0.42, "untouched pixel was modified");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_batched_reconstruct_same_strategy_gpu_empty_no_op() {
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let mut plane = alloc::vec![0.5_f32; 64];
+        batched_reconstruct_same_strategy_gpu(
+            &enc, &[], &[], RAW_STRATEGY_DCT, &mut plane, 8,
+        );
+        // Plane unchanged.
+        for &v in &plane {
+            assert_eq!(v, 0.5);
+        }
     }
 
     #[cfg(feature = "cuda")]
