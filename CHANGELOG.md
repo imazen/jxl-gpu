@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+### Phase 5 — fuzzy_erosion ported, forks::adaptive_quant fully on GPU (`feb0ec97`, `67c00680`, `53efc207`, `bf89275c`)
+
+GPU-port of `jxl_encoder::vardct::adaptive_quant::fuzzy_erosion` —
+3×3 min-of-4 weighted sum + 2× downsample. The "find smallest 4 of
+9" partial sort runs per-thread (per output pixel); each thread
+gathers 4 input contributions directly, avoiding the unsynchronized
+`+=` write race the CPU sequential loop sidesteps.
+
+Parity: **2.98e-8 abs** vs inline CPU reference (FP32 noise floor)
+on a 73×51 source plane with non-aligned region offset.
+
+API:
+- `pub fn launch::fuzzy_erosion::fuzzy_erosion_kmul(butteraugli_target) -> [f32; 4]`
+- `pub fn GpuEncoder::fuzzy_erosion_plane(src, src_w, src_h,
+  from_x0, from_y0, region_w, region_h, butteraugli_target) -> (Vec<f32>, u32, u32)`
+- `pub fn forks::adaptive_quant::fuzzy_erosion_gpu(enc, ...)` — usize
+  signature matching upstream
+
+With this, the **full `forks::adaptive_quant` chain runs end-to-end
+on GPU**: `mask1x1 → pre_erosion → fuzzy_erosion →
+per_block_modulations`. The "fuzzy_erosion stays CPU" caveat is
+removed from the fork module docs and PORT_STATUS.
+
+### Quant weights — full 15-strategy coverage in `crate::quant_weights`
+
+`pub mod quant_weights` now exposes real libjxl quant weight
+tables for all 15 GPU-supported AC strategies, not just DCT8:
+
+```text
+DCT8                  dct8_weights()           192 floats (3 × 64)
+DCT16x16              dct16x16_weights()       768 floats (3 × 256)
+DCT16x8 / DCT8x16     dct16x8_weights()        384 floats (3 × 128)
+DCT32x32              dct32x32_weights()       3072 floats (3 × 1024)
+DCT16x32 / DCT32x16   dct16x32_weights()       1536 floats (3 × 512)
+DCT64x64              dct64x64_weights()       12288 floats (3 × 4096)
+DCT32x64 / DCT64x32   dct32x64_weights()       6144 floats (3 × 2048)
+DCT4X4                dct4x4_weights()         192 floats
+DCT4X8 / DCT8X4       dct4x8_weights()         192 floats
+IDENTITY              identity_weights()       192 floats
+DCT2X2                dct2x2_weights()         192 floats
+```
+
+Generic `pub fn generate_quant_weights_rect(rows, cols, band_params,
+num_bands)` mirrors `jxl_encoder::vardct::quant::generate_dct_quant_weights_rect`
+bit-for-bit. All five Phase 3 partition demos retrofitted to use
+real weights — no mock matrices remain.
+
+### forks::transform — IDENTITY + DCT2X2 dispatch entries (`806c3871`, `a03b3a28`)
+
+`apply_dct_batch_gpu` and `apply_idct_batch_gpu` now dispatch
+IDENTITY (`RAW_STRATEGY_IDENTITY=15`) and DCT2X2
+(`RAW_STRATEGY_DCT2X2=16`) alongside the existing 13 DCT family
+strategies. Two new dispatcher roundtrip tests verify the path.
+Local dispatcher codes 15/16 (vs upstream wire codes 8/9) —
+documented inline.
+
 ### Validated — Sub-block selector across CLIC2025 corpus (`6b7411cb`)
 
 `corpus_subblock_picks_demo` runs the full 7-strategy 16×16 partition
