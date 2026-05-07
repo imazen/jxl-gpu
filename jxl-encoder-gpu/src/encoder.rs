@@ -56,7 +56,7 @@ use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::mask1x1::mask1x1;
 use crate::launch::pixel_loss::pixel_loss;
 use crate::launch::quantize::quantize_dct8;
-use crate::launch::xyb::xyb_forward;
+use crate::launch::xyb::{xyb_forward, xyb_inverse};
 
 /// GPU-accelerated JXL encoder. Holds a long-lived cubecl client plus
 /// per-(width, height) GPU buffer caches.
@@ -159,6 +159,53 @@ impl<R: Runtime> GpuEncoder<R> {
         (
             f32::from_bytes(&xb).to_vec(),
             f32::from_bytes(&yb).to_vec(),
+            f32::from_bytes(&bb).to_vec(),
+        )
+    }
+
+    /// Inverse XYB → planar linear RGB. Mirrors
+    /// `jxl_encoder_simd::xyb_to_linear_rgb_planar` but on GPU.
+    /// Returns three new buffers `(R, G, B)` each of length `n`.
+    pub fn xyb_to_linear_rgb_planar(
+        &self,
+        xyb_x: &[f32],
+        xyb_y: &[f32],
+        xyb_b: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let n = xyb_x.len();
+        assert_eq!(xyb_y.len(), n);
+        assert_eq!(xyb_b.len(), n);
+
+        let h_x = self.client.create_from_slice(f32::as_bytes(xyb_x));
+        let h_y = self.client.create_from_slice(f32::as_bytes(xyb_y));
+        let h_b = self.client.create_from_slice(f32::as_bytes(xyb_b));
+        let h_r = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        let h_g_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        let h_b_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+
+        xyb_inverse::<R>(
+            &self.client,
+            h_x,
+            h_y,
+            h_b,
+            h_r.clone(),
+            h_g_out.clone(),
+            h_b_out.clone(),
+            n as u32,
+        );
+
+        let rb = self.client.read_one(h_r).expect("read r");
+        let gb = self.client.read_one(h_g_out).expect("read g");
+        let bb = self.client.read_one(h_b_out).expect("read b");
+        (
+            f32::from_bytes(&rb).to_vec(),
+            f32::from_bytes(&gb).to_vec(),
             f32::from_bytes(&bb).to_vec(),
         )
     }

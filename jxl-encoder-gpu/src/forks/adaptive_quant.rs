@@ -26,7 +26,6 @@
 //!   image rect (rect_x0/y0=0, rect_w/h=full) since GPU doesn't benefit
 //!   from per-tile launches at the sizes we care about.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use cubecl::Runtime;

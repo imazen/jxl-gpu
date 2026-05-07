@@ -21,4 +21,5 @@
 
 pub mod adaptive_quant;
 pub mod gaborish;
+pub mod reconstruct;
 pub mod xyb;
