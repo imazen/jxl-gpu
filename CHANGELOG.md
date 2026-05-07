@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### DCT8-only `reconstruct_xyb_*_gpu` orchestrator (`878e144f`, `44405a8d`, `984431fb`)
+
+The DCT8 fast path of upstream's `reconstruct_xyb` (which produces
+the encoder-side reconstructed XYB planes consumed by EPF, pixel-
+domain loss estimation, and the sharpness picker) is now composed
+end-to-end on GPU:
+
+- `forks::reconstruct::INV_DC_QUANT` `[4096, 512, 256]` const
+  matching upstream.
+- `restore_dct8_dc_override` (`878e144f`) — per-block DC
+  restoration with the 0.5× Y→B DC-level CfL contribution. Pure
+  scalar.
+- `restore_dct8_dc_override_batched` (`44405a8d`) — flat-slice
+  variant operating on `n_blocks * 64` block-major buffers
+  (matching what `dequant_dct8_blocks_gpu` returns directly).
+- `reconstruct_xyb_dct8_only_gpu` (`984431fb`) — the orchestrator.
+  Pipeline: 1 dequant launch + host DC override + 3 IDCT launches
+  + host scatter to padded planes. **4 GPU launches per image**
+  regardless of block count.
+
+**Note**: this is the all-blocks-are-DCT8 path. Real images use a
+mix of strategies via the AC strategy map; mixed-strategy support
+requires per-strategy IDCT dispatch + scatter for non-DCT8 blocks,
+which is a separate piece of `reconstruct_xyb_impl`.
+
+With this orchestrator plus the existing
+`apply_epf_step{0,1,2}_gpu` + `block_l2_errors` +
+`select_sharpness_two_pass`, a future `compute_epf_sharpness_gpu`
+can now be wired up entirely in fork-space (DCT8-only first; mixed
+strategies follow once the dispatch is in place).
+
 ### AdjustQuantBlockAC fully ported as host helpers (`453808d0`, `ebf765ed`, `86886b55`, `6d3c16db`, `99362cc3`, `d1bef643`)
 
 The full upstream `adjust_quant_block_ac` (~250 lines, 6 heuristics

@@ -105,7 +105,7 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
-**Not yet covered (CPU path stays):** `compute_epf_sharpness` orchestrator (selection logic ported as `forks::epf::select_sharpness_two_pass`; awaits a `forks::reconstruct::reconstruct_xyb_gpu` to compose with the existing apply_epf_step{0,1,2}_gpu + block_l2_errors), `estimate_entropy_full` orchestration. **AdjustQuantBlockAC fully ported as host helpers as of 2026-05-07** — pre-scan + all 6 heuristics A-F + orchestrator (`forks::quantize::adjust_quant_block_ac_host`) match upstream. A future `#[cube]` kernel can transcribe the now-standalone heuristics for per-block-parallel execution without further reverse-engineering. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
+**Not yet covered (CPU path stays):** `compute_epf_sharpness` orchestrator (selection logic + DCT8 reconstruct now both ported; full mixed-strategy `reconstruct_xyb_gpu` still TODO for non-DCT8 blocks), `estimate_entropy_full` orchestration. **AdjustQuantBlockAC fully ported as host helpers as of 2026-05-07** — pre-scan + all 6 heuristics A-F + orchestrator (`forks::quantize::adjust_quant_block_ac_host`) match upstream. A future `#[cube]` kernel can transcribe the now-standalone heuristics for per-block-parallel execution without further reverse-engineering. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **DCT8-only reconstruct path on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_xyb_dct8_only_gpu` composes dequant + DC override + IDCT + scatter into 4 GPU launches per image. Sufficient for the all-blocks-are-DCT8 case (common for straightforward distance values). **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
 
 ## Coverage summary
 
@@ -138,11 +138,13 @@ integration complete (host-side wrappers in `forks::afv` consuming
 modules verified composing through GpuEncoder. Sharpness picker
 two-pass selection logic ported as pure-CPU helper.
 **AdjustQuantBlockAC fully ported** (pre-scan + 6 heuristics A-F
-+ orchestrator). Remaining work concentrates in
-(a) `forks::reconstruct::reconstruct_xyb_gpu` (unblocks the
-compute_epf_sharpness orchestrator), (b) full estimate_entropy_full
-orchestration, (c) optional GPU kernels: per-block AdjustQuantBlockAC
-batch parallelism, sharpness candidate fan-out.
++ orchestrator). **DCT8-only reconstruct path on GPU** (4 launches
+per image — dequant + IDCT×3 + host DC override + host scatter).
+Remaining work concentrates in (a) mixed-strategy reconstruct (per-
+strategy IDCT dispatch + scatter for non-DCT8 blocks), (b) full
+estimate_entropy_full orchestration, (c) optional GPU kernels:
+per-block AdjustQuantBlockAC batch parallelism, sharpness candidate
+fan-out.
 
 ### Note on AC strategy search (Phase 3)
 
