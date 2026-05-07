@@ -174,6 +174,99 @@ pub const DCT_RESAMPLE_SCALE_64_TO_8: [f32; 8] = [
     0.717_108_1,
 ];
 
+/// One block's reconstruct recipe — the inputs to the multi-strategy
+/// reconstruct orchestrator.
+///
+/// `coeffs.len()` must equal
+/// `forks::transform::coeff_count_per_strategy(raw_strategy)` —
+/// 64 for DCT8/DCT4×/IDENTITY/DCT2X2, 128 for DCT16×8/DCT8×16,
+/// 256 for DCT16×16, 512 for DCT32×16/DCT16×32, 1024 for DCT32×32,
+/// 2048 for DCT64×32/DCT32×64, 4096 for DCT64×64.
+///
+/// The caller is responsible for producing already-dequantized,
+/// CfL-corrected, LLF-restored coefficients (use `dispatch_restore_llf`
+/// for the LLF stage). AFV0-3 strategies route through `forks::afv`
+/// instead — they panic if passed to `reconstruct_mixed_strategy_gpu`.
+#[derive(Debug, Clone)]
+pub struct BlockRecipe<'a> {
+    pub bx: usize,
+    pub by: usize,
+    pub raw_strategy: u8,
+    pub coeffs: &'a [f32],
+}
+
+/// Multi-strategy reconstruct orchestrator. Groups recipes by AC
+/// strategy, emits one batched IDCT launch per group, then scatters
+/// each block individually into the padded plane.
+///
+/// This is the efficient form for mixed-strategy reconstruct: at
+/// most 15 GPU launches per image (one per supported strategy that
+/// appears in `recipes`), regardless of block count.
+///
+/// **AFV constraint**: AFV0-3 are not supported here; they require
+/// the per-block sub-transform composition handled by
+/// `forks::afv::afv_transform_batch_gpu` (forward) /
+/// `inverse_afv_transform_batch_gpu` (inverse). Caller must filter
+/// AFV blocks out and process them separately.
+pub fn reconstruct_mixed_strategy_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    recipes: &[BlockRecipe<'_>],
+    plane: &mut [f32],
+    padded_width: usize,
+) {
+    use crate::forks::transform::coeff_count_per_strategy;
+
+    if recipes.is_empty() {
+        return;
+    }
+
+    // Group recipe indices by raw_strategy. We use a fixed-size
+    // lookup array sized to cover all strategy codes the dispatcher
+    // recognizes (0..=16). AFV codes aren't in this range.
+    const NUM_STRATEGY_CODES: usize = 17;
+    let mut groups: [Vec<usize>; NUM_STRATEGY_CODES] = core::array::from_fn(|_| Vec::new());
+    for (i, r) in recipes.iter().enumerate() {
+        let s = r.raw_strategy as usize;
+        if s >= NUM_STRATEGY_CODES {
+            panic!(
+                "reconstruct_mixed_strategy_gpu: strategy {s} out of range \
+                 (use forks::afv for AFV0-3)"
+            );
+        }
+        groups[s].push(i);
+    }
+
+    // For each populated group, batch the coeff buffers and dispatch.
+    for (strategy_code, indices) in groups.iter().enumerate() {
+        if indices.is_empty() {
+            continue;
+        }
+        let raw_strategy = strategy_code as u8;
+        let coeff_count = coeff_count_per_strategy(raw_strategy);
+        let mut batched = Vec::with_capacity(indices.len() * coeff_count);
+        let mut coords = Vec::with_capacity(indices.len());
+        for &i in indices {
+            let r = &recipes[i];
+            debug_assert_eq!(
+                r.coeffs.len(),
+                coeff_count,
+                "recipe {i}: coeffs.len() = {} but strategy {raw_strategy} expects {coeff_count}",
+                r.coeffs.len()
+            );
+            batched.extend_from_slice(r.coeffs);
+            coords.push((r.bx, r.by));
+        }
+        batched_reconstruct_same_strategy_gpu(
+            enc,
+            &batched,
+            &coords,
+            raw_strategy,
+            plane,
+            padded_width,
+        );
+    }
+}
+
 /// Batched IDCT + scatter for many blocks of the SAME AC strategy.
 /// One GPU launch for the IDCT regardless of `n_blocks`, then a per-
 /// block host-side scatter.
@@ -1125,6 +1218,57 @@ mod tests {
         let [r0, r1] = restore_llf_dct16x8_or_8x16(dc0, dc1);
         assert!((r0 - llf0).abs() < 1e-5, "got {r0} expected {llf0}");
         assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_reconstruct_mixed_strategy_gpu_dct8_and_dct16x16() {
+        // Mix two strategies: 3 DCT8 blocks + 2 DCT16x16 blocks at
+        // non-overlapping positions.
+        use crate::forks::transform::{RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16};
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        let padded_w = 64_usize;
+        let padded_h = 32_usize;
+        let mut plane = alloc::vec![0.42_f32; padded_w * padded_h];
+
+        let coeffs_dct8 = alloc::vec![0.0_f32; 64];
+        let coeffs_dct16 = alloc::vec![0.0_f32; 256];
+        let recipes = [
+            BlockRecipe { bx: 0, by: 0, raw_strategy: RAW_STRATEGY_DCT, coeffs: &coeffs_dct8 },
+            BlockRecipe { bx: 1, by: 1, raw_strategy: RAW_STRATEGY_DCT, coeffs: &coeffs_dct8 },
+            BlockRecipe { bx: 7, by: 0, raw_strategy: RAW_STRATEGY_DCT, coeffs: &coeffs_dct8 },
+            BlockRecipe { bx: 2, by: 2, raw_strategy: RAW_STRATEGY_DCT16X16, coeffs: &coeffs_dct16 },
+            BlockRecipe { bx: 5, by: 0, raw_strategy: RAW_STRATEGY_DCT16X16, coeffs: &coeffs_dct16 },
+        ];
+
+        reconstruct_mixed_strategy_gpu(&enc, &recipes, &mut plane, padded_w);
+
+        // DCT8 blocks: each is 8×8 at (bx*8, by*8).
+        for (bx, by) in [(0_usize, 0_usize), (1, 1), (7, 0)] {
+            for row in 0..8 {
+                for col in 0..8 {
+                    let v = plane[(by * 8 + row) * padded_w + bx * 8 + col];
+                    assert!(v.abs() < 1e-5, "DCT8 ({bx},{by}) [{row},{col}] = {v}");
+                }
+            }
+        }
+        // DCT16x16 blocks: each is 16×16 at (bx*8, by*8).
+        for (bx, by) in [(2_usize, 2_usize), (5, 0)] {
+            for row in 0..16 {
+                for col in 0..16 {
+                    let v = plane[(by * 8 + row) * padded_w + bx * 8 + col];
+                    assert!(v.abs() < 1e-5, "DCT16 ({bx},{by}) [{row},{col}] = {v}");
+                }
+            }
+        }
+        // An untouched pixel stays seeded.
+        // (3, 0) is empty (DCT8 covers (0,0)..(8,8); (1,1) covers
+        // (8,8)..(16,16); (7,0) covers (56,0)..(64,8); (5,0) DCT16
+        // covers (40,0)..(56,16); (2,2) DCT16 covers (16,16)..(32,32).
+        // So (24, 0) is far from all of these.
+        assert_eq!(plane[0 * padded_w + 24], 0.42);
     }
 
     #[cfg(feature = "cuda")]
