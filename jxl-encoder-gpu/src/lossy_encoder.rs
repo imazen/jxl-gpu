@@ -151,13 +151,44 @@ fn align_up(n: u32, align: u32) -> u32 {
 /// assert_eq!(quality_to_qac(-10.0), quality_to_qac(1.0));
 /// ```
 pub fn quality_to_qac(quality: f32) -> f32 {
-    const K_AC_QUANT: f32 = 0.765;
     let q = quality.clamp(1.0, 100.0);
     // Simple monotonic mapping: distance = 50 / q.
     // q=100 → d=0.5 (high quality), q=50 → d=1.0 (libjxl reference),
     // q=10 → d=5.0, q=1 → d=50 (degraded).
-    let distance = 50.0 / q;
-    K_AC_QUANT / distance
+    distance_to_qac(50.0 / q)
+}
+
+/// libjxl `K_AC_QUANT` constant — the per-block AC scale at distance=1.
+pub const K_AC_QUANT: f32 = 0.765;
+
+/// Map a libjxl-style distance to the per-block `qac_qm` scale that
+/// [`LossyEncoder`] expects. This is the most direct interface for
+/// callers who want libjxl semantics:
+///
+/// - distance=0.5 → qac=1.530 (very high quality, light quant)
+/// - distance=1.0 → qac=0.765 (libjxl default — visually transparent)
+/// - distance=2.0 → qac=0.383 (mild artifacts)
+/// - distance=5.0 → qac=0.153 (visibly degraded)
+/// - distance=10.0 → qac=0.0765 (heavily degraded)
+///
+/// Formula: `qac = K_AC_QUANT / distance`. Distance is clamped at
+/// `1e-3` to avoid div-by-zero (effectively unbounded qac).
+///
+/// Use this directly when targeting a libjxl distance; use
+/// [`quality_to_qac`] when you have a JPEG-style 1-100 knob.
+///
+/// ```
+/// use jxl_encoder_gpu::lossy_encoder::{distance_to_qac, K_AC_QUANT};
+/// // distance=1.0 (libjxl reference) → exactly K_AC_QUANT.
+/// assert!((distance_to_qac(1.0) - K_AC_QUANT).abs() < 1e-6);
+/// // distance=0.5 → twice the AC quant scale.
+/// assert!((distance_to_qac(0.5) - 2.0 * K_AC_QUANT).abs() < 1e-6);
+/// // Monotonically decreasing with distance.
+/// assert!(distance_to_qac(0.5) > distance_to_qac(1.0));
+/// assert!(distance_to_qac(1.0) > distance_to_qac(2.0));
+/// ```
+pub fn distance_to_qac(distance: f32) -> f32 {
+    K_AC_QUANT / distance.max(1e-3)
 }
 
 /// Pad a `width × height` plane up to `padded_width × padded_height` with
