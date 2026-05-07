@@ -38,6 +38,54 @@ use cubecl::Runtime;
 
 use crate::encoder::GpuEncoder;
 
+/// `INV_DC_QUANT[c]` constants — channel-specific inverse DC quantizers
+/// from upstream `jxl_encoder::vardct::quant::INV_DC_QUANT`. Used by
+/// the DC override step of `reconstruct_xyb_impl`.
+pub const INV_DC_QUANT: [f32; 3] = [4096.0, 512.0, 256.0];
+
+/// DC restoration for the DCT8 fast path of upstream's
+/// `reconstruct_xyb`. Pure scalar — bit-for-bit copy of upstream
+/// (reconstruct.rs lines 297-317).
+///
+/// Inputs:
+/// - `dq_x`/`dq_y`/`dq_b`: 64-element dequantized coefficient arrays
+///   for the block (output of dequant_dct8 — positions 1..64 are AC).
+/// - `quant_dc_x`/`quant_dc_y`/`quant_dc_b`: stored DC values
+///   (typically `i16`, cast to `f32` here).
+/// - `scale_dc`: from upstream `params.scale_dc`.
+///
+/// Behavior (matches upstream):
+/// 1. Compute per-channel `inv_factor[c] = INV_DC_QUANT[c] * scale_dc`.
+/// 2. Override the DC slot:
+///    - `dq_y[0] = quant_dc_y / inv_factor[1]`
+///    - `dq_x[0] = quant_dc_x / inv_factor[0]`
+///    - `dq_b[0] = (quant_dc_b + quant_dc_y * dc_cfl_factor_b) / inv_factor[2]`
+///      where `dc_cfl_factor_b = 0.5` (B-channel DC-level CfL).
+///
+/// Note: the AC-level CfL (per-tile `ytox_ratio` / `ytob_ratio`) is
+/// already applied during dequant. This function applies *only* the
+/// DC-level CfL — a separate fixed 0.5× contribution from Y to B at
+/// position 0.
+pub fn restore_dct8_dc_override(
+    dq_x: &mut [f32; 64],
+    dq_y: &mut [f32; 64],
+    dq_b: &mut [f32; 64],
+    quant_dc_x: f32,
+    quant_dc_y: f32,
+    quant_dc_b: f32,
+    scale_dc: f32,
+) {
+    let inv_factor = [
+        INV_DC_QUANT[0] * scale_dc,
+        INV_DC_QUANT[1] * scale_dc,
+        INV_DC_QUANT[2] * scale_dc,
+    ];
+    const DC_CFL_FACTOR_B: f32 = 0.5;
+    dq_y[0] = quant_dc_y / inv_factor[1];
+    dq_x[0] = quant_dc_x / inv_factor[0];
+    dq_b[0] = (quant_dc_b + quant_dc_y * DC_CFL_FACTOR_B) / inv_factor[2];
+}
+
 /// Decoder-side gab smoothing weights from libjxl epf.cc / loop_filter.h.
 /// Duplicated bit-for-bit from upstream `gab_smooth`.
 fn gab_weights() -> (f32, f32, f32) {
@@ -119,6 +167,58 @@ pub fn xyb_to_linear_rgb_gpu<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_restore_dct8_dc_override_y() {
+        // Y channel: dq_y[0] = quant_dc_y / inv_factor[1]
+        // inv_factor[1] = 512 * scale_dc
+        let mut dq_x = [0.0_f32; 64];
+        let mut dq_y = [0.0_f32; 64];
+        let mut dq_b = [0.0_f32; 64];
+        let quant_dc_y = 100.0_f32;
+        let scale_dc = 0.5_f32;
+        restore_dct8_dc_override(
+            &mut dq_x,
+            &mut dq_y,
+            &mut dq_b,
+            0.0,
+            quant_dc_y,
+            0.0,
+            scale_dc,
+        );
+        // dq_y[0] = 100 / (512 * 0.5) = 100 / 256 = 0.390625
+        assert!((dq_y[0] - 0.390_625).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_restore_dct8_dc_override_b_includes_y_cfl() {
+        // B channel includes 0.5 * Y DC contribution.
+        let mut dq_x = [0.0_f32; 64];
+        let mut dq_y = [0.0_f32; 64];
+        let mut dq_b = [0.0_f32; 64];
+        // quant_dc_b=0, quant_dc_y=10, scale_dc=1.0
+        // dq_b[0] = (0 + 10 * 0.5) / (256 * 1.0) = 5 / 256 = 0.01953125
+        restore_dct8_dc_override(&mut dq_x, &mut dq_y, &mut dq_b, 0.0, 10.0, 0.0, 1.0);
+        assert!((dq_b[0] - 0.019_531_25).abs() < 1e-6);
+        // dq_x[0] = 0 / 4096 = 0
+        assert_eq!(dq_x[0], 0.0);
+        // dq_y[0] = 10 / 512 = 0.01953125
+        assert!((dq_y[0] - 0.019_531_25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_restore_dct8_dc_override_does_not_touch_ac() {
+        // AC slots [1..64] must stay unchanged.
+        let mut dq_x = [0.5_f32; 64];
+        let mut dq_y = [0.7_f32; 64];
+        let mut dq_b = [0.3_f32; 64];
+        restore_dct8_dc_override(&mut dq_x, &mut dq_y, &mut dq_b, 1.0, 2.0, 3.0, 1.0);
+        for i in 1..64 {
+            assert_eq!(dq_x[i], 0.5);
+            assert_eq!(dq_y[i], 0.7);
+            assert_eq!(dq_b[i], 0.3);
+        }
+    }
 
     #[cfg(feature = "cuda")]
     #[test]
