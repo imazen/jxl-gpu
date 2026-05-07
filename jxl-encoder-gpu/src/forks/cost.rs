@@ -20,7 +20,7 @@
 //! 5. Apply per-strategy and per-channel multipliers + offsets
 //!
 //! Steps 1, 2, 4 already have batched GPU primitives via
-//! [`forks::transform`], [`forks::quantize`], and the GPU's pixel-loss
+//! [`crate::forks::transform`], [`crate::forks::quantize`], and the GPU's pixel-loss
 //! kernel. Step 3 (entropy estimation) is the one with no batched
 //! upstream API — `estimate_entropy_full` does it inline per-block.
 //!

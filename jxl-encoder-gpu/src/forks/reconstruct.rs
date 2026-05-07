@@ -54,7 +54,7 @@ fn gab_weights() -> (f32, f32, f32) {
 /// `jxl_encoder::vardct::reconstruct::gab_smooth`.
 ///
 /// Three sequential GPU launches over the X/Y/B planes (planes order
-/// matches upstream: planes[0]=X, planes[1]=Y, planes[2]=B). Each
+/// matches upstream: `planes[0]=X`, `planes[1]=Y`, `planes[2]=B`). Each
 /// channel is mutated in place via copy-from-Vec on the GPU return.
 pub fn gab_smooth_gpu<R: Runtime>(
     enc: &GpuEncoder<R>,

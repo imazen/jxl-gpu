@@ -19,7 +19,7 @@
 //! Reshape vs upstream `jxl_encoder::vardct::adaptive_quant`:
 //! - `compute_mask1x1`: original SIMD allocates a scratch buffer per
 //!   call. GPU version goes (Y → mask) → (mask → blurred-mask) as two
-//!   back-to-back GPU launches; the intermediate is a Vec<f32> we
+//!   back-to-back GPU launches; the intermediate is a `Vec<f32>` we
 //!   re-upload. Future fusion: a single GPU kernel that applies the
 //!   blur on-die before download.
 //! - `per_block_modulations`: same per-block math, run on the GPU. Full

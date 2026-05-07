@@ -19,8 +19,9 @@
 
 use cubecl::prelude::*;
 
-/// Pixel-domain mode: writes error_coeffs[i] = weights[i] * diff,
-/// skips info_loss accumulation. info_loss_sum/info_loss2_sum are 0.
+/// Pixel-domain mode: writes `error_coeffs[i] = weights[i] * diff`,
+/// skips info_loss accumulation. `info_loss_sum` / `info_loss2_sum`
+/// are 0.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn entropy_coeffs_pixel_kernel(

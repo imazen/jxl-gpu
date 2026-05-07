@@ -21,7 +21,7 @@
 //! - Upstream orchestrates step0 + step1 + step2 via the SIMD dispatch
 //!   trampoline, with one scratch buffer per step.
 //! - Our forks expose step1 and step2 as INDIVIDUAL passes the caller
-//!   chains. Because GPU launches return new Vec<f32>, the caller can
+//!   chains. Because GPU launches return new `Vec<f32>`, the caller can
 //!   feed step1's output directly into step2's input without managing
 //!   intermediate scratch.
 

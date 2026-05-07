@@ -118,7 +118,7 @@ fn tile_dims(raw_strategy: u8) -> (usize, usize) {
 /// Batched DCT dispatch on the GPU. All `block_coords` MUST use the
 /// same `raw_strategy`.
 ///
-/// Returns a contiguous Vec<f32> of length
+/// Returns a contiguous `Vec<f32>` of length
 /// `block_coords.len() * coeff_count_per_strategy(raw_strategy)`,
 /// with one block's coefficients packed after the next in the same
 /// order as `block_coords`.
@@ -169,7 +169,7 @@ pub fn apply_dct_batch_gpu<R: Runtime>(
 /// the same `raw_strategy` (one contiguous buffer of
 /// `coeff_count_per_strategy(raw_strategy)` floats per block).
 ///
-/// Returns a contiguous Vec<f32> of length `block_count * tile_pixels`
+/// Returns a contiguous `Vec<f32>` of length `block_count * tile_pixels`
 /// (with `tile_pixels` per block, in row-major order).
 ///
 /// Mirror of `apply_dct_batch_gpu` for the inverse direction. Useful
