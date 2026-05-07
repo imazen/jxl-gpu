@@ -5,6 +5,7 @@
 //! corresponding `jxl_encoder_simd::*_scalar` function.
 
 pub mod adaptive_quant;
+pub mod afv;
 pub mod block_l2;
 pub mod cfl;
 pub mod dc_restore;
