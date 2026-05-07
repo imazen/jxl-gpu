@@ -580,6 +580,106 @@ pub fn afv_cost_grid_single_channel<R: Runtime>(
     all_costs
 }
 
+/// 3-channel XYB+mask AFV cost grid (host-side, all 4 afv_kinds per call).
+///
+/// Mirrors the shape of the GPU-resident cost grid family in
+/// `crate::pipeline::compute_cost_grid_*_xyb` but stays host-side
+/// because the AFV transform composition (DCT4 + DCT4×4 + AFV4×4 +
+/// per-block DC pack/unpack) is itself host-orchestrated.
+///
+/// Inputs are all block-major (`n_blocks * 64` floats per channel,
+/// one block of 8×8 row-major data after another). Use the upstream
+/// gather (one used by the cost grid demos) to convert channel-plane
+/// data into block-major before calling this.
+///
+/// Per-channel `weights_*_per_block` is a single `[f32; 64]` slice from
+/// [`crate::quant_weights::afv_weights`] (channel slice). Per-block
+/// `qac_qm_*` provides the qac/qm scale. `mask_block_major` is also
+/// `n_blocks * 64` floats (one mask value per pixel, in the same
+/// block-major layout as the pixels).
+///
+/// Output: `Vec<f32>` of length `4 * n_blocks`, indexed by
+/// `[kind * n_blocks + b]`. Cost is the sum across X/Y/B channels of
+/// per-pixel `(orig - recon)^2 * mask` reduced over the block.
+#[allow(clippy::too_many_arguments)]
+pub fn afv_cost_grid_xyb_host<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    basis_t: &[f32; 256],
+    pixel_blocks_x: &[f32],
+    pixel_blocks_y: &[f32],
+    pixel_blocks_b: &[f32],
+    weights_x_per_block: &[f32; 64],
+    weights_y_per_block: &[f32; 64],
+    weights_b_per_block: &[f32; 64],
+    qac_qm_x: &[f32],
+    qac_qm_y: &[f32],
+    qac_qm_b: &[f32],
+    thresholds_x: &[f32; 4],
+    thresholds_y: &[f32; 4],
+    thresholds_b: &[f32; 4],
+    mask_block_major: &[f32],
+) -> Vec<f32> {
+    use crate::forks::dequant::dequant_blocks_gpu;
+    use crate::forks::quantize::quantize_blocks_gpu;
+
+    assert!(pixel_blocks_x.len().is_multiple_of(64));
+    assert_eq!(pixel_blocks_x.len(), pixel_blocks_y.len());
+    assert_eq!(pixel_blocks_x.len(), pixel_blocks_b.len());
+    assert_eq!(pixel_blocks_x.len(), mask_block_major.len());
+    let n_blocks = pixel_blocks_x.len() / 64;
+    assert_eq!(qac_qm_x.len(), n_blocks);
+    assert_eq!(qac_qm_y.len(), n_blocks);
+    assert_eq!(qac_qm_b.len(), n_blocks);
+
+    let mut weights_x = Vec::with_capacity(n_blocks * 64);
+    let mut weights_y = Vec::with_capacity(n_blocks * 64);
+    let mut weights_b = Vec::with_capacity(n_blocks * 64);
+    for _ in 0..n_blocks {
+        weights_x.extend_from_slice(weights_x_per_block);
+        weights_y.extend_from_slice(weights_y_per_block);
+        weights_b.extend_from_slice(weights_b_per_block);
+    }
+
+    let mut all_costs = Vec::with_capacity(4 * n_blocks);
+    for kind in 0_usize..4 {
+        let coeffs_x = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_x, kind);
+        let coeffs_y = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_y, kind);
+        let coeffs_b = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_b, kind);
+
+        let q_x = quantize_blocks_gpu(
+            enc, &coeffs_x, &weights_x, qac_qm_x, thresholds_x, 8, 8, 1, 1,
+        );
+        let q_y = quantize_blocks_gpu(
+            enc, &coeffs_y, &weights_y, qac_qm_y, thresholds_y, 8, 8, 1, 1,
+        );
+        let q_b = quantize_blocks_gpu(
+            enc, &coeffs_b, &weights_b, qac_qm_b, thresholds_b, 8, 8, 1, 1,
+        );
+
+        let dq_x = dequant_blocks_gpu(enc, &q_x, &weights_x, 64);
+        let dq_y = dequant_blocks_gpu(enc, &q_y, &weights_y, 64);
+        let dq_b = dequant_blocks_gpu(enc, &q_b, &weights_b, 64);
+
+        let recon_x = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_x, kind);
+        let recon_y = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_y, kind);
+        let recon_b = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_b, kind);
+
+        for b in 0..n_blocks {
+            let mut sum = 0.0_f32;
+            let r0 = b * 64;
+            for i in 0..64 {
+                let dx = pixel_blocks_x[r0 + i] - recon_x[r0 + i];
+                let dy = pixel_blocks_y[r0 + i] - recon_y[r0 + i];
+                let db = pixel_blocks_b[r0 + i] - recon_b[r0 + i];
+                let m = mask_block_major[r0 + i];
+                sum += (dx * dx + dy * dy + db * db) * m;
+            }
+            all_costs.push(sum);
+        }
+    }
+    all_costs
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
@@ -725,6 +825,50 @@ mod tests {
             assert!(c.is_finite() && c >= 0.0, "AFV cost grid produced bad cost {c}");
         }
         // At least one entry should be > 0 (synthetic input is not zero).
+        assert!(costs.iter().any(|&c| c > 0.0));
+    }
+
+    #[test]
+    fn test_afv_cost_grid_xyb_host_smoke() {
+        use crate::quant_weights::afv_weights;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        const N: usize = 4;
+        let mut px = vec![0.0_f32; N * 64];
+        let mut py = vec![0.0_f32; N * 64];
+        let mut pb = vec![0.0_f32; N * 64];
+        for b in 0..N {
+            for i in 0..64 {
+                let v = ((b * 7 + i * 11).wrapping_mul(31) % 251) as f32 / 251.0 - 0.5;
+                px[b * 64 + i] = 0.05 + 0.10 * v;
+                py[b * 64 + i] = 0.30 + 0.40 * v;
+                pb[b * 64 + i] = 0.10 + 0.20 * v;
+            }
+        }
+        let all_w = afv_weights();
+        let mut wx = [0.0_f32; 64];
+        let mut wy = [0.0_f32; 64];
+        let mut wb = [0.0_f32; 64];
+        wx.copy_from_slice(&all_w[0..64]);
+        wy.copy_from_slice(&all_w[64..128]);
+        wb.copy_from_slice(&all_w[128..192]);
+
+        let qac_qm = vec![1.0_f32; N];
+        let thr = [0.6_f32, 0.6, 0.6, 0.6];
+        let mask = vec![1.0_f32; N * 64];
+
+        let costs = afv_cost_grid_xyb_host(
+            &enc,
+            &AFV4X4_BASIS_TRANSPOSE,
+            &px, &py, &pb,
+            &wx, &wy, &wb,
+            &qac_qm, &qac_qm, &qac_qm,
+            &thr, &thr, &thr,
+            &mask,
+        );
+        assert_eq!(costs.len(), 4 * N);
+        for &c in &costs {
+            assert!(c.is_finite() && c >= 0.0, "AFV xyb cost grid bad cost {c}");
+        }
         assert!(costs.iter().any(|&c| c > 0.0));
     }
 
