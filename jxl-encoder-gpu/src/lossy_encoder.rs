@@ -13,11 +13,14 @@
 //! | [`LossyEncoder::encode_one_srgb_u8`] | sRGB `u8` interleaved | sRGB `u8` interleaved | one-shot, image-crate input |
 //! | [`LossyEncoder::encode_many_srgb_u8`] | sRGB `u8` interleaved | `Vec<u8>` per setting | quality sweep, image-crate input |
 //! | [`quality_to_qac`] | quality 1-100 | `qac_qm` scalar | JPEG-style quality knob |
+//! | [`distance_to_qac`] | libjxl distance | `qac_qm` scalar | direct libjxl semantics |
+//! | [`K_AC_QUANT`] | (constant) | 0.765 | libjxl AC scale at distance=1 |
 //!
 //! Construct one [`LossyEncoder`] per `(width, height)` to amortize
-//! the static-input upload (gaborish weights + thresholds + unit
-//! quant matrix) across many encodes. Arbitrary image sizes are
-//! supported (non-multiples-of-8 are padded internally with right+
+//! the static-input upload (per-channel DCT8 quant matrices +
+//! gaborish weights + dead-zone thresholds) across many encodes.
+//! Arbitrary image sizes are supported (non-multiples-of-8 are
+//! padded internally with right+
 //! bottom edge replication and cropped back at output).
 //!
 //! ## What it does today
