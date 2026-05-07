@@ -548,6 +548,114 @@ pub fn dct4x4_weights() -> Vec<f32> {
     weights
 }
 
+/// AFV per-channel parameters: `[afv01, afv10, afv02, afv20, afv22, band0, band1_mult, band2_mult, band3_mult]`.
+/// X / Y / B order. Mirrors libjxl `kAfvParams` / our upstream
+/// `jxl_encoder::vardct::quant::AFV_WEIGHTS`.
+const AFV_WEIGHTS: [[f64; 9]; 3] = [
+    // X channel
+    [3072.0, 3072.0, 256.0, 256.0, 256.0, 414.0, 0.0, 0.0, 0.0],
+    // Y channel
+    [1024.0, 1024.0, 50.0, 50.0, 50.0, 58.0, 0.0, 0.0, 0.0],
+    // B channel
+    [384.0, 384.0, 12.0, 12.0, 12.0, 22.0, -0.25, -0.25, -0.25],
+];
+
+/// AFV frequency lookup (16 = 4×4). `(0,0)` `(0,1)` `(1,0)` `(1,1)`
+/// are unused (DC tendency / corner positions handled separately).
+/// From libjxl `kFreqs`.
+const AFV_FREQS: [f64; 16] = [
+    0.0,
+    0.0,
+    0.8517778890324296,
+    5.37778436506804,
+    0.0,
+    0.0,
+    4.734747904497923,
+    5.449245381693219,
+    1.6598270267479331,
+    4.0,
+    7.275749096817861,
+    10.423227632456525,
+    2.662932286148962,
+    7.630657783650829,
+    8.962388608184032,
+    12.97166202570235,
+];
+
+/// Generate AFV quant weights (192 floats: 64 per channel; same table
+/// for all four AFV variants AFV0-AFV3).
+///
+/// Bit-for-bit port of upstream `jxl_encoder::vardct::quant::generate_afv_weights`.
+/// Layout per channel (row-major within an 8×8 block):
+/// - position (0,0) = DC weight = `1/bands[0]`
+/// - positions (0,1), (1,0) = "DC tendency" weights from `afv[0..2]`
+/// - positions (0,2), (2,0), (2,2) = corner weights from `afv[2..5]`
+/// - other (even, even) cells with `x>=2 || y>=2`: interpolated band weight
+/// - odd-row cells: shared with DCT4×8 weights (row-duplicated layout)
+/// - (even-row, odd-col) cells: shared with DCT4×4 weights (replicated layout)
+pub fn afv_weights() -> Vec<f32> {
+    let mut weights = vec![0.0_f32; 192];
+    let weights4x8 = dct4x8_weights();
+    let weights4x4 = dct4x4_weights();
+
+    const LO: f64 = 0.8517778890324296;
+    const HI: f64 = 12.97166202570235 - LO + 1e-6;
+
+    for (c, afv) in AFV_WEIGHTS.iter().enumerate() {
+        let start = c * 64;
+
+        let mut bands = [0.0_f64; 4];
+        bands[0] = afv[5];
+        for i in 1..4 {
+            bands[i] = bands[i - 1] * band_mult(afv[5 + i]);
+        }
+
+        weights[start] = (1.0 / bands[0]) as f32;
+        weights[start + 1] = (1.0 / afv[0]) as f32;
+        weights[start + 8] = (1.0 / afv[1]) as f32;
+        weights[start + 2] = (1.0 / afv[2]) as f32;
+        weights[start + 16] = (1.0 / afv[3]) as f32;
+        weights[start + 18] = (1.0 / afv[4]) as f32;
+
+        // Other AFV-corner positions on the (even, even) sublattice with x>=2 or y>=2.
+        for y in 0..4_usize {
+            for x in 0..4_usize {
+                if x < 2 && y < 2 {
+                    continue;
+                }
+                let freq = AFV_FREQS[y * 4 + x];
+                let val = interpolate_band((freq - LO) / HI * 3.0, &bands);
+                weights[start + (2 * y) * 8 + (2 * x)] = (1.0 / val) as f32;
+            }
+        }
+
+        // DCT4×8 weights along odd rows (skipping (0,0) which is the DC tendency
+        // already populated above).
+        for y in 0..4_usize {
+            for x in 0..8_usize {
+                if x == 0 && y == 0 {
+                    continue;
+                }
+                let idx4x8 = c * 64 + y * 16 + x;
+                weights[start + (2 * y + 1) * 8 + x] = weights4x8[idx4x8];
+            }
+        }
+
+        // DCT4×4 weights at (even-row, odd-col) cells (skipping (0,0)).
+        for y in 0..4_usize {
+            for x in 0..4_usize {
+                if x == 0 && y == 0 {
+                    continue;
+                }
+                let idx4x4 = c * 64 + y * 16 + x * 2;
+                weights[start + (2 * y) * 8 + (2 * x + 1)] = weights4x4[idx4x4];
+            }
+        }
+    }
+
+    weights
+}
+
 /// Generate DCT32x64 quant weights (32 rows × 64 cols = 2048 per channel,
 /// 6144 total). Same table also used for DCT64x32.
 pub fn dct32x64_weights() -> Vec<f32> {
@@ -713,6 +821,37 @@ mod tests {
         let w = dct2x2_weights();
         for c in 0..3 {
             assert_eq!(w[c * 64], 1.0 / 0xBAD as f32);
+        }
+    }
+
+    #[test]
+    fn test_afv_weights_shape_and_anchors() {
+        let w = afv_weights();
+        assert_eq!(w.len(), 192);
+        // All weights finite and positive (1/dequant where dequant > 0).
+        for v in &w {
+            assert!(v.is_finite() && *v > 0.0, "got {v}");
+        }
+        // Spot-check the explicit positions against the constants.
+        // DC at start = 1 / bands[0] = 1 / afv[5]
+        for (c, afv) in AFV_WEIGHTS.iter().enumerate() {
+            let s = c * 64;
+            // Position 0 is DC = 1/bands[0] = 1/afv[5]
+            let expected_dc = (1.0 / afv[5]) as f32;
+            assert!(
+                (w[s] - expected_dc).abs() < 1e-6 * expected_dc.abs().max(1.0),
+                "channel {c} DC: got {} expected {}",
+                w[s],
+                expected_dc
+            );
+            // (0,1) DC tendency = 1/afv[0]
+            assert!((w[s + 1] - (1.0 / afv[0]) as f32).abs() < 1e-6);
+            // (1,0) DC tendency = 1/afv[1]
+            assert!((w[s + 8] - (1.0 / afv[1]) as f32).abs() < 1e-6);
+            // (0,2), (2,0), (2,2) corners
+            assert!((w[s + 2] - (1.0 / afv[2]) as f32).abs() < 1e-6);
+            assert!((w[s + 16] - (1.0 / afv[3]) as f32).abs() < 1e-6);
+            assert!((w[s + 18] - (1.0 / afv[4]) as f32).abs() < 1e-6);
         }
     }
 
