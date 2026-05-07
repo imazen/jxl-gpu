@@ -1,6 +1,35 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-07 (session 6.4 — AFV cost grid + EPF Step 0 + sharpness picker)
+**Last updated:** 2026-05-07 (session 6.5 — AdjustQuantBlockAC fully ported)
+
+## Session 6.5 — AdjustQuantBlockAC fully ported as host helpers
+
+The full upstream `adjust_quant_block_ac` (~250 lines, 6 heuristics A-F + pre-scan) is now portable as standalone host helpers in `forks::quantize`. Eight commits, incremental:
+
+| Helper | Commit | Notes |
+|---|---|---|
+| `adjust_quant_prescan` | `20318810` | Per-block coefficient pre-scan; returns `None` for partial block kinds |
+| `apply_heuristic_a_thresholds` | `453808d0` | Threshold reduction for `xsize > 1 || ysize > 1` |
+| `apply_heuristic_c_corner_penalty` | `ebf765ed` | HF corner penalty, per-channel `mul = [70, 30, 60]` |
+| `apply_heuristic_d_dct8_flatness` | `ebf765ed` | DCT8-only flatness detector |
+| `apply_heuristic_b_sparse_y` | `86886b55` | Y-channel sparse block, K_LIMIT/K_MUL constants, threshold cascade |
+| `apply_heuristic_e_large_transform` | `6d3c16db` | DCT16+ family, K_MUL1/K_MUL2 4×3 tables |
+| `apply_heuristic_f_activity` | `99362cc3` | Always runs; activity-based reduction |
+| `adjust_quant_block_ac_host` | `d1bef643` | Orchestrator: A → prescan → B → C → D → E → F |
+| Docs roll-up | `4155909d` | PORT_STATUS + CHANGELOG |
+
+26 unit tests across the family. With heuristics standalone, a future per-block-parallel `#[cube]` kernel can transcribe them directly.
+
+### Remaining gaps (after this session)
+
+| Gap | Status |
+|-----|--------|
+| `forks::reconstruct::reconstruct_xyb_gpu` | NOT STARTED — large orchestrator (~1417 lines upstream); composes already-GPU pieces (dequant, CfL, IDCT family) plus per-strategy scatter. Unblocks `compute_epf_sharpness_gpu`. |
+| `estimate_entropy_full` orchestration | NOT STARTED — large per-block entropy estimator (~250+ lines); composes DCT + quantize + masking + 8th-power norm. Has SIMD-aware fused paths. |
+| Per-block parallel `#[cube]` kernel for AdjustQuantBlockAC | OPTIONAL OPT — heuristics are now portable; transcription to GPU is straightforward. |
+| Per-(w,h) instance pre-allocation cache | OPTIONAL OPT |
+
+The two NOT-STARTED items are each large enough to warrant dedicated sessions rather than 90s slices.
 
 ## Session 6.4 — AFV cost grid + EPF Step 0 + sharpness picker
 
