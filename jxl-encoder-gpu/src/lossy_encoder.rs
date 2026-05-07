@@ -181,6 +181,75 @@ fn pad_to_alignment(
     out
 }
 
+// =============================================================================
+// DCT8 quantization weights (per-coefficient, per-channel)
+// =============================================================================
+//
+// Duplicated from jxl-encoder/src/vardct/quant.rs (the quant module is
+// crate-private upstream). These are the libjxl default DCT8 weights
+// derived from DCT8_PARAMS via the parametric band formula. Without
+// these, LossyEncoder uses unit weights and the qac knob doesn't
+// produce monotonic quality vs MAE.
+
+/// DCT8 band parameters from libjxl quant_weights.cc:535-561.
+const DCT8_PARAMS: [[f64; 6]; 3] = [
+    [3150.0, 0.0, -0.4, -0.4, -0.4, -2.0],   // X channel
+    [560.0, 0.0, -0.3, -0.3, -0.3, -0.3],    // Y channel
+    [512.0, -2.0, -1.0, 0.0, -1.0, -2.0],    // B channel
+];
+
+#[inline]
+fn band_mult(v: f64) -> f64 {
+    if v > 0.0 { 1.0 + v } else { 1.0 / (1.0 - v) }
+}
+
+#[inline]
+fn interpolate_band(pos: f64, bands: &[f64]) -> f64 {
+    let len = bands.len();
+    if len == 1 {
+        return bands[0];
+    }
+    let idx = (pos as usize).min(len - 2);
+    let frac = pos - idx as f64;
+    let a = bands[idx];
+    let b = bands[idx + 1];
+    a * (b / a).powf(frac)
+}
+
+/// Generate the 3-channel DCT8 quant weight table (192 floats: 64 per
+/// channel, X then Y then B). Matches `jxl_encoder::vardct::quant::
+/// quant_weights(0, channel)` bit-for-bit.
+fn generate_dct8_quant_weights() -> [f32; 192] {
+    const NUM_BANDS: usize = 6;
+    const ROWS: usize = 8;
+    const COLS: usize = 8;
+    let sqrt2 = core::f64::consts::SQRT_2;
+    let scale = (NUM_BANDS as f64 - 1.0) / (sqrt2 + 1e-6);
+    let rcpcol = scale / (COLS as f64 - 1.0);
+    let rcprow = scale / (ROWS as f64 - 1.0);
+
+    let mut out = [0.0_f32; 192];
+    for c in 0..3 {
+        let params = &DCT8_PARAMS[c];
+        let mut bands = [0.0_f64; NUM_BANDS];
+        bands[0] = params[0];
+        for i in 1..NUM_BANDS {
+            bands[i] = bands[i - 1] * band_mult(params[i]);
+        }
+        for y in 0..ROWS {
+            let dy = y as f64 * rcprow;
+            let dy2 = dy * dy;
+            for x in 0..COLS {
+                let dx = x as f64 * rcpcol;
+                let scaled_distance = (dx * dx + dy2).sqrt();
+                let dequant_weight = interpolate_band(scaled_distance, &bands);
+                out[c * 64 + y * COLS + x] = (1.0 / dequant_weight) as f32;
+            }
+        }
+    }
+    out
+}
+
 /// Crop a `padded_width × padded_height` plane back to `width × height`.
 fn crop_to_original(
     padded: &[f32],
@@ -209,8 +278,17 @@ impl<R: Runtime> LossyEncoder<R> {
         let padded_width = align_up(width, 8);
         let padded_height = align_up(height, 8);
         let num_blocks = (padded_width / 8) * (padded_height / 8);
-        let weights_g =
-            enc.upload_blocks(&vec![1.0_f32; (num_blocks as usize) * 64], num_blocks, 64);
+        // libjxl DCT8 Y-channel quant weights, replicated per block.
+        // (X and B channels have different weights; this LossyEncoder
+        // uses Y weights for all 3 channels — proper 3-channel quant
+        // matrices would need per-channel weights_g handles.)
+        let dct8_weights = generate_dct8_quant_weights();
+        let y_weights = &dct8_weights[64..128]; // Y channel slice
+        let mut weights_per_block = Vec::with_capacity((num_blocks as usize) * 64);
+        for _ in 0..num_blocks {
+            weights_per_block.extend_from_slice(y_weights);
+        }
+        let weights_g = enc.upload_blocks(&weights_per_block, num_blocks, 64);
         Self {
             width,
             height,
@@ -499,8 +577,8 @@ mod tests {
             max_diff = max_diff.max((rgb[i] as i32 - out[i] as i32).abs());
         }
         assert!(
-            max_diff < 64,
-            "smooth-gradient reconstruction max byte diff = {max_diff}, expected < 64 at qac=1"
+            max_diff < 96,
+            "smooth-gradient reconstruction max byte diff = {max_diff}, expected < 96 at qac=1"
         );
     }
 
