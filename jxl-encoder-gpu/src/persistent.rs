@@ -44,6 +44,8 @@ use cubecl::server::Handle;
 
 use crate::encoder::GpuEncoder;
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
+use crate::launch::dequant::dequant_dct8;
+use crate::launch::quantize::quantize_dct8;
 use crate::launch::dct32::{
     dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32,
 };
@@ -122,6 +124,32 @@ impl<R: Runtime> GpuBlocks<R> {
         self.coeffs_per_block
     }
     pub fn total_floats(&self) -> usize {
+        (self.num_blocks as usize) * (self.coeffs_per_block as usize)
+    }
+    pub fn handle(&self) -> &Handle {
+        &self.handle
+    }
+}
+
+/// Typed handle to GPU-resident per-block `i32` data — quantized
+/// coefficients. Same `num_blocks * coeffs_per_block` layout as
+/// [`GpuBlocks`], but with `i32` element type (kept as raw bytes
+/// in cubecl).
+pub struct GpuI32Blocks<R: Runtime> {
+    handle: Handle,
+    num_blocks: u32,
+    coeffs_per_block: u32,
+    _r: core::marker::PhantomData<R>,
+}
+
+impl<R: Runtime> GpuI32Blocks<R> {
+    pub fn num_blocks(&self) -> u32 {
+        self.num_blocks
+    }
+    pub fn coeffs_per_block(&self) -> u32 {
+        self.coeffs_per_block
+    }
+    pub fn total_ints(&self) -> usize {
         (self.num_blocks as usize) * (self.coeffs_per_block as usize)
     }
     pub fn handle(&self) -> &Handle {
@@ -579,6 +607,147 @@ impl<R: Runtime> GpuEncoder<R> {
         self.run_per_block_kernel(c, 4096, 4096, "IDCT64x64", idct_64x64::<R>)
     }
 
+    /// Allocate zero-filled per-block `i32` GPU buffer.
+    pub fn alloc_i32_blocks(&self, num_blocks: u32, coeffs_per_block: u32) -> GpuI32Blocks<R> {
+        let n = (num_blocks as usize) * (coeffs_per_block as usize);
+        let handle = self
+            .client_ref()
+            .create_from_slice(i32::as_bytes(&vec![0_i32; n]));
+        GpuI32Blocks {
+            handle,
+            num_blocks,
+            coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Download a `GpuI32Blocks` back to host memory.
+    pub fn download_i32_blocks(&self, blocks: &GpuI32Blocks<R>) -> Vec<i32> {
+        let bytes = self.client_ref().read_one(blocks.handle.clone()).expect("download");
+        i32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Persistent-API DCT8 quantize. Takes f32 coeffs + f32 weights +
+    /// f32 per-block qac_qm + 4-quadrant thresholds, returns i32
+    /// quantized blocks. All inputs live on GPU; output is also GPU-
+    /// resident as a [`GpuI32Blocks`].
+    ///
+    /// `weights` and `coeffs` must have `coeffs_per_block == 64`.
+    /// `qac_qm` is a host slice (small enough that uploading per-call
+    /// is cheap; future revision can take a `GpuPlane` for repeated
+    /// use).
+    pub fn quantize_dct8_persistent(
+        &self,
+        coeffs: &GpuBlocks<R>,
+        weights: &GpuBlocks<R>,
+        qac_qm: &[f32],
+        thresholds: &[f32; 4],
+    ) -> GpuI32Blocks<R> {
+        assert_eq!(coeffs.coeffs_per_block, 64);
+        assert_eq!(weights.coeffs_per_block, 64);
+        assert_eq!(coeffs.num_blocks, weights.num_blocks);
+        assert_eq!(qac_qm.len() as u32, coeffs.num_blocks);
+        let n = coeffs.total_floats();
+        let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
+        let h_thr = self.client_ref().create_from_slice(f32::as_bytes(thresholds));
+        let h_out = self
+            .client_ref()
+            .create_from_slice(i32::as_bytes(&vec![0_i32; n]));
+        quantize_dct8::<R>(
+            self.client_ref(),
+            coeffs.handle.clone(),
+            weights.handle.clone(),
+            h_qac,
+            h_thr,
+            h_out.clone(),
+            coeffs.num_blocks,
+        );
+        GpuI32Blocks {
+            handle: h_out,
+            num_blocks: coeffs.num_blocks,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Persistent-API 3-channel DCT8 dequant. Takes quantized i32
+    /// blocks for each channel + per-coefficient weights + per-block
+    /// scale + CfL factors. Returns 3 `GpuBlocks` (X, Y, B) of
+    /// dequantized f32 coefficients.
+    ///
+    /// All inputs live on GPU; outputs also stay GPU-resident.
+    /// `x_factor` / `b_factor` are host slices (per-block CfL factors,
+    /// length `num_blocks`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn dequant_dct8_persistent(
+        &self,
+        quant_x: &GpuI32Blocks<R>,
+        quant_y: &GpuI32Blocks<R>,
+        quant_b: &GpuI32Blocks<R>,
+        weights_x: &GpuBlocks<R>,
+        weights_y: &GpuBlocks<R>,
+        weights_b: &GpuBlocks<R>,
+        qac_qm_x: &[f32],
+        qac_qm_y: &[f32],
+        qac_qm_b: &[f32],
+        x_factor: &[f32],
+        b_factor: &[f32],
+    ) -> (GpuBlocks<R>, GpuBlocks<R>, GpuBlocks<R>) {
+        let nb = quant_x.num_blocks;
+        assert_eq!(quant_y.num_blocks, nb);
+        assert_eq!(quant_b.num_blocks, nb);
+        for q in [quant_x, quant_y, quant_b] {
+            assert_eq!(q.coeffs_per_block, 64);
+        }
+        for w in [weights_x, weights_y, weights_b] {
+            assert_eq!(w.coeffs_per_block, 64);
+            assert_eq!(w.num_blocks, nb);
+        }
+        for s in [qac_qm_x, qac_qm_y, qac_qm_b, x_factor, b_factor] {
+            assert_eq!(s.len() as u32, nb);
+        }
+        let n = (nb as usize) * 64;
+        let h_qmx = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_x));
+        let h_qmy = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_y));
+        let h_qmb = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_b));
+        let h_xf = self.client_ref().create_from_slice(f32::as_bytes(x_factor));
+        let h_bf = self.client_ref().create_from_slice(f32::as_bytes(b_factor));
+        let h_ox = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        let h_oy = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        let h_ob = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        dequant_dct8::<R>(
+            self.client_ref(),
+            quant_x.handle.clone(),
+            quant_y.handle.clone(),
+            quant_b.handle.clone(),
+            weights_x.handle.clone(),
+            weights_y.handle.clone(),
+            weights_b.handle.clone(),
+            h_qmx,
+            h_qmy,
+            h_qmb,
+            h_xf,
+            h_bf,
+            h_ox.clone(),
+            h_oy.clone(),
+            h_ob.clone(),
+            nb,
+        );
+        let mk = |h| GpuBlocks {
+            handle: h,
+            num_blocks: nb,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        };
+        (mk(h_ox), mk(h_oy), mk(h_ob))
+    }
+
     /// Persistent-API mask1x1 field on the Y channel.
     pub fn mask1x1_persistent(&self, y: &GpuPlane<R>) -> GpuPlane<R> {
         let n = y.n_pixels();
@@ -730,6 +899,63 @@ mod tests {
             max_err = max_err.max((input[i] - recon_host[i]).abs());
         }
         assert!(max_err < 5e-4, "DCT32x32 persistent roundtrip drift: {max_err:.3e}");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_quantize_dct8_persistent_zero() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let nb = 4_u32;
+        let n = (nb as usize) * 64;
+        let coeffs = enc.upload_blocks(&vec![0.0_f32; n], nb, 64);
+        let weights = enc.upload_blocks(&vec![1.0_f32; n], nb, 64);
+        let qac = vec![1.0_f32; nb as usize];
+        let thr = [0.56_f32, 0.62, 0.62, 0.62];
+        let q = enc.quantize_dct8_persistent(&coeffs, &weights, &qac, &thr);
+        assert_eq!(q.num_blocks(), nb);
+        assert_eq!(q.coeffs_per_block(), 64);
+        let host = enc.download_i32_blocks(&q);
+        assert!(host.iter().all(|&v| v == 0));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_quantize_dequant_chain_persistent() {
+        // Quantize all 3 channels then dequant — verifies the typed
+        // GpuI32Blocks → GpuBlocks transition works end-to-end.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let nb = 8_u32;
+        let n = (nb as usize) * 64;
+        let coeffs_x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.07).sin()).collect();
+        let coeffs_y: Vec<f32> = (0..n).map(|i| (i as f32 * 0.11).cos()).collect();
+        let coeffs_b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.13).sin()).collect();
+        let cx = enc.upload_blocks(&coeffs_x, nb, 64);
+        let cy = enc.upload_blocks(&coeffs_y, nb, 64);
+        let cb = enc.upload_blocks(&coeffs_b, nb, 64);
+        let weights = vec![1.0_f32; n];
+        let wx = enc.upload_blocks(&weights, nb, 64);
+        let wy = enc.upload_blocks(&weights, nb, 64);
+        let wb = enc.upload_blocks(&weights, nb, 64);
+        let qac = vec![4.0_f32; nb as usize];
+        let thr = [0.56_f32, 0.62, 0.62, 0.62];
+        let qx = enc.quantize_dct8_persistent(&cx, &wx, &qac, &thr);
+        let qy = enc.quantize_dct8_persistent(&cy, &wy, &qac, &thr);
+        let qb = enc.quantize_dct8_persistent(&cb, &wb, &qac, &thr);
+
+        let xf = vec![0.0_f32; nb as usize];
+        let bf = vec![0.0_f32; nb as usize];
+        let (dx, dy, db) =
+            enc.dequant_dct8_persistent(&qx, &qy, &qb, &wx, &wy, &wb, &qac, &qac, &qac, &xf, &bf);
+        assert_eq!(dx.coeffs_per_block(), 64);
+        let dx_host = enc.download_blocks(&dx);
+        let dy_host = enc.download_blocks(&dy);
+        let db_host = enc.download_blocks(&db);
+        assert_eq!(dx_host.len(), n);
+        for v in dx_host.iter().chain(&dy_host).chain(&db_host) {
+            assert!(v.is_finite());
+        }
     }
 
     #[cfg(feature = "cuda")]
