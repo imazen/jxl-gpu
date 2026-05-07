@@ -1270,12 +1270,12 @@ mod tests {
         assert_eq!(blocks2.num_blocks(), 2);
         let host2 = enc.download_blocks(&blocks2);
         // Block 0 row 0: pixels p2[0..8] = 0..8.
-        for x in 0..8 {
-            assert_eq!(host2[x], x as f32);
+        for (x, &v) in host2[..8].iter().enumerate() {
+            assert_eq!(v, x as f32);
         }
         // Block 1 row 0: pixels p2[8..16] = 8..16.
-        for x in 0..8 {
-            assert_eq!(host2[64 + x], (8 + x) as f32);
+        for (x, &v) in host2[64..72].iter().enumerate() {
+            assert_eq!(v, (8 + x) as f32);
         }
     }
 
