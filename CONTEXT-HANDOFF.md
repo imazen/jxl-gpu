@@ -1,6 +1,34 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-07 (session 6.5 — AdjustQuantBlockAC fully ported)
+**Last updated:** 2026-05-07 (session 6.6 — DCT8 reconstruct + EPF sharpness orchestrator on GPU)
+
+## Session 6.6 — DCT8 reconstruct + full EPF sharpness orchestrator on GPU
+
+End-to-end `compute_epf_sharpness` on GPU for the common (all-blocks-DCT8) case. Six commits:
+
+| Helper / Orchestrator | Commit | Notes |
+|---|---|---|
+| `restore_dct8_dc_override` | `878e144f` | Per-block DC restoration with 0.5× Y→B DC-CfL; pure scalar |
+| `restore_dct8_dc_override_batched` | `44405a8d` | Flat-slice variant matching `dequant_dct8_blocks_gpu` output layout |
+| `reconstruct_xyb_dct8_only_gpu` | `984431fb` | 4 launches per image: dequant + DC override + IDCT×3 + scatter |
+| `apply_epf_chain_gpu` + `epf_sharpness_candidates` | `9a8903dd` | step0/1/2 sequence per upstream `apply_epf` + candidate selector |
+| `compute_epf_sharpness_dct8_gpu` | `fe1bf69d` | Full orchestrator: reconstruct → gaborish (opt) → per-candidate (EPF + L2) → two-pass picker |
+| Docs roll-ups | `2847b257`, `fa176a37` | PORT_STATUS + CHANGELOG |
+
+Total per-image launch count (3 candidates, epf_iters=2, gaborish on): ~25 GPU launches.
+
+GPU smoke test verifies `compute_epf_sharpness_dct8_gpu` returns a length-`nblocks` Vec<u8> where every value is drawn from the candidate set, on a 4×4 block synthetic input.
+
+This closes the EPF sharpness orchestrator gap from PORT_STATUS for the DCT8-only path. Together with session 6.5 (AdjustQuantBlockAC) and 6.4 (AFV cost grid), the encoder-side reconstruction + quality heuristic chain is now fully GPU-resident for the common case.
+
+### Remaining gaps (after this session)
+
+| Gap | Status |
+|-----|--------|
+| Mixed-strategy `reconstruct_xyb_gpu` | NOT STARTED — per-strategy IDCT dispatch + scatter for non-DCT8 blocks (DCT16+, IDENTITY, DCT2X2, DCT4×, AFV0-3). The per-strategy IDCT kernels exist; missing piece is the host-side dispatch + per-strategy DC-handling + scatter |
+| `estimate_entropy_full` orchestration | NOT STARTED — large per-block entropy estimator (~250+ lines); composes DCT + quantize + masking + 8th-power norm with SIMD-aware fused paths |
+| Per-block-parallel `#[cube]` AdjustQuantBlockAC kernel | OPTIONAL OPT |
+| Per-(w,h) instance pre-allocation cache | OPTIONAL OPT |
 
 ## Session 6.5 — AdjustQuantBlockAC fully ported as host helpers
 
