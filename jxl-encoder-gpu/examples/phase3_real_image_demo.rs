@@ -185,6 +185,7 @@ fn main() {
             Partition16x16::TwoDct16x8Horizontal => 1,
             Partition16x16::TwoDct8x16Vertical => 2,
             Partition16x16::FourDct8x8 => 3,
+            Partition16x16::FourSubBlocks(_) => continue, // demo doesn't pass sub-block grids
         }] += 1;
     }
 

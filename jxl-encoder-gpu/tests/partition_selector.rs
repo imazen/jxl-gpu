@@ -70,6 +70,7 @@ fn picks_two_dct16x8_when_cheapest() {
     let extra = CostGrids16x16 {
         dct_16x8: Some(&cost_16x8),
         dct_8x16: None,
+        ..Default::default()
     };
 
     let p = select_partitions_16x16_full(&cost_dct8, &cost_dct16x16, extra, 4, 4);
@@ -86,6 +87,7 @@ fn picks_two_dct8x16_when_cheapest() {
     let extra = CostGrids16x16 {
         dct_16x8: None,
         dct_8x16: Some(&cost_8x16),
+        ..Default::default()
     };
 
     let p = select_partitions_16x16_full(&cost_dct8, &cost_dct16x16, extra, 4, 4);

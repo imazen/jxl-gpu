@@ -1178,3 +1178,65 @@ where
     let bytes = client.read_one(h_out).expect("read");
     f32::from_bytes(&bytes).to_vec()
 }
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use super::*;
+
+    type B = cubecl::cuda::CudaRuntime;
+
+    fn deterministic_blocks(n_blocks: usize) -> alloc::vec::Vec<f32> {
+        let mut out = alloc::vec![0.0f32; n_blocks * 64];
+        for b in 0..n_blocks {
+            for i in 0..64 {
+                let v = ((b * 7 + i * 13).wrapping_mul(31) % 251) as f32 / 251.0 - 0.5;
+                out[b * 64 + i] = 0.3 + 0.4 * v;
+            }
+        }
+        out
+    }
+
+    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(&x, &y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
+    }
+
+    #[test]
+    fn test_identity_blocks_roundtrip() {
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let pixels = deterministic_blocks(8);
+        let coeffs = enc.identity_blocks(&pixels);
+        let recon = enc.inverse_identity_blocks(&coeffs);
+        assert_eq!(coeffs.len(), pixels.len());
+        assert_eq!(recon.len(), pixels.len());
+        let m = max_abs_diff(&pixels, &recon);
+        assert!(m < 1e-5, "IDENTITY roundtrip max|Δ| = {m:.3e} (>1e-5)");
+    }
+
+    #[test]
+    fn test_dct2x2_blocks_roundtrip() {
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let pixels = deterministic_blocks(8);
+        let coeffs = enc.dct2x2_blocks(&pixels);
+        let recon = enc.inverse_dct2x2_blocks(&coeffs);
+        assert_eq!(coeffs.len(), pixels.len());
+        assert_eq!(recon.len(), pixels.len());
+        let m = max_abs_diff(&pixels, &recon);
+        assert!(m < 1e-5, "DCT2X2 roundtrip max|Δ| = {m:.3e} (>1e-5)");
+    }
+
+    #[test]
+    fn test_identity_vs_dct2x2_distinct() {
+        // Sanity: the two transforms should produce different outputs
+        // on the same input — they're different ops. (The DC term
+        // post-Hadamard is the same for both, but AC differs.)
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let pixels = deterministic_blocks(2);
+        let id_coeffs = enc.identity_blocks(&pixels);
+        let dct_coeffs = enc.dct2x2_blocks(&pixels);
+        let m = max_abs_diff(&id_coeffs, &dct_coeffs);
+        assert!(m > 1e-3, "IDENTITY and DCT2X2 should produce different coeffs (max|Δ|={m:.3e})");
+    }
+}

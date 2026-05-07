@@ -265,6 +265,7 @@ fn main() {
     let extra = CostGrids16x16 {
         dct_16x8: Some(&cost_dct16x8),
         dct_8x16: Some(&cost_dct8x16),
+        ..Default::default()
     };
     let partitions = select_partitions_16x16_full(
         &cost_dct8,
@@ -282,6 +283,7 @@ fn main() {
             Partition16x16::TwoDct16x8Horizontal => 1,
             Partition16x16::TwoDct8x16Vertical => 2,
             Partition16x16::FourDct8x8 => 3,
+            Partition16x16::FourSubBlocks(_) => continue, // demo doesn't pass sub-block grids
         }] += 1;
     }
 
@@ -302,6 +304,7 @@ fn main() {
                 Partition16x16::TwoDct16x8Horizontal => "16×8 ",
                 Partition16x16::TwoDct8x16Vertical => "8×16 ",
                 Partition16x16::FourDct8x8 => "8×8  ",
+                Partition16x16::FourSubBlocks(_) => "sub  ",
             })
             .collect();
         println!("  {}", row.join("  "));
