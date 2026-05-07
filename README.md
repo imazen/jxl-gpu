@@ -54,37 +54,35 @@ See [`PORT_STATUS.md`](PORT_STATUS.md) for the per-kernel grid +
 [`CONTEXT-HANDOFF.md`](CONTEXT-HANDOFF.md) for the perf breakthrough
 write-up.
 
-## Quick start
+## Quick start (high-level `LossyEncoder` API)
 
 ```rust
-use cubecl::prelude::*;
-use jxl_encoder_gpu::launch::xyb::{xyb_forward, xyb_inverse};
+use jxl_encoder_gpu::encoder::GpuEncoder;
+use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
 type Backend = cubecl::cuda::CudaRuntime;
 
-let device = <Backend as cubecl::Runtime>::Device::default();
-let client = <Backend as cubecl::Runtime>::client(&device);
+let enc: GpuEncoder<Backend> = GpuEncoder::new();
 
-// Linear-RGB input, 256×256 pixels, planar (R, G, B separate).
-let n = 256 * 256;
-let r = vec![0.5_f32; n];
-let g = vec![0.5_f32; n];
-let b = vec![0.5_f32; n];
+// Construct one LossyEncoder per (width, height) — amortizes
+// per-channel quant matrix uploads across all encodes that follow.
+// Arbitrary dimensions are supported (padded internally).
+let lossy = LossyEncoder::new(&enc, 1024, 768);
 
-let h_r = client.create_from_slice(f32::as_bytes(&r));
-let h_g = client.create_from_slice(f32::as_bytes(&g));
-let h_b = client.create_from_slice(f32::as_bytes(&b));
-let h_x = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
-let h_y = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
-let h_b_out = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+// sRGB U8 input from any image source (e.g., the `image` crate).
+let rgb_in: Vec<u8> = vec![128; 1024 * 768 * 3];
 
-xyb_forward::<Backend>(&client, h_r, h_g, h_b, h_x, h_y, h_b_out, n as u32);
+// libjxl-style distance: 1.0 = visually transparent, higher = lossier.
+let qac = distance_to_qac(1.0);
+let rgb_out: Vec<u8> = lossy.encode_one_srgb_u8(&enc, &rgb_in, qac);
 
-// Read result back to host
-let xyb_y_bytes = client.read_one(h_y).expect("read y");
-let xyb_y: &[f32] = f32::from_bytes(&xyb_y_bytes);
-println!("XYB Y[0] = {}", xyb_y[0]);
+// Batch: encode the same input at multiple settings (one upload).
+let qacs = [distance_to_qac(0.5), distance_to_qac(1.0), distance_to_qac(2.0)];
+let outputs: Vec<Vec<u8>> = lossy.encode_many_srgb_u8(&enc, &rgb_in, &qacs);
 ```
+
+For lower-level access (custom pipelines, individual GPU kernels),
+see [`crate::persistent`] and [`crate::launch`].
 
 ## Backends
 
