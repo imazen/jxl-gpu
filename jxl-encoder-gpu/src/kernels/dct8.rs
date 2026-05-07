@@ -341,6 +341,67 @@ pub fn dct_8x8_wide_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     }
 }
 
+/// Wide-cube inverse 8×8 DCT — symmetric to `dct_8x8_wide_kernel`.
+/// Same per-thread private slice layout in shared memory.
+#[cube(launch_unchecked)]
+pub fn idct_8x8_wide_kernel(input: &Array<f32>, output: &mut Array<f32>) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = input.len() / 64usize;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+    let unit = UNIT_POS;
+    let private_base = unit * 64u32;
+    let private_base_us = private_base as usize;
+
+    let mut scratch = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut transposed = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+
+    // Load whole block into private scratch slice.
+    let mut i: u32 = 0u32;
+    while i < 64u32 {
+        let iu = i as usize;
+        scratch[private_base_us + iu] = input[off + iu];
+        i += 1u32;
+    }
+
+    // Row pass.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        idct1d_8(&mut scratch, private_base + r * 8u32);
+        r += 1u32;
+    }
+
+    // Transpose.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            transposed[private_base_us + cu * 8usize + ru] =
+                scratch[private_base_us + ru * 8usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // Column pass (= row pass on transposed).
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        idct1d_8(&mut transposed, private_base + r * 8u32);
+        r += 1u32;
+    }
+
+    let mut i: u32 = 0u32;
+    while i < 64u32 {
+        let iu = i as usize;
+        output[off + iu] = transposed[private_base_us + iu];
+        i += 1u32;
+    }
+}
+
 /// Cooperative forward 8×8 DCT: 8 threads per block, one per row.
 ///
 /// Each cube processes one block. Within a cube, thread `r` (UNIT_POS)

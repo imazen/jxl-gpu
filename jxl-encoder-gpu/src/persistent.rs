@@ -57,7 +57,7 @@ use crate::launch::dct4::{
 use crate::launch::dct64::{
     dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64,
 };
-use crate::launch::dct8::{dct_8x8, idct_8x8};
+use crate::launch::dct8::{dct_8x8, dct_8x8_wide, idct_8x8, idct_8x8_wide};
 use crate::launch::epf::pad_plane;
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
@@ -484,6 +484,50 @@ impl<R: Runtime> GpuEncoder<R> {
             .client_ref()
             .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
         idct_8x8::<R>(
+            self.client_ref(),
+            coeffs.handle.clone(),
+            h_out.clone(),
+            coeffs.num_blocks,
+        );
+        GpuBlocks {
+            handle: h_out,
+            num_blocks: coeffs.num_blocks,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Persistent-API wide-cube forward DCT8. Same I/O contract as
+    /// [`Self::dct_8x8_persistent`] but uses cube_dim=64 (~3× faster
+    /// at 1024² per dct8_coop_bench results).
+    pub fn dct_8x8_wide_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        assert_eq!(blocks.coeffs_per_block, 64);
+        let n = blocks.total_floats();
+        let h_out = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        dct_8x8_wide::<R>(
+            self.client_ref(),
+            blocks.handle.clone(),
+            h_out.clone(),
+            blocks.num_blocks,
+        );
+        GpuBlocks {
+            handle: h_out,
+            num_blocks: blocks.num_blocks,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Persistent-API wide-cube inverse DCT8.
+    pub fn idct_8x8_wide_persistent(&self, coeffs: &GpuBlocks<R>) -> GpuBlocks<R> {
+        assert_eq!(coeffs.coeffs_per_block, 64);
+        let n = coeffs.total_floats();
+        let h_out = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        idct_8x8_wide::<R>(
             self.client_ref(),
             coeffs.handle.clone(),
             h_out.clone(),
@@ -973,6 +1017,26 @@ mod tests {
         for &v in &host {
             assert!((v - 0.7).abs() < 1e-5);
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dct_8x8_wide_persistent_roundtrip() {
+        // Wide DCT8 + wide IDCT8 round-trip via persistent API.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let nb = 16;
+        let n = nb * 64;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin()).collect();
+        let blocks = enc.upload_blocks(&input, nb as u32, 64);
+        let coeffs = enc.dct_8x8_wide_persistent(&blocks);
+        let recon = enc.idct_8x8_wide_persistent(&coeffs);
+        let recon_host = enc.download_blocks(&recon);
+        let mut max_err = 0.0_f32;
+        for i in 0..n {
+            max_err = max_err.max((input[i] - recon_host[i]).abs());
+        }
+        assert!(max_err < 5e-5, "wide DCT8 persistent roundtrip drift: {max_err:.3e}");
     }
 
     #[cfg(feature = "cuda")]
