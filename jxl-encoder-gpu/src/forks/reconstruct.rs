@@ -174,6 +174,36 @@ pub const DCT_RESAMPLE_SCALE_64_TO_8: [f32; 8] = [
     0.717_108_1,
 ];
 
+/// IDCT a single block's coefficient buffer and scatter the resulting
+/// pixels into the padded plane at `(bx * 8, by * 8)`. Composes
+/// [`crate::forks::transform::apply_idct_batch_gpu`] (with batch
+/// size 1) and [`scatter_block_to_plane`].
+///
+/// `coeffs.len()` must match the strategy's full coefficient block
+/// size (DCT8 → 64, DCT16×16 → 256, etc.). The caller is responsible
+/// for filling `coeffs` with already-dequantized + CfL-corrected +
+/// LLF-restored coefficients before calling this.
+///
+/// Note: per-block GPU IDCT is wasteful when many blocks share a
+/// strategy. Use [`crate::forks::transform::apply_idct_batch_gpu`]
+/// directly with a batched coefficient buffer + multiple
+/// `scatter_block_to_plane` calls when batching is possible. This
+/// per-block form is the simplest building block for a future
+/// strategy-grouping orchestrator.
+pub fn idct_and_scatter_one_block_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    coeffs: &[f32],
+    plane: &mut [f32],
+    bx: usize,
+    by: usize,
+    raw_strategy: u8,
+    padded_width: usize,
+) {
+    use crate::forks::transform::apply_idct_batch_gpu;
+    let pixels = apply_idct_batch_gpu(enc, coeffs, raw_strategy);
+    scatter_block_to_plane(plane, &pixels, bx, by, raw_strategy, padded_width);
+}
+
 /// Scatter a single block's IDCT output (in pixel layout, row-major,
 /// stride = block_width) into the padded plane at the block's pixel
 /// position `(bx * 8, by * 8)`.
@@ -1051,6 +1081,32 @@ mod tests {
         let [r0, r1] = restore_llf_dct16x8_or_8x16(dc0, dc1);
         assert!((r0 - llf0).abs() < 1e-5, "got {r0} expected {llf0}");
         assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_idct_and_scatter_one_block_gpu_dct8_zero() {
+        // All-zero coefficients → all-zero block → padded plane stays zero
+        // at the destination region.
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let padded_w = 32_usize;
+        let padded_h = 16_usize;
+        let mut plane = alloc::vec![1.0_f32; padded_w * padded_h]; // seeded
+        let coeffs = alloc::vec![0.0_f32; 64];
+        idct_and_scatter_one_block_gpu(
+            &enc, &coeffs, &mut plane, 2, 1, RAW_STRATEGY_DCT, padded_w,
+        );
+        // Destination region (16..24, 8..16) should now be ~0.
+        for row in 0..8 {
+            for col in 0..8 {
+                let v = plane[(8 + row) * padded_w + 16 + col];
+                assert!(v.abs() < 1e-5, "row {row} col {col} = {v}");
+            }
+        }
+        // A pixel just outside the destination region stays seeded.
+        assert_eq!(plane[8 * padded_w + 15], 1.0);
     }
 
     #[test]
