@@ -43,6 +43,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::encoder::GpuEncoder;
+use crate::launch::epf::pad_plane;
+use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::mask1x1::mask1x1;
 use crate::launch::xyb::{xyb_forward, xyb_inverse};
@@ -264,6 +266,62 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Persistent-API decoder gab smoothing (3×3 plus, used in
+    /// reconstruct.rs). Returns a new `GpuPlane`.
+    pub fn gab_smooth_persistent(
+        &self,
+        plane: &GpuPlane<R>,
+        w_center: f32,
+        w1: f32,
+        w2: f32,
+    ) -> GpuPlane<R> {
+        let n = plane.n_pixels();
+        let h_out = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        gab_smooth::<R>(
+            self.client_ref(),
+            plane.handle.clone(),
+            h_out.clone(),
+            plane.width,
+            plane.height,
+            w_center,
+            w1,
+            w2,
+        );
+        GpuPlane {
+            handle: h_out,
+            width: plane.width,
+            height: plane.height,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Persistent-API edge-replicate plane padding. Returns a new
+    /// `GpuPlane` of size `(width + 2*pad) × (height + 2*pad)`.
+    pub fn pad_plane_persistent(&self, plane: &GpuPlane<R>, pad: u32) -> GpuPlane<R> {
+        let dst_w = plane.width + 2 * pad;
+        let dst_h = plane.height + 2 * pad;
+        let dst_n = (dst_w as usize) * (dst_h as usize);
+        let h_out = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; dst_n]));
+        pad_plane::<R>(
+            self.client_ref(),
+            plane.handle.clone(),
+            h_out.clone(),
+            plane.width,
+            plane.height,
+            pad,
+        );
+        GpuPlane {
+            handle: h_out,
+            width: dst_w,
+            height: dst_h,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Persistent-API mask1x1 field on the Y channel.
     pub fn mask1x1_persistent(&self, y: &GpuPlane<R>) -> GpuPlane<R> {
         let n = y.n_pixels();
@@ -339,6 +397,40 @@ mod tests {
         assert_eq!(mask_host.len(), n);
         for &v in &mask_host {
             assert!(v.is_finite() && v > 0.0);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gab_smooth_persistent_uniform() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let n = 16 * 16;
+        let plane = enc.upload_plane(&vec![0.5_f32; n], 16, 16);
+        // Symmetric 3×3 plus weights: center + 4*w1 + 4*w2 = 1 → uniform
+        // input stays uniform.
+        let w1 = 0.1;
+        let w2 = 0.05;
+        let wc = 1.0 - 4.0 * w1 - 4.0 * w2;
+        let out = enc.gab_smooth_persistent(&plane, wc, w1, w2);
+        let host = enc.download_plane(&out);
+        for &v in &host {
+            assert!((v - 0.5).abs() < 1e-5);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_pad_plane_persistent_dims() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let plane = enc.upload_plane(&vec![0.7_f32; 8 * 8], 8, 8);
+        let padded = enc.pad_plane_persistent(&plane, 4);
+        assert_eq!(padded.width(), 16);
+        assert_eq!(padded.height(), 16);
+        let host = enc.download_plane(&padded);
+        for &v in &host {
+            assert!((v - 0.7).abs() < 1e-5);
         }
     }
 
