@@ -46,7 +46,7 @@ use crate::launch::{
     block_l2::block_l2,
     dct8::{dct_8x8, idct_8x8},
     dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16},
-    dct32::{dct_32x32, idct_32x32},
+    dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32},
     dct64::{dct_64x64, idct_64x64},
     quantize::{quantize_dct8, quantize_large},
 };
@@ -453,6 +453,140 @@ pub fn compute_cost_grid_dct8x16_single_channel<R: Runtime>(
         costs: h_costs,
         xsize_blocks: xsize_blocks_8x16,
         ysize_blocks: ysize_blocks_8x16,
+    }
+}
+
+/// Compute the DCT32×16 strategy's whole-image cost grid for a single channel.
+///
+/// Each block covers a 32×16 pixel region (= 4×2 grid of 8×8 blocks).
+/// LLF region is 4×2. Pipeline mirrors the square DCT32x32 grid with the
+/// rectangle dimensions; sub-cell count per rect block is 4×2 = 8.
+pub fn compute_cost_grid_dct32x16_single_channel<R: Runtime>(
+    client: &ComputeClient<R>,
+    original: Handle,
+    weights: Handle,
+    qac_qm: Handle,
+    thresholds: Handle,
+    xsize_blocks_32x16: u32,
+    ysize_blocks_32x16: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks_32x16 * ysize_blocks_32x16;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 512;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+
+    let h_dct = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_quant = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dequant = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon = client.create_from_slice(f32::as_bytes(&zero_f));
+
+    dct_32x16::<R>(client, original.clone(), h_dct.clone(), num_blocks);
+    quantize_large::<R>(
+        client,
+        h_dct.clone(),
+        weights.clone(),
+        qac_qm,
+        thresholds,
+        h_quant.clone(),
+        num_blocks,
+        32, // grid_width
+        16, // grid_height
+        4,  // llf_x
+        2,  // llf_y
+    );
+    dequant_simple_generic::<R>(client, h_quant, weights, h_dequant.clone(), num_blocks, 512);
+    idct_32x16::<R>(client, h_dequant, h_recon.clone(), num_blocks);
+
+    let n_pixels = nb * 512;
+    let h_mask = client.create_from_slice(f32::as_bytes(&vec![1.0f32; n_pixels]));
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb * 8]));
+
+    block_l2::<R>(
+        client,
+        original.clone(),
+        original.clone(),
+        original,
+        h_recon.clone(),
+        h_recon.clone(),
+        h_recon,
+        h_mask,
+        h_costs.clone(),
+        xsize_blocks_32x16 * 4, // each 32×16 = 4×2 8×8 blocks
+        ysize_blocks_32x16 * 2,
+        xsize_blocks_32x16 * 32,
+    );
+
+    CostGrid {
+        costs: h_costs,
+        xsize_blocks: xsize_blocks_32x16,
+        ysize_blocks: ysize_blocks_32x16,
+    }
+}
+
+/// Compute the DCT16×32 strategy's whole-image cost grid for a single channel.
+/// Counterpart to `compute_cost_grid_dct32x16_*` with the rectangle transposed.
+/// LLF region is 2×4. Sub-cell count per rect block is 2×4 = 8.
+pub fn compute_cost_grid_dct16x32_single_channel<R: Runtime>(
+    client: &ComputeClient<R>,
+    original: Handle,
+    weights: Handle,
+    qac_qm: Handle,
+    thresholds: Handle,
+    xsize_blocks_16x32: u32,
+    ysize_blocks_16x32: u32,
+) -> CostGrid {
+    let num_blocks = xsize_blocks_16x32 * ysize_blocks_16x32;
+    let nb = num_blocks as usize;
+    let n_coef = nb * 512;
+    let zero_f = vec![0.0f32; n_coef];
+    let zero_i = vec![0i32; n_coef];
+
+    let h_dct = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_quant = client.create_from_slice(i32::as_bytes(&zero_i));
+    let h_dequant = client.create_from_slice(f32::as_bytes(&zero_f));
+    let h_recon = client.create_from_slice(f32::as_bytes(&zero_f));
+
+    dct_16x32::<R>(client, original.clone(), h_dct.clone(), num_blocks);
+    quantize_large::<R>(
+        client,
+        h_dct.clone(),
+        weights.clone(),
+        qac_qm,
+        thresholds,
+        h_quant.clone(),
+        num_blocks,
+        16, // grid_width
+        32, // grid_height
+        2,  // llf_x
+        4,  // llf_y
+    );
+    dequant_simple_generic::<R>(client, h_quant, weights, h_dequant.clone(), num_blocks, 512);
+    idct_16x32::<R>(client, h_dequant, h_recon.clone(), num_blocks);
+
+    let n_pixels = nb * 512;
+    let h_mask = client.create_from_slice(f32::as_bytes(&vec![1.0f32; n_pixels]));
+    let h_costs = client.create_from_slice(f32::as_bytes(&vec![0.0f32; nb * 8]));
+
+    block_l2::<R>(
+        client,
+        original.clone(),
+        original.clone(),
+        original,
+        h_recon.clone(),
+        h_recon.clone(),
+        h_recon,
+        h_mask,
+        h_costs.clone(),
+        xsize_blocks_16x32 * 2, // each 16×32 = 2×4 8×8 blocks
+        ysize_blocks_16x32 * 4,
+        xsize_blocks_16x32 * 16,
+    );
+
+    CostGrid {
+        costs: h_costs,
+        xsize_blocks: xsize_blocks_16x32,
+        ysize_blocks: ysize_blocks_16x32,
     }
 }
 

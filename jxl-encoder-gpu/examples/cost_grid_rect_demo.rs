@@ -25,6 +25,7 @@ fn main() {
     use cubecl::prelude::*;
     use jxl_encoder_gpu::pipeline::{
         compute_cost_grid_dct8x16_single_channel, compute_cost_grid_dct16x8_single_channel,
+        compute_cost_grid_dct16x32_single_channel, compute_cost_grid_dct32x16_single_channel,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -113,5 +114,78 @@ fn main() {
         std::process::exit(1);
     }
 
-    println!("\n✓ Both rectangular DCT16 cost grids produced finite non-negative costs.");
+    // ---- DCT32×16 / DCT16×32 ----
+    // For these we need a separate input layout: 512 floats per rect block.
+    const XB32: usize = 4;
+    const YB32: usize = 3;
+    const NB32: usize = XB32 * YB32;
+    const N_COEF_32: usize = NB32 * 512;
+    let mut input32 = vec![0.0f32; N_COEF_32];
+    for b in 0..NB32 {
+        for i in 0..512 {
+            let v = ((b * 13 + i * 19).wrapping_mul(31) % 251) as f32 / 251.0 - 0.5;
+            input32[b * 512 + i] = 0.3 + 0.04 * v;
+        }
+    }
+    let mut weights32_per = vec![1.0f32; 512];
+    for i in 0..512 {
+        weights32_per[i] = 1.0 + 0.5 * (i as f32 / 512.0);
+    }
+    let mut weights32 = vec![0.0f32; N_COEF_32];
+    for b in 0..NB32 {
+        weights32[b * 512..b * 512 + 512].copy_from_slice(&weights32_per);
+    }
+    let qac32 = vec![1.7f32; NB32];
+    let h_in32 = client.create_from_slice(f32::as_bytes(&input32));
+    let h_w32 = client.create_from_slice(f32::as_bytes(&weights32));
+    let h_qac32 = client.create_from_slice(f32::as_bytes(&qac32));
+    let h_thr32 = client.create_from_slice(f32::as_bytes(&thresholds[..]));
+
+    let cg32x16 = compute_cost_grid_dct32x16_single_channel::<Backend>(
+        &client,
+        h_in32.clone(),
+        h_w32.clone(),
+        h_qac32.clone(),
+        h_thr32.clone(),
+        XB32 as u32,
+        YB32 as u32,
+    );
+    let bytes = client.read_one(cg32x16.costs).expect("read 32x16");
+    let costs_32x16: &[f32] = f32::from_bytes(&bytes);
+    let mean_32x16 = costs_32x16.iter().sum::<f32>() / (costs_32x16.len() as f32);
+    let max_32x16 = costs_32x16.iter().fold(0.0f32, |a, &b| a.max(b));
+    println!(
+        "DCT32×16 cost grid: {} per-8×8 costs (= {} 32×16 rect blocks × 8 sub-cells), mean={:.4} max={:.4}",
+        costs_32x16.len(),
+        cg32x16.xsize_blocks * cg32x16.ysize_blocks,
+        mean_32x16,
+        max_32x16,
+    );
+    let ok_32x16 = costs_32x16.iter().all(|&c| c >= 0.0 && c.is_finite());
+    if !ok_32x16 {
+        eprintln!("✗ DCT32×16 produced negative or non-finite costs");
+        std::process::exit(1);
+    }
+
+    let cg16x32 = compute_cost_grid_dct16x32_single_channel::<Backend>(
+        &client, h_in32, h_w32, h_qac32, h_thr32, XB32 as u32, YB32 as u32,
+    );
+    let bytes = client.read_one(cg16x32.costs).expect("read 16x32");
+    let costs_16x32: &[f32] = f32::from_bytes(&bytes);
+    let mean_16x32 = costs_16x32.iter().sum::<f32>() / (costs_16x32.len() as f32);
+    let max_16x32 = costs_16x32.iter().fold(0.0f32, |a, &b| a.max(b));
+    println!(
+        "DCT16×32 cost grid: {} per-8×8 costs (= {} 16×32 rect blocks × 8 sub-cells), mean={:.4} max={:.4}",
+        costs_16x32.len(),
+        cg16x32.xsize_blocks * cg16x32.ysize_blocks,
+        mean_16x32,
+        max_16x32,
+    );
+    let ok_16x32 = costs_16x32.iter().all(|&c| c >= 0.0 && c.is_finite());
+    if !ok_16x32 {
+        eprintln!("✗ DCT16×32 produced negative or non-finite costs");
+        std::process::exit(1);
+    }
+
+    println!("\n✓ All four rectangular DCT16/32 cost grids produced finite non-negative costs.");
 }

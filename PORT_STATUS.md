@@ -62,7 +62,7 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 
 | Component | Status |
 |---|---|
-| Per-strategy whole-image cost grid kernels | ⚙ | Single-channel cost grids for DCT8, DCT16x8, DCT8x16, DCT16x16, DCT32x32, DCT64x64 (`pipeline.rs::compute_cost_grid_*`); needs 3-channel + CfL + DCT32x16/16x32/64x32/32x64 + DCT4 family |
+| Per-strategy whole-image cost grid kernels | ⚙ | Single-channel cost grids for DCT8, DCT16x8, DCT8x16, DCT16x16, DCT32x16, DCT16x32, DCT32x32, DCT64x64 (`pipeline.rs::compute_cost_grid_*`); needs 3-channel + CfL + DCT64x32/32x64 + DCT4 family |
 | Host-side partition selector | ✓ | Full coverage of standard rectangular family across 16/32/64 region tiers (12 variants). 12 unit tests passing. End-to-end integration demo verifies algorithmic correctness on synthetic smooth+noisy input |
 | Refactor `ac_strategy_search.rs` to consume cost grids | ⛔ | requires touching `jxl-encoder` crate (separate repo) — needs user permission |
 
