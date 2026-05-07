@@ -182,6 +182,122 @@ pub fn quantize_blocks_gpu<R: Runtime>(
     }
 }
 
+/// Per-block coefficient statistics consumed by the AdjustQuantBlockAC
+/// heuristics. Mirrors the locals computed in upstream's pre-scan loop
+/// at `jxl_encoder::vardct::quantize.rs:178-220`.
+///
+/// All four-element arrays are indexed by `hfix = 2 * (y >= h/2) +
+/// (x >= w/2)` — the high-frequency quadrant index.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AdjustQuantBlockStats {
+    pub sum_of_highest_freq: f32,
+    pub sum_of_error: f32,
+    pub sum_of_vals: f32,
+    pub hf_nonzeros: [f32; 4],
+    pub hf_max_error: [f32; 4],
+}
+
+/// Pre-scan over non-LLF coefficients of a single transform block,
+/// computing the five statistics consumed by AdjustQuantBlockAC's
+/// heuristics B / C / D / E / F (heuristic A only depends on
+/// `xsize * ysize`, no coefficient pre-scan needed).
+///
+/// Pure-CPU port — bit-for-bit equivalent to upstream's pre-scan. The
+/// `quant` and `qm_multiplier` are the per-block scalars; `qac =
+/// scale * quant` and `qm_multiplier = x_qm_mul / 1.0 / b_qm_mul` per
+/// channel as in upstream.
+///
+/// `block_coeffs` and `weights` MUST be `block_width * block_height`
+/// floats each, in the same row-major layout the rest of the encoder
+/// uses. `xsize`/`ysize` are the LLF coverage in 8×8 blocks (`cx`/`cy`
+/// at the call site, e.g. 1×1 for DCT8, 2×2 for DCT16×16, 8×8 for
+/// DCT64×64).
+///
+/// Returns `None` for the libjxl-defined "partial block kinds" — the
+/// strategies whose AdjustQuantBlockAC body returns `(0, 0.0, 0.0, 0)`
+/// without ever pre-scanning. Caller can match upstream by treating
+/// `None` exactly the same way.
+#[allow(clippy::too_many_arguments)]
+pub fn adjust_quant_prescan(
+    block_coeffs: &[f32],
+    weights: &[f32],
+    qac: f32,
+    qm_multiplier: f32,
+    c: usize,
+    raw_strategy: u8,
+    block_width: usize,
+    block_height: usize,
+    xsize: usize,
+    ysize: usize,
+    thresholds: &[f32; 4],
+) -> Option<AdjustQuantBlockStats> {
+    use crate::forks::transform::{
+        RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
+        RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+    };
+    // Partial block kinds: pre-scan is skipped (matches upstream
+    // `kPartialBlockKinds` skip → returns 0 stats). AFV variants are
+    // also skipped upstream; the GPU port routes AFV through
+    // `forks::afv` separately and never reaches this path with an
+    // AFV-coded raw_strategy.
+    match raw_strategy {
+        RAW_STRATEGY_IDENTITY
+        | RAW_STRATEGY_DCT2X2
+        | RAW_STRATEGY_DCT4X4
+        | RAW_STRATEGY_DCT4X8
+        | RAW_STRATEGY_DCT8X4 => return None,
+        _ => {}
+    }
+
+    debug_assert_eq!(block_coeffs.len(), block_width * block_height);
+    debug_assert_eq!(weights.len(), block_width * block_height);
+
+    let mut stats = AdjustQuantBlockStats::default();
+    for y in 0..block_height {
+        for x in 0..block_width {
+            let pos = y * block_width + x;
+            // Skip LLF positions.
+            if x < xsize && y < ysize {
+                continue;
+            }
+            let hfix = (if y >= block_height / 2 { 2 } else { 0 })
+                + (if x >= block_width / 2 { 1 } else { 0 });
+
+            // val = (1/weight) * qac * qm_mul * coeff — matches
+            // quantize_coeff_ac formula upstream uses.
+            let inv_w = 1.0 / weights[pos];
+            let val = block_coeffs[pos] * inv_w * qac * qm_multiplier;
+            let v = if val.abs() < thresholds[hfix] {
+                0.0
+            } else {
+                // round-to-even matches libjxl rintf / Highway Round
+                let r = (val * 0.5).round() * 2.0;
+                let alt = val.round_ties_even();
+                debug_assert!((r - alt).abs() <= 1.0); // sanity
+                alt
+            };
+            let error = (val - v).abs();
+            stats.sum_of_error += error;
+            stats.sum_of_vals += v.abs();
+
+            if c == 1 && v == 0.0 && stats.hf_max_error[hfix] < error {
+                stats.hf_max_error[hfix] = error;
+            }
+            if v != 0.0 {
+                stats.hf_nonzeros[hfix] += v.abs();
+                let in_corner = y >= 7 * ysize && x >= 7 * xsize;
+                let on_border = y == block_height - 1 || x == block_width - 1;
+                let in_larger_corner = x >= 4 * xsize && y >= 4 * ysize;
+                if in_corner || (on_border && in_larger_corner) {
+                    stats.sum_of_highest_freq += val.abs();
+                }
+            }
+        }
+    }
+
+    Some(stats)
+}
+
 /// Convenience: returns a length-`num_blocks * 64` vec of all-1.0
 /// inverse quant matrix entries. Useful for tests where you don't
 /// care about the actual quant matrix.
@@ -193,6 +309,89 @@ pub fn unit_weights(num_blocks: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_adjust_quant_prescan_skips_partial_block_kinds() {
+        use crate::forks::transform::{
+            RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
+            RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+        };
+        let coeffs = [0.5_f32; 64];
+        let weights = [1.0_f32; 64];
+        let thresholds = [0.6_f32; 4];
+        for &kind in &[
+            RAW_STRATEGY_IDENTITY,
+            RAW_STRATEGY_DCT2X2,
+            RAW_STRATEGY_DCT4X4,
+            RAW_STRATEGY_DCT4X8,
+            RAW_STRATEGY_DCT8X4,
+        ] {
+            let r = adjust_quant_prescan(
+                &coeffs, &weights, 1.0, 1.0, 1, kind, 8, 8, 1, 1, &thresholds,
+            );
+            assert!(r.is_none(), "partial block kind {kind} should skip prescan");
+        }
+    }
+
+    #[test]
+    fn test_adjust_quant_prescan_dct8_zero_block() {
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        // All-zero coefficients → all stats = 0. This is the trivial
+        // sanity check matching upstream's behavior on an empty block.
+        let coeffs = [0.0_f32; 64];
+        let weights = [1.0_f32; 64];
+        let thresholds = [0.6_f32; 4];
+        let s = adjust_quant_prescan(
+            &coeffs,
+            &weights,
+            10.0,
+            1.0,
+            1,
+            RAW_STRATEGY_DCT,
+            8,
+            8,
+            1,
+            1,
+            &thresholds,
+        )
+        .expect("DCT8 should not skip");
+        assert_eq!(s.sum_of_highest_freq, 0.0);
+        assert_eq!(s.sum_of_error, 0.0);
+        assert_eq!(s.sum_of_vals, 0.0);
+        assert_eq!(s.hf_nonzeros, [0.0_f32; 4]);
+        assert_eq!(s.hf_max_error, [0.0_f32; 4]);
+    }
+
+    #[test]
+    fn test_adjust_quant_prescan_threshold_zeros() {
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        // Coefficients that quantize below threshold (after scaling)
+        // contribute to hf_max_error[hfix] when channel is Y.
+        // Set qac so (val = coeff * qac * inv_w) is just below threshold.
+        let mut coeffs = [0.0_f32; 64];
+        coeffs[63] = 0.05; // far in HF quadrant 3 (bottom-right)
+        let weights = [1.0_f32; 64];
+        let thresholds = [0.6_f32; 4];
+        let s = adjust_quant_prescan(
+            &coeffs,
+            &weights,
+            10.0,
+            1.0,
+            1,
+            RAW_STRATEGY_DCT,
+            8,
+            8,
+            1,
+            1,
+            &thresholds,
+        )
+        .unwrap();
+        // val = 0.05 * 10 * 1 = 0.5, abs(0.5) < 0.6 → quantizes to 0,
+        // contributes to hf_max_error[3] = 0.5.
+        assert!((s.hf_max_error[3] - 0.5).abs() < 1e-6);
+        assert_eq!(s.sum_of_vals, 0.0);
+        assert!((s.sum_of_error - 0.5).abs() < 1e-6);
+    }
 
     #[test]
     fn test_default_thresholds_y() {
