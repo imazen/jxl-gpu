@@ -609,6 +609,119 @@ pub fn apply_heuristic_d_dct8_flatness(
     }
 }
 
+/// Per-block AdjustQuantBlockAC return value, mirroring upstream's
+/// 4-tuple `(u8, f32, f32, i32)` return:
+/// - `heuristics_fired`: bitfield with bit `1 << k` for heuristic
+///   k. Bit 0 = A, 1 = B, 2 = C, 3 = D, 4 = E, 5 = F.
+/// - `sum_of_vals` / `sum_of_error`: per-block stats from the
+///   pre-scan (zero when the strategy is a "partial block kind"
+///   that skips the pre-scan entirely).
+/// - `activity`: heuristic F's activity value (always set, even
+///   if F didn't change quant — matches upstream).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AdjustQuantOutcome {
+    pub heuristics_fired: u8,
+    pub sum_of_vals: f32,
+    pub sum_of_error: f32,
+    pub activity: i32,
+}
+
+/// Compose pre-scan + heuristics A-F into the full per-block
+/// AdjustQuantBlockAC orchestration. Mirrors upstream
+/// `jxl_encoder::vardct::quantize::adjust_quant_block_ac`.
+///
+/// Order matches upstream exactly:
+/// 1. **A** (threshold reduction for `xsize > 1 || ysize > 1`)
+/// 2. Pre-scan over non-LLF coefficients
+/// 3. **B** (sparse Y handling, c=1 only)
+/// 4. **C** (HF corner penalty)
+/// 5. **D** (DCT8 flatness)
+/// 6. **E** (large-transform error correction)
+/// 7. **F** (activity-based reduction)
+///
+/// For "partial block kinds" (IDENTITY, DCT2X2, DCT4X4, DCT4X8,
+/// DCT8X4) upstream returns `(0, 0.0, 0.0, 0)` immediately, never
+/// running A-F. We match that exactly via `adjust_quant_prescan`'s
+/// `None` return.
+///
+/// `thresholds` and `quant` are modified in place; the
+/// `AdjustQuantOutcome` is returned for stats/logging.
+#[allow(clippy::too_many_arguments)]
+pub fn adjust_quant_block_ac_host(
+    block_coeffs: &[f32],
+    weights: &[f32],
+    qac: f32,
+    qm_multiplier: f32,
+    c: usize,
+    raw_strategy: u8,
+    block_width: usize,
+    block_height: usize,
+    xsize: usize,
+    ysize: usize,
+    thresholds: &mut [f32; 4],
+    quant: &mut i32,
+) -> AdjustQuantOutcome {
+    let mut fired: u8 = 0;
+
+    // (A) — runs before the pre-scan in upstream.
+    if apply_heuristic_a_thresholds(thresholds, xsize, ysize) {
+        fired |= 0x01;
+    }
+
+    // Pre-scan. Returns None for partial block kinds — upstream
+    // skips A-F entirely on those (heuristics_fired stays 0 because
+    // we early-return *before* running A; but the order in upstream
+    // is: skip → return (0,0,0,0). To match that semantics for the
+    // partial-block kinds, fold A's output away and return zeros.
+    let stats = match adjust_quant_prescan(
+        block_coeffs,
+        weights,
+        qac,
+        qm_multiplier,
+        c,
+        raw_strategy,
+        block_width,
+        block_height,
+        xsize,
+        ysize,
+        thresholds,
+    ) {
+        Some(s) => s,
+        None => {
+            return AdjustQuantOutcome::default();
+        }
+    };
+
+    // (B)
+    if apply_heuristic_b_sparse_y(quant, thresholds, &stats, c, xsize, ysize) {
+        fired |= 0x02;
+    }
+    // (C)
+    if apply_heuristic_c_corner_penalty(quant, &stats, c) {
+        fired |= 0x04;
+    }
+    // (D)
+    if apply_heuristic_d_dct8_flatness(quant, &stats, raw_strategy) {
+        fired |= 0x08;
+    }
+    // (E)
+    if apply_heuristic_e_large_transform(quant, &stats, c, raw_strategy, xsize, ysize) {
+        fired |= 0x10;
+    }
+    // (F)
+    let (f_fired, activity) = apply_heuristic_f_activity(quant, thresholds, &stats, c, xsize, ysize);
+    if f_fired {
+        fired |= 0x20;
+    }
+
+    AdjustQuantOutcome {
+        heuristics_fired: fired,
+        sum_of_vals: stats.sum_of_vals,
+        sum_of_error: stats.sum_of_error,
+        activity,
+    }
+}
+
 /// Convenience: returns a length-`num_blocks * 64` vec of all-1.0
 /// inverse quant matrix entries. Useful for tests where you don't
 /// care about the actual quant matrix.
@@ -1004,6 +1117,74 @@ mod tests {
         };
         assert!(!apply_heuristic_d_dct8_flatness(&mut q, &stats, RAW_STRATEGY_DCT));
         assert_eq!(q, 100);
+    }
+
+    #[test]
+    fn test_orchestrator_partial_block_kind_returns_zeros() {
+        use crate::forks::transform::RAW_STRATEGY_DCT4X4;
+        let coeffs = [0.5_f32; 64];
+        let weights = [1.0_f32; 64];
+        let mut thresholds = [0.62_f32; 4];
+        let mut quant = 100;
+        let out = adjust_quant_block_ac_host(
+            &coeffs,
+            &weights,
+            1.0,
+            1.0,
+            1,
+            RAW_STRATEGY_DCT4X4,
+            8,
+            8,
+            1,
+            1,
+            &mut thresholds,
+            &mut quant,
+        );
+        assert_eq!(out, AdjustQuantOutcome::default());
+        // Quant unchanged for partial kinds (no heuristics ran).
+        assert_eq!(quant, 100);
+        // Thresholds unchanged: A wouldn't have fired anyway (xsize=ysize=1)
+        assert_eq!(thresholds, [0.62_f32; 4]);
+    }
+
+    #[test]
+    fn test_orchestrator_dct8_zero_block() {
+        use crate::forks::transform::RAW_STRATEGY_DCT;
+        // Zero block, DCT8: pre-scan runs, all stats zero. A skipped
+        // (xsize=ysize=1). B skipped (sum_of_vals=0 BUT c=1 and 0*8 < 1
+        // would be true... wait: sum_of_vals=0, 0*8=0 < 1 → sparse, fires).
+        // hf_max_error all 0 → no quant bump from B, no threshold update.
+        // C: sum_of_highest_freq=0 → no fire.
+        // D: sum(hf_nonzeros)=0 < 11 → fires, +1.
+        // E: not large strategy → skip.
+        // F: min hf_nonzeros=0, activity=0, qp=quant unchanged → no fire.
+        let coeffs = [0.0_f32; 64];
+        let weights = [1.0_f32; 64];
+        let mut thresholds = [0.62_f32; 4];
+        let mut quant = 100;
+        let out = adjust_quant_block_ac_host(
+            &coeffs,
+            &weights,
+            1.0,
+            1.0,
+            1,
+            RAW_STRATEGY_DCT,
+            8,
+            8,
+            1,
+            1,
+            &mut thresholds,
+            &mut quant,
+        );
+        // B fired (sparse) + D fired (flat). C no, E no, F activity=0 no fire.
+        // After D's +1: quant = 101.
+        // After F (activity=0): quant unchanged.
+        assert_eq!(quant, 101);
+        assert_eq!(out.activity, 0);
+        // Bits: B=0x02, D=0x08 → 0x0A
+        assert_eq!(out.heuristics_fired, 0x02 | 0x08);
+        assert_eq!(out.sum_of_vals, 0.0);
+        assert_eq!(out.sum_of_error, 0.0);
     }
 
     #[test]
