@@ -22,6 +22,8 @@ pub mod encoder;
 #[cfg(feature = "encoder")]
 pub mod forks;
 #[cfg(feature = "encoder")]
+pub mod lossy_encoder;
+#[cfg(feature = "encoder")]
 pub mod persistent;
 pub mod kernels;
 pub mod launch;
