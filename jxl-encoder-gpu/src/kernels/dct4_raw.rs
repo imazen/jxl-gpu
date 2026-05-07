@@ -55,7 +55,9 @@ fn dct1d_4(mem: &mut SharedMemory<f32>, base: u32) {
     mem[b + 3usize] = w1;
 }
 
-/// 1D 8-point DCT, in-place on `mem[base..base+8]`.
+/// 1D 8-point DCT, in-place on `mem[base..base+8]`. Inlines both
+/// internal 4-pt DCT calls to avoid any cube-macro scoping ambiguity
+/// around the in-place dct1d_4 helper sharing the same SharedMemory.
 #[cube]
 fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
     let b = base as usize;
@@ -75,29 +77,33 @@ fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
     let t5 = m1 - m6;
     let t6 = m2 - m5;
     let t7 = m3 - m4;
-    // First-half: 4-pt DCT on (t0..t3) → in-place transform of an
-    // intermediate slot. Use mem[b..b+4] as scratch.
-    mem[b] = t0;
-    mem[b + 1usize] = t1;
-    mem[b + 2usize] = t2;
-    mem[b + 3usize] = t3;
-    dct1d_4(mem, base);
-    let r0_0 = mem[b];
-    let r0_1 = mem[b + 1usize];
-    let r0_2 = mem[b + 2usize];
-    let r0_3 = mem[b + 3usize];
-    // Second-half: WC multiply, then 4-pt DCT on (w4..w7) using
-    // mem[b+4..b+8] as scratch.
-    mem[b + 4usize] = t4 * WC8_0;
-    mem[b + 5usize] = t5 * WC8_1;
-    mem[b + 6usize] = t6 * WC8_2;
-    mem[b + 7usize] = t7 * WC8_3;
-    dct1d_4(mem, base + 4u32);
-    let r1_0 = mem[b + 4usize];
-    let r1_1 = mem[b + 5usize];
-    let r1_2 = mem[b + 6usize];
-    let r1_3 = mem[b + 7usize];
-    // Final B-transform + interleave to libjxl factorization order.
+    // ── First-half: dct1d_4 inlined on (t0, t1, t2, t3) ──
+    let s0 = t0 + t3;
+    let s1 = t1 + t2;
+    let s2 = t0 - t3;
+    let s3 = t1 - t2;
+    let r0_0 = s0 + s1;             // u0
+    let r0_2 = s0 - s1;             // u1
+    let v0 = s2 * WC4_0;
+    let v1 = s3 * WC4_1;
+    let r0_3 = v0 - v1;             // w1
+    let r0_1 = SQRT2 * (v0 + v1) + r0_3; // b0 = SQRT2*w0 + w1
+    // ── Second-half: WC8 multiply + dct1d_4 inlined ──
+    let w4 = t4 * WC8_0;
+    let w5 = t5 * WC8_1;
+    let w6 = t6 * WC8_2;
+    let w7 = t7 * WC8_3;
+    let q0 = w4 + w7;
+    let q1 = w5 + w6;
+    let q2 = w4 - w7;
+    let q3 = w5 - w6;
+    let r1_0 = q0 + q1;             // u0
+    let r1_2 = q0 - q1;             // u1
+    let v0b = q2 * WC4_0;
+    let v1b = q3 * WC4_1;
+    let r1_3 = v0b - v1b;           // w1
+    let r1_1 = SQRT2 * (v0b + v1b) + r1_3; // b0
+    // ── Final B-transform + interleave to libjxl factorization order ──
     let b0 = SQRT2 * r1_0 + r1_1;
     let b1 = r1_1 + r1_2;
     let b2 = r1_2 + r1_3;
