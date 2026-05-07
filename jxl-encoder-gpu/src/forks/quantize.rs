@@ -335,6 +335,60 @@ pub fn apply_heuristic_a_thresholds(
 /// otherwise exceed.
 pub const QUANT_MAX: i32 = 256;
 
+/// AdjustQuantBlockAC heuristic F — activity-based quant reduction.
+/// Mirrors upstream lines 342-372 (the final block in
+/// `adjust_quant_block_ac`).
+///
+/// Always runs (no skip condition). Computes `activity` from the
+/// minimum of the four `hf_nonzeros` quadrants:
+/// - If `min(hf_nonzeros) < 15 * (xsize * ysize)`:
+///   `activity = (min_nonzeros + div/2) / div` (integer division;
+///   matches libjxl's overflow-safe form from commit ae5cb19 — uses
+///   float min then i32 cast to avoid HDR overflow).
+/// - Otherwise: `activity = 15` (capped).
+///
+/// Then `quant -= activity`, clamped at `max(quant_orig / 2, 4)`.
+/// For Y channel only, the upper 3 thresholds get `t += 0.01 *
+/// activity`.
+///
+/// Returns `(fired, activity)` where `fired` is the bit
+/// `0x20` upstream — true iff `quant` actually changed (i.e.,
+/// `activity > 0` and the floor didn't bite). `activity` is the
+/// same value upstream returns alongside `heuristics_fired`.
+pub fn apply_heuristic_f_activity(
+    quant: &mut i32,
+    thresholds: &mut [f32; 4],
+    stats: &AdjustQuantBlockStats,
+    c: usize,
+    xsize: usize,
+    ysize: usize,
+) -> (bool, i32) {
+    let div = (xsize * ysize) as i32;
+    let min_hf_nonzeros = stats.hf_nonzeros[0]
+        .min(stats.hf_nonzeros[1])
+        .min(stats.hf_nonzeros[2])
+        .min(stats.hf_nonzeros[3]);
+    let activity = if min_hf_nonzeros < 15.0 * div as f32 {
+        ((min_hf_nonzeros as i32) + div / 2) / div
+    } else {
+        15
+    };
+    let orig = *quant;
+    let orig_qp_limit = (orig / 2).max(4);
+    let mut qp = orig - activity;
+    if c == 1 {
+        for t in thresholds[1..4].iter_mut() {
+            *t += 0.01 * activity as f32;
+        }
+    }
+    if qp < orig_qp_limit {
+        qp = orig_qp_limit;
+    }
+    let fired = qp != orig;
+    *quant = qp;
+    (fired, activity)
+}
+
 /// AdjustQuantBlockAC heuristic E — large-transform error correction.
 /// Mirrors upstream lines 282-340.
 ///
@@ -690,6 +744,75 @@ mod tests {
         for v in &t {
             assert_eq!(*v, 0.54);
         }
+    }
+
+    #[test]
+    fn test_heuristic_f_activity_zero_yields_no_fire() {
+        // min hf_nonzeros = 0 → activity = (0 + div/2) / div = 0 (div=1).
+        // qp = quant - 0 = quant unchanged → not fired.
+        let mut q = 100;
+        let mut t = [0.62_f32; 4];
+        let stats = AdjustQuantBlockStats {
+            hf_nonzeros: [0.0; 4],
+            ..Default::default()
+        };
+        let (fired, activity) = apply_heuristic_f_activity(&mut q, &mut t, &stats, 1, 1, 1);
+        assert_eq!(activity, 0);
+        assert!(!fired);
+        assert_eq!(q, 100);
+        // Y-channel: thresholds[1..4] += 0.01 * 0 = no change
+        assert_eq!(t, [0.62_f32; 4]);
+    }
+
+    #[test]
+    fn test_heuristic_f_activity_5_y_channel_bumps_thresholds() {
+        // div=1, min hf_nonzeros = 5 → activity = (5 + 0) / 1 = 5
+        // qp = 100 - 5 = 95, qp_limit = 50, 95 > 50 → quant = 95.
+        // Y channel: thresholds[1..4] += 0.05.
+        let mut q = 100;
+        let mut t = [0.62_f32; 4];
+        let stats = AdjustQuantBlockStats {
+            hf_nonzeros: [5.0, 7.0, 8.0, 6.0],
+            ..Default::default()
+        };
+        let (fired, activity) = apply_heuristic_f_activity(&mut q, &mut t, &stats, 1, 1, 1);
+        assert_eq!(activity, 5);
+        assert!(fired);
+        assert_eq!(q, 95);
+        assert_eq!(t[0], 0.62);
+        for v in &t[1..4] {
+            assert!((v - 0.67).abs() < 1e-6, "got {v}");
+        }
+    }
+
+    #[test]
+    fn test_heuristic_f_x_channel_thresholds_unchanged() {
+        // X channel (c=0): no threshold modification.
+        let mut q = 100;
+        let mut t = [0.62_f32; 4];
+        let stats = AdjustQuantBlockStats {
+            hf_nonzeros: [5.0; 4],
+            ..Default::default()
+        };
+        let (_, activity) = apply_heuristic_f_activity(&mut q, &mut t, &stats, 0, 1, 1);
+        assert_eq!(activity, 5);
+        assert_eq!(t, [0.62_f32; 4]);
+    }
+
+    #[test]
+    fn test_heuristic_f_floor_clamps_quant() {
+        // activity = 15 (capped: min hf_nonzeros = 100 > 15 * 1).
+        // quant 6 - 15 = -9, qp_limit = max(3, 4) = 4 → clamped to 4.
+        let mut q = 6;
+        let mut t = [0.62_f32; 4];
+        let stats = AdjustQuantBlockStats {
+            hf_nonzeros: [100.0; 4],
+            ..Default::default()
+        };
+        let (fired, activity) = apply_heuristic_f_activity(&mut q, &mut t, &stats, 1, 1, 1);
+        assert_eq!(activity, 15);
+        assert_eq!(q, 4);
+        assert!(fired); // qp != orig
     }
 
     #[test]
