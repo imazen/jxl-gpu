@@ -21,6 +21,7 @@ pub mod epf;
 pub mod fused_dct_quant;
 pub mod gab;
 pub mod gaborish;
+pub mod fuzzy_erosion;
 pub mod gather;
 pub mod identity;
 pub mod mask1x1;
