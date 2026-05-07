@@ -230,7 +230,7 @@ fn adjust_quant_bias_y(q_int: i32) -> f32 {
 
 /// Fused dequant + IDCT8 for the Y channel only (no CfL adjustment).
 ///
-/// Mirror of [`dct8_quantize_fused_wide_kernel`] for the inverse
+/// Mirror of [`fn@dct8_quantize_fused_wide_kernel`] for the inverse
 /// direction: takes quantized i32 + weights + per-block scale,
 /// produces recon pixels f32. Coefficients live in shared memory
 /// only — no global write+read of intermediate dequantized f32.

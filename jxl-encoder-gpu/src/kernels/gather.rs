@@ -68,7 +68,7 @@ pub fn gather_blocks_kernel(
     output[idx] = plane[src_off];
 }
 
-/// Inverse of [`gather_blocks_kernel`]: scatter per-block buffer back
+/// Inverse of [`fn@gather_blocks_kernel`]: scatter per-block buffer back
 /// into a spatial plane.
 #[cube(launch_unchecked)]
 pub fn scatter_blocks_kernel(
