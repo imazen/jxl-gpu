@@ -25,6 +25,7 @@ pub mod cost;
 pub mod dequant;
 pub mod epf;
 pub mod gaborish;
+pub mod pad;
 pub mod quantize;
 pub mod reconstruct;
 pub mod transform;
