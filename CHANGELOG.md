@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### EPF Step 0 — all three EPF passes now on GPU (`147e6ffb`, `094ea81f`, `3ec161d1`)
+
+The heaviest EPF pass (5×5 plus pattern, 12 neighbors × 5-position
+SAD) is now ported and parity-verified at FP32 floor:
+
+1. `kernels::epf::epf_step0_kernel` — one thread per output pixel,
+   reuses the existing `sad_3x3_plus` helper, mirrors the structure
+   of `epf_step1_kernel` expanded to 12 neighbors.
+2. `launch::epf::epf_step0` + `GpuEncoder::epf_step0_channels` —
+   slice-in / slice-out wrapper following the step 1 / step 2
+   pattern.
+3. `examples/epf_step0_parity.rs` — line-by-line inline CPU port of
+   upstream `jxl_encoder::vardct::epf::epf_step0_strip` (which is
+   private inside the upstream crate; not exposed via
+   jxl_encoder_simd). On CUDA: max|Δ| 4.7e-10 / 4.5e-8 / 4.5e-8 vs
+   5e-5 tolerance.
+
+Closes the largest "CPU bits inside existing forks" gap from
+PORT_STATUS. All three EPF passes are now GPU kernels with parity
+tests at FP32 floor.
+
 ### AFV0-3 cost grid integration — last per-strategy gap closed (`1f25c7c3`, `f6c3e45e`, `2ef97a2e`)
 
 The AFV0-3 corner-DCT family is now wired through the cost-grid path

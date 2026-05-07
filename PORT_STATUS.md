@@ -54,6 +54,7 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 | `per_block_modulations` | `per_block_modulations_scalar` | ✓ | 2.71e-6 rel (16x12 blocks; abs 1.76e-2 because output spans 0.3-6500 from fast_pow2f) |
 | `epf_step2` | `epf_step2_scalar` | ✓ | 3.7e-9 to 4.5e-8 abs (3 channels) |
 | `epf_step1` | `epf_step1_scalar` | ✓ | 4.7e-9 to 6.0e-8 abs (3 channels, 5-pos SAD) |
+| `epf_step0` | inline CPU port of upstream `epf_step0_strip` | ✓ | 4.7e-10 to 4.5e-8 abs (3 channels, 12 neighbors × 5-pos SAD) — verified `examples/epf_step0_parity.rs` on CUDA |
 | `fused_dct8_entropy` | `fused_dct8::fused_dct8_entropy_fallback` | ⏸ | use dct8 + entropy_coeffs chain instead (no register-residency win on GPU) |
 | `entropy_coeffs_pixel` | `entropy_coeffs_scalar` (pixel_domain=true) | ✓ | out bit-exact, err 3.8e-6 abs (64 blocks of 64) |
 | `entropy_coeffs_coeff` | `entropy_coeffs_scalar` (pixel_domain=false) | ✓ | 3.8e-6 abs |
@@ -104,7 +105,7 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
-**Not yet covered (CPU path stays):** EPF Step 0 (12-tap), `compute_epf_sharpness`, AdjustQuantBlockAC heuristics, `estimate_entropy_full` orchestration. **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
+**Not yet covered (CPU path stays):** `compute_epf_sharpness`, AdjustQuantBlockAC heuristics, `estimate_entropy_full` orchestration. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
 
 ## Coverage summary
 
@@ -113,10 +114,10 @@ for GPU-friendly batching.
   4-family sub-block variants; raw 4×4 + 4×8 forward + inverse DCTs
   as primitives for AFV; AFV4×4 forward + inverse; **AFV0-3 forward
   + inverse composition done in `forks::afv`**)
-- Phase 2 other: 13 of ~13 ✓ (quantize_dct8, quantize_large,
+- Phase 2 other: 14 of ~14 ✓ (quantize_dct8, quantize_large,
   dequant_dct8, block_l2, pixel_loss, cfl_find_best_multiplier +
-  Newton, compute_pre_erosion, per_block_modulations, epf_step1,
-  epf_step2, entropy_coeffs_pixel + coeff)
+  Newton, compute_pre_erosion, per_block_modulations, epf_step0,
+  epf_step1, epf_step2, entropy_coeffs_pixel + coeff)
 - Phase 3: 2.5 of 3 ✓ cost grids (15 strategies × 2 flavors), ✓
   partition selector (7-strategy 16×16 + recursive 32×32/64×64);
   ⛔ refactor of jxl-encoder ac_strategy_search.rs awaits permission
@@ -129,13 +130,15 @@ for GPU-friendly batching.
 
 **Grand total: 56 of ~65 deliverables verified (~86%)**
 
-DCT/IDCT family complete. CfL complete. EPF Steps 1+2 complete.
-AFV cost grid integration complete (host-side wrappers in
-`forks::afv` consuming `afv_weights()` + the existing batched AFV
-transforms). 11 fork modules verified composing through GpuEncoder.
-Remaining work concentrates in (a) EPF Step 0 GPU kernel (12-tap),
-(b) full estimate_entropy_full orchestration, (c) AdjustQuantBlockAC
-heuristics.
+DCT/IDCT family complete. CfL complete. **All three EPF passes
+complete** (Step 0 ported and parity-verified at FP32 floor on
+2026-05-07; Steps 1 + 2 done in earlier phases). AFV cost grid
+integration complete (host-side wrappers in `forks::afv` consuming
+`afv_weights()` + the existing batched AFV transforms). 11 fork
+modules verified composing through GpuEncoder. Remaining work
+concentrates in (a) full estimate_entropy_full orchestration,
+(b) AdjustQuantBlockAC heuristics, (c) compute_epf_sharpness
+orchestration.
 
 ### Note on AC strategy search (Phase 3)
 
