@@ -292,6 +292,46 @@ impl<R: Runtime> LossyEncoder<R> {
             .collect()
     }
 
+    /// sRGB U8 batch wrapper for [`Self::encode_many`].
+    ///
+    /// Same shape as [`Self::encode_one_srgb_u8`] but produces one
+    /// reconstructed RGB U8 buffer per `qac_qm` setting. Input
+    /// linearization happens once outside the inner loop, so the
+    /// per-encode sRGB↔linear cost is amortized — much closer to the
+    /// pure-f32 batch throughput.
+    pub fn encode_many_srgb_u8(
+        &self,
+        enc: &GpuEncoder<R>,
+        rgb: &[u8],
+        qac_settings: &[f32],
+    ) -> Vec<Vec<u8>> {
+        let n = (self.width as usize) * (self.height as usize);
+        assert_eq!(rgb.len(), n * 3);
+        let to_linear = |c: u8| (c as f32 / 255.0).powf(2.4);
+        let mut r = Vec::with_capacity(n);
+        let mut g = Vec::with_capacity(n);
+        let mut b = Vec::with_capacity(n);
+        for chunk in rgb.chunks_exact(3) {
+            r.push(to_linear(chunk[0]));
+            g.push(to_linear(chunk[1]));
+            b.push(to_linear(chunk[2]));
+        }
+        let outputs = self.encode_many(enc, &r, &g, &b, qac_settings);
+        let to_srgb_u8 = |v: f32| (v.clamp(0.0, 1.0).powf(1.0 / 2.4) * 255.0).round() as u8;
+        outputs
+            .into_iter()
+            .map(|(rr, gg, bb)| {
+                let mut out = Vec::with_capacity(n * 3);
+                for i in 0..n {
+                    out.push(to_srgb_u8(rr[i]));
+                    out.push(to_srgb_u8(gg[i]));
+                    out.push(to_srgb_u8(bb[i]));
+                }
+                out
+            })
+            .collect()
+    }
+
     /// Internal pipeline body. Operates on pre-uploaded GPU planes;
     /// downloads the reconstructed RGB at the end.
     /// Pipeline body. Operates on already-padded planes (dimensions
@@ -416,6 +456,30 @@ mod tests {
             max_diff < 64,
             "smooth-gradient reconstruction max byte diff = {max_diff}, expected < 64 at qac=1"
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_lossy_encoder_srgb_u8_many() {
+        // Batch sRGB U8 wrapper: one shared linearization, N encodes.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy = LossyEncoder::new(&enc, 32, 32);
+        let n = 32 * 32;
+        let mut rgb = Vec::with_capacity(n * 3);
+        for y in 0..32 {
+            for x in 0..32 {
+                rgb.push((x * 8) as u8);
+                rgb.push((y * 8) as u8);
+                rgb.push(((x + y) * 4) as u8);
+            }
+        }
+        let qacs = [1.0_f32, 4.0, 16.0];
+        let outputs = lossy.encode_many_srgb_u8(&enc, &rgb, &qacs);
+        assert_eq!(outputs.len(), 3);
+        for out in &outputs {
+            assert_eq!(out.len(), n * 3);
+        }
     }
 
     #[cfg(feature = "cuda")]
