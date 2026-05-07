@@ -19,6 +19,11 @@
 //!
 //! One thread per 8x8 block.
 
+// Match the rest of the kernel set — the cube macro generates code that
+// triggers `assign_op_pattern` on the `x = x + y` style we use for
+// parity with the CPU `_scalar` reference.
+#![allow(clippy::assign_op_pattern)]
+
 use cubecl::prelude::*;
 
 const ONE_OVER_16: f32 = 1.0 / 16.0;

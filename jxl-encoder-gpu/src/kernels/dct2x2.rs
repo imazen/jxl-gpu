@@ -18,6 +18,10 @@
 //! One thread per 8×8 block. Per-pass scratch lives in
 //! `SharedMemory<f32>::new(64)`.
 
+// `cube` macro emits `x = x + y` style for parity audits with the CPU
+// reference; opt out of clippy's `assign_op_pattern` lint cluster-wide.
+#![allow(clippy::assign_op_pattern)]
+
 use cubecl::prelude::*;
 
 const QUARTER: f32 = 0.25;

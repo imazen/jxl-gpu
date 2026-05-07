@@ -100,7 +100,7 @@ use crate::persistent::{GaborishWeights, GpuBlocks, GpuPlane};
 /// libjxl gaborish K_GABORISH constants for mul=1.0. Matches
 /// `forks::gaborish::compute_weights(1.0)` bit-for-bit.
 const K_GABORISH: [f64; 5] = [
-    -0.094_958_15_67,
+    -0.094_958_156_7,
     -0.041_031_725,
     0.013_710_005,
     0.006_510_206,
