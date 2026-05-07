@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Fixed — `quality_to_qac` direction was inverted vs libjxl (`1fa03c76`)
+
+The kernel uses `val = coef * inv_weight * qac`, so SMALLER qac
+means MORE aggressive quant (val falls below dead-zone). My
+`quality_to_qac` had higher quality → smaller qac, which produced
+the opposite of what the docstring claimed (q=100 gave heavy
+quant, q=10 gave light). Caught when `quality_sweep_demo` showed
+non-monotonic MAE.
+
+Fix: `distance = 50/q; qac = K_AC_QUANT/distance` (libjxl
+convention, K_AC_QUANT=0.765). Now monotonic — q=100 → qac=1.530,
+q=50 → qac=0.765, q=10 → qac=0.153.
+
+### Improved — Real DCT8 quant matrices in LossyEncoder (`0a85b6f6`, `7eaac931`)
+
+Replaced placeholder unit weights (all-1.0s) with libjxl's per-
+channel DCT8 quant matrices derived from `DCT8_PARAMS` via the
+parametric band formula. Constants + math duplicated bit-for-bit
+from `jxl_encoder::vardct::quant` (the upstream module is
+crate-private).
+
+Per-channel: X / Y / B each get their own `weights_g` handle.
+B-channel error at high q is now visibly larger than Y (B has
+narrowest libjxl quant matrix), matching real JPEG XL behavior.
+
+Measured impact on quality_sweep_demo (1024×1024 photo) after
+both this fix and the inverted-direction fix:
+
+  qual    qac    R MAE   G MAE   B MAE
+   95   1.453   5.12    4.66    8.94
+   80   1.224   5.20    4.74    9.62
+   60   0.918   5.36    4.92   10.98
+   40   0.612   5.70    5.26   13.31
+   20   0.306   6.60    6.11   18.31
+
+Monotonic + sensible scale. (Previous unit-weights output had
+MAE values in the 18+ range across all qualities.)
+
 ### Added — `LossyEncoder` high-level API (`b4eb3619`, `c5c312fb`)
 
 Productionizes the persistent pipeline as a single user-facing API:
