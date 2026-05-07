@@ -392,4 +392,74 @@ mod tests {
             "DCT8 batch roundtrip drift too large: {max_err:.3e}"
         );
     }
+
+    /// Verifies that the dispatcher routes IDENTITY through both
+    /// forward + inverse paths cleanly. Same shape as
+    /// `test_dct_idct_batch_roundtrip_dct8`.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dct_idct_batch_roundtrip_identity() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let stride = 64;
+        let plane: Vec<f32> = (0..stride * 64)
+            .map(|i| 0.3 + 0.4 * (i as f32 * 0.011).sin())
+            .collect();
+        let mut block_coords = Vec::new();
+        for by in 0..8 {
+            for bx in 0..8 {
+                block_coords.push((bx, by));
+            }
+        }
+        let coeffs =
+            apply_dct_batch_gpu(&enc, &plane, stride, &block_coords, RAW_STRATEGY_IDENTITY);
+        let recon = apply_idct_batch_gpu(&enc, &coeffs, RAW_STRATEGY_IDENTITY);
+        assert_eq!(recon.len(), 64 * 64);
+        let mut max_err = 0.0_f32;
+        for (lin_idx, &(bx, by)) in block_coords.iter().enumerate() {
+            for dy in 0..8 {
+                let src_off = (by * 8 + dy) * stride + bx * 8;
+                for dx in 0..8 {
+                    let orig = plane[src_off + dx];
+                    let r = recon[lin_idx * 64 + dy * 8 + dx];
+                    max_err = max_err.max((orig - r).abs());
+                }
+            }
+        }
+        assert!(max_err < 1e-5, "IDENTITY batch roundtrip drift: {max_err:.3e}");
+    }
+
+    /// DCT2X2 batch dispatcher round-trip.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dct_idct_batch_roundtrip_dct2x2() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let stride = 64;
+        let plane: Vec<f32> = (0..stride * 64)
+            .map(|i| 0.3 + 0.4 * (i as f32 * 0.013).cos())
+            .collect();
+        let mut block_coords = Vec::new();
+        for by in 0..8 {
+            for bx in 0..8 {
+                block_coords.push((bx, by));
+            }
+        }
+        let coeffs =
+            apply_dct_batch_gpu(&enc, &plane, stride, &block_coords, RAW_STRATEGY_DCT2X2);
+        let recon = apply_idct_batch_gpu(&enc, &coeffs, RAW_STRATEGY_DCT2X2);
+        assert_eq!(recon.len(), 64 * 64);
+        let mut max_err = 0.0_f32;
+        for (lin_idx, &(bx, by)) in block_coords.iter().enumerate() {
+            for dy in 0..8 {
+                let src_off = (by * 8 + dy) * stride + bx * 8;
+                for dx in 0..8 {
+                    let orig = plane[src_off + dx];
+                    let r = recon[lin_idx * 64 + dy * 8 + dx];
+                    max_err = max_err.max((orig - r).abs());
+                }
+            }
+        }
+        assert!(max_err < 1e-5, "DCT2X2 batch roundtrip drift: {max_err:.3e}");
+    }
 }
