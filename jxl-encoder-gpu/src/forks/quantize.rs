@@ -28,12 +28,19 @@
 //!   channels (X, Y, B) sequentially. Three GPU launches; future
 //!   fusion = a 3-channel kernel that does X+Y+B in one launch.
 //!
+//! Larger-strategy quantize (DCT16+ family) is now wired via
+//! [`quantize_blocks_gpu`] which dispatches to either the DCT8 fast
+//! path or the generic `quantize_large` kernel based on the
+//! `(grid_width, grid_height, llf_x, llf_y)` strategy descriptor.
+//!
 //! Not yet covered (no GPU kernel for these):
-//! - Larger-strategy quantize (DCT16+, AFV, IDENTITY, DCT2X2)
 //! - `adjust_quant_block_ac` heuristics (sparse-block boost, HF corner
 //!   increase, flatness detection, etc.) — stay on CPU
 //! - Error diffusion in zigzag order — stay on CPU (libjxl never
 //!   uses ED in QuantizeBlockAC anyway, despite accepting the param)
+//! - AFV/IDENTITY/DCT2X2 use the 64-coeff DCT8 quant path (their
+//!   coefficient layout matches), so they go through `quantize_dct8`
+//!   not `quantize_large`.
 
 use alloc::vec::Vec;
 
@@ -143,6 +150,36 @@ pub fn quantize_dct8_xyb_gpu<R: Runtime>(
     let qy = enc.quantize_dct8_blocks(coeffs_y, weights_y, qac_qm_y, &thr_y);
     let qb = enc.quantize_dct8_blocks(coeffs_b, weights_b, qac_qm_b, &thr_b);
     (qx, qy, qb)
+}
+
+/// Strategy-aware quantize. Dispatches to `quantize_dct8` or
+/// `quantize_large` per the (`grid_width`, `grid_height`, `llf_x`,
+/// `llf_y`) tuple — DCT8 (8/8/1/1) takes the fast path, everything
+/// else takes the generic large-block path.
+///
+/// Mirrors upstream's `quantize_large_scalar` shape; useful for
+/// quantizing the coefficient outputs of DCT16/16x8/8x16/32/32x16/
+/// 16x32/64/64x32/32x64 transforms after the forward DCT.
+#[allow(clippy::too_many_arguments)]
+pub fn quantize_blocks_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    coeffs: &[f32],
+    weights: &[f32],
+    qac_qm: &[f32],
+    thresholds: &[f32; 4],
+    grid_width: u32,
+    grid_height: u32,
+    llf_x: u32,
+    llf_y: u32,
+) -> Vec<i32> {
+    if grid_width == 8 && grid_height == 8 && llf_x == 1 && llf_y == 1 {
+        // DCT8 fast path.
+        enc.quantize_dct8_blocks(coeffs, weights, qac_qm, thresholds)
+    } else {
+        enc.quantize_large_blocks(
+            coeffs, weights, qac_qm, thresholds, grid_width, grid_height, llf_x, llf_y,
+        )
+    }
 }
 
 /// Convenience: returns a length-`num_blocks * 64` vec of all-1.0

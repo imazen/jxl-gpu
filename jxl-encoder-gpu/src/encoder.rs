@@ -520,6 +520,60 @@ impl<R: Runtime> GpuEncoder<R> {
         i32::from_bytes(&bytes).to_vec()
     }
 
+    /// Quantize a contiguous batch of larger-strategy blocks (DCT16,
+    /// DCT16x8/8x16, DCT32, DCT32x16/16x32, DCT64, DCT64x32/32x64).
+    ///
+    /// Same dead-zone semantics as [`Self::quantize_dct8_blocks`] but
+    /// the per-block coefficient count and LLF region are
+    /// strategy-dependent and supplied by the caller via
+    /// `grid_width`/`grid_height` and `llf_x`/`llf_y` (matching the
+    /// upstream `quantize_large_scalar` parameters).
+    ///
+    /// `coeffs.len()` and `weights.len()` must be `num_blocks *
+    /// grid_width * grid_height`. Returns the quantized i32 buffer of
+    /// the same shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn quantize_large_blocks(
+        &self,
+        coeffs: &[f32],
+        weights: &[f32],
+        qac_qm: &[f32],
+        thresholds: &[f32; 4],
+        grid_width: u32,
+        grid_height: u32,
+        llf_x: u32,
+        llf_y: u32,
+    ) -> Vec<i32> {
+        let block_size = (grid_width as usize) * (grid_height as usize);
+        let n = coeffs.len();
+        assert!(n.is_multiple_of(block_size));
+        assert_eq!(weights.len(), n);
+        let num_blocks = (n / block_size) as u32;
+        assert_eq!(qac_qm.len(), num_blocks as usize);
+        let h_c = self.client.create_from_slice(f32::as_bytes(coeffs));
+        let h_w = self.client.create_from_slice(f32::as_bytes(weights));
+        let h_q = self.client.create_from_slice(f32::as_bytes(qac_qm));
+        let h_t = self.client.create_from_slice(f32::as_bytes(&thresholds[..]));
+        let h_o = self
+            .client
+            .create_from_slice(i32::as_bytes(&vec![0_i32; n]));
+        crate::launch::quantize::quantize_large::<R>(
+            &self.client,
+            h_c,
+            h_w,
+            h_q,
+            h_t,
+            h_o.clone(),
+            num_blocks,
+            grid_width,
+            grid_height,
+            llf_x,
+            llf_y,
+        );
+        let bytes = self.client.read_one(h_o).expect("read quantize_large");
+        i32::from_bytes(&bytes).to_vec()
+    }
+
     /// Per-block entropy estimation in pixel-domain mode.
     ///
     /// Returns `(out_4xn, error_coeffs)` where `out_4xn` is `num_blocks * 4`
