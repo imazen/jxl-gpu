@@ -59,6 +59,25 @@ const QUANT_BIAS: [f32; 4] = [
 /// - For `|quantized| == 1` → `±BIAS[channel]` (channel-dependent
 ///   center value).
 /// - For `|quantized| >= 2` → `q - BIAS[3] / q` (reciprocal taper).
+///
+/// ```
+/// use jxl_encoder_gpu::forks::dequant::adjust_quant_bias;
+///
+/// // Zero stays zero.
+/// assert_eq!(adjust_quant_bias(0, 0), 0.0);
+/// assert_eq!(adjust_quant_bias(0, 1), 0.0);
+/// assert_eq!(adjust_quant_bias(0, 2), 0.0);
+///
+/// // ±1 → channel-specific bias (X=0.945, Y=0.930, B=0.950).
+/// // Y has the largest correction (smallest bias center).
+/// assert!(adjust_quant_bias(1, 1) < adjust_quant_bias(1, 0));
+/// assert!(adjust_quant_bias(1, 1) < adjust_quant_bias(1, 2));
+/// assert!((adjust_quant_bias(1, 0) + adjust_quant_bias(-1, 0)).abs() < 1e-6);
+///
+/// // |q| >= 2 → q - 0.145/q (reciprocal taper).
+/// // For q=5: 5 - 0.145/5 = 4.971.
+/// assert!((adjust_quant_bias(5, 0) - (5.0 - 0.145 / 5.0)).abs() < 1e-6);
+/// ```
 #[inline]
 pub fn adjust_quant_bias(quantized: i32, channel: usize) -> f32 {
     if quantized == 0 {
