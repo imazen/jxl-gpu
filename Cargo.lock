@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "jxl-encoder"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "archmage",
  "bytemuck",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "jxl-encoder-simd"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "archmage",
  "magetypes",
