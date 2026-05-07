@@ -19,6 +19,8 @@ extern crate alloc;
 
 #[cfg(feature = "encoder")]
 pub mod encoder;
+#[cfg(feature = "encoder")]
+pub mod forks;
 pub mod kernels;
 pub mod launch;
 pub mod pipeline;
