@@ -209,9 +209,9 @@ fn main() {
             let by_g = enc.gather_blocks_persistent(&xy_g, 8, 8);
             let bb_g = enc.gather_blocks_persistent(&xb_g, 8, 8);
             // DCT8 ×3
-            let coeffs_x = enc.dct_8x8_persistent(&bx_g);
-            let coeffs_y = enc.dct_8x8_persistent(&by_g);
-            let coeffs_b = enc.dct_8x8_persistent(&bb_g);
+            let coeffs_x = enc.dct_8x8_wide_persistent(&bx_g);
+            let coeffs_y = enc.dct_8x8_wide_persistent(&by_g);
+            let coeffs_b = enc.dct_8x8_wide_persistent(&bb_g);
             // Quantize ×3
             let q_x =
                 enc.quantize_dct8_persistent(&coeffs_x, &weights_g, &qac_vec, &thr);
@@ -229,9 +229,9 @@ fn main() {
             enc.restore_dc_persistent(&coeffs_y, &dq_y);
             enc.restore_dc_persistent(&coeffs_b, &dq_b);
             // IDCT ×3
-            let recon_x_b = enc.idct_8x8_persistent(&dq_x);
-            let recon_y_b = enc.idct_8x8_persistent(&dq_y);
-            let recon_b_b = enc.idct_8x8_persistent(&dq_b);
+            let recon_x_b = enc.idct_8x8_wide_persistent(&dq_x);
+            let recon_y_b = enc.idct_8x8_wide_persistent(&dq_y);
+            let recon_b_b = enc.idct_8x8_wide_persistent(&dq_b);
             // Scatter ×3
             let recon_x_p =
                 enc.scatter_blocks_persistent(&recon_x_b, side as u32, side as u32, 8, 8);
