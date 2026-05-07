@@ -22,7 +22,7 @@ Verified on RTX 5070 + CUDA 13.2 (cubecl-cuda 0.10.0-pre.4).
 | `gab_smooth` (3x3) | `gab_smooth_scalar` | ✓ | 5.96e-8 abs |
 | `gaborish_5x5` | `gaborish_5x5_scalar` | ✓ | 1.19e-7 abs |
 | `mask1x1` | `compute_mask1x1_scalar` | ✓ | 6.79e-4 abs (FMA-contraction noise on `fast_log2f`; ~7e-6 relative on output range) |
-| `denoise` | `noise::denoise_channel` (no `_scalar` exported) | ❌ | — |
+| `denoise` | `noise::denoise_channel_scalar` | ✓ | 5.96e-8 abs (257×191, FMA-contraction noise) |
 | `pad_plane` | `epf::pad_plane` | ✓ | 0.0 abs (bit-exact, 128x96 with pad=4) |
 
 ## Phase 2 — Per-block kernels
