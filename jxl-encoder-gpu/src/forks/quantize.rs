@@ -335,6 +335,71 @@ pub fn apply_heuristic_a_thresholds(
 /// otherwise exceed.
 pub const QUANT_MAX: i32 = 256;
 
+/// AdjustQuantBlockAC heuristic B — sparse Y-channel handling.
+/// Mirrors upstream lines 222-255.
+///
+/// Only runs for the Y channel (`c == 1`) when the block is sparse
+/// (`sum_of_vals * 8 < xsize * ysize`). When fired, may increment
+/// `quant` by 1 (if any non-DC quadrant has zero non-zeros AND a
+/// per-quadrant `hf_max_error > K_LIMIT[i] = 0.46`), and may set
+/// one of the threshold positions based on which quadrant ranges
+/// match.
+///
+/// Returns `true` when the heuristic fired (bit `0x02` in
+/// upstream's bitfield), regardless of whether the quant or
+/// thresholds actually changed.
+///
+/// Threshold-setting precedence (upstream's `if/else if/else if`
+/// cascade):
+/// 1. Quadrant 3 (high-x, high-y) → updates `thresholds[3]`.
+/// 2. Otherwise quadrant 1 or 2 (one high coord) → updates
+///    `thresholds[1] = thresholds[2]` to the same value.
+/// 3. Otherwise quadrant 0 (DC quadrant) → updates `thresholds[0]`.
+pub fn apply_heuristic_b_sparse_y(
+    quant: &mut i32,
+    thresholds: &mut [f32; 4],
+    stats: &AdjustQuantBlockStats,
+    c: usize,
+    xsize: usize,
+    ysize: usize,
+) -> bool {
+    if c != 1 {
+        return false;
+    }
+    if stats.sum_of_vals * 8.0 >= (xsize * ysize) as f32 {
+        return false;
+    }
+
+    const K_LIMIT: [f64; 4] = [0.46, 0.46, 0.46, 0.46];
+    const K_MUL: [f64; 4] = [0.9999, 0.9999, 0.9999, 0.9999];
+
+    let orig_quant = *quant;
+    let mut new_quant = *quant;
+    for i in 1..4 {
+        if stats.hf_nonzeros[i] == 0.0 && (stats.hf_max_error[i] as f64) > K_LIMIT[i] {
+            new_quant = orig_quant + 1;
+            break;
+        }
+    }
+    *quant = new_quant;
+
+    if stats.hf_nonzeros[3] == 0.0 && (stats.hf_max_error[3] as f64) > K_LIMIT[3] {
+        thresholds[3] = (K_MUL[3] * stats.hf_max_error[3] as f64 * new_quant as f64
+            / orig_quant as f64) as f32;
+    } else if (stats.hf_nonzeros[1] == 0.0 && (stats.hf_max_error[1] as f64) > K_LIMIT[1])
+        || (stats.hf_nonzeros[2] == 0.0 && (stats.hf_max_error[2] as f64) > K_LIMIT[2])
+    {
+        let max_err = stats.hf_max_error[1].max(stats.hf_max_error[2]);
+        thresholds[1] =
+            (K_MUL[1] * max_err as f64 * new_quant as f64 / orig_quant as f64) as f32;
+        thresholds[2] = thresholds[1];
+    } else if stats.hf_nonzeros[0] == 0.0 && (stats.hf_max_error[0] as f64) > K_LIMIT[0] {
+        thresholds[0] = (K_MUL[0] * stats.hf_max_error[0] as f64 * new_quant as f64
+            / orig_quant as f64) as f32;
+    }
+    true
+}
+
 /// AdjustQuantBlockAC heuristic C — high-frequency corner penalty.
 /// Mirrors upstream lines 257-269.
 ///
@@ -539,6 +604,59 @@ mod tests {
         for v in &t {
             assert_eq!(*v, 0.54);
         }
+    }
+
+    #[test]
+    fn test_heuristic_b_skips_non_y_channel() {
+        let q = 100;
+        let t = [0.62_f32; 4];
+        let stats = AdjustQuantBlockStats {
+            sum_of_vals: 0.0, // sparse
+            hf_nonzeros: [0.0; 4],
+            hf_max_error: [1.0; 4], // big enough to fire
+            ..Default::default()
+        };
+        for c in [0_usize, 2] {
+            let mut q2 = q;
+            let mut t2 = t;
+            assert!(!apply_heuristic_b_sparse_y(&mut q2, &mut t2, &stats, c, 2, 2));
+            assert_eq!(q2, q);
+            assert_eq!(t2, t);
+        }
+    }
+
+    #[test]
+    fn test_heuristic_b_skips_non_sparse() {
+        let mut q = 100;
+        let mut t = [0.62_f32; 4];
+        let stats = AdjustQuantBlockStats {
+            sum_of_vals: 1.0, // 1.0 * 8 = 8 >= 4 (xsize*ysize for 2x2) → not sparse
+            ..Default::default()
+        };
+        assert!(!apply_heuristic_b_sparse_y(&mut q, &mut t, &stats, 1, 2, 2));
+        assert_eq!(q, 100);
+        assert_eq!(t, [0.62_f32; 4]);
+    }
+
+    #[test]
+    fn test_heuristic_b_quadrant_3_updates_thresholds_3() {
+        let mut q = 100;
+        let mut t = [0.62_f32; 4];
+        let stats = AdjustQuantBlockStats {
+            sum_of_vals: 0.0,
+            hf_nonzeros: [0.0; 4],
+            hf_max_error: [0.0, 0.0, 0.0, 1.0], // Q3 fires
+            ..Default::default()
+        };
+        let fired = apply_heuristic_b_sparse_y(&mut q, &mut t, &stats, 1, 2, 2);
+        assert!(fired);
+        assert_eq!(q, 101); // bumped via quadrant 3 fire
+        // thresholds[3] = 0.9999 * 1.0 * 101/100 = 1.009899
+        assert!((t[3] - 1.0099_f32).abs() < 1e-3);
+        // unchanged positions
+        assert_eq!(t[0], 0.62);
+        assert_eq!(t[1], 0.62);
+        assert_eq!(t[2], 0.62);
     }
 
     #[test]
