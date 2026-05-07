@@ -147,6 +147,45 @@ pub fn apply_epf_step1_gpu<R: Runtime>(
     )
 }
 
+/// EPF Step 0 on GPU — 5×5 plus kernel with 3×3-plus SAD over 12
+/// neighbors. The heaviest of the three EPF passes.
+///
+/// `pad` MUST be at least 3 (the 5×5 plus reaches ±2 from center;
+/// the 3×3-plus SAD adds another ±1 around each neighbor → ±3
+/// total reach). `sigma_scale` is the per-call multiplier — for
+/// step 0 callers typically use `EPF_PASS0_SIGMA_SCALE * 1.65 = 1.485`
+/// (matching upstream); `border_sigma_mul` is `EPF_BORDER_SAD_MUL`
+/// (2/3).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_epf_step0_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    in_x: &[f32],
+    in_y: &[f32],
+    in_b: &[f32],
+    inv_sigma: &[f32],
+    width: u32,
+    height: u32,
+    xsize_blocks: u32,
+    ysize_blocks: u32,
+    pad: u32,
+    sigma_scale: f32,
+    border_sigma_mul: f32,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    enc.epf_step0_channels(
+        in_x,
+        in_y,
+        in_b,
+        inv_sigma,
+        width,
+        height,
+        xsize_blocks,
+        ysize_blocks,
+        pad,
+        sigma_scale,
+        border_sigma_mul,
+    )
+}
+
 /// EPF Step 2 on GPU — 3×3 cross kernel.
 /// Same I/O shape as `apply_epf_step1_gpu`. `sigma_scale` is typically
 /// `EPF_PASS2_SIGMA_SCALE` (6.5).
