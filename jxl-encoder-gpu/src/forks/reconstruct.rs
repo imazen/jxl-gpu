@@ -104,6 +104,129 @@ fn dct1d_2(mem: &mut [f32]) {
     mem[1] = a - b;
 }
 
+/// In-place 8-point DCT (libjxl `dct1d_8`). Pure scalar — bit-for-bit
+/// port of upstream's `dct1d_8_val` butterfly. Used by the DCT64×64 /
+/// DCT64×32 / DCT32×64 LLF restoration.
+fn dct1d_8(mem: &mut [f32]) {
+    const SQRT2: f32 = 1.414_213_5;
+    const WC4: [f32; 2] = [0.541_196_1, 1.306_563_0];
+    const WC8: [f32; 4] = [0.509_795_6, 0.601_344_9, 0.899_976_2, 2.562_915_4];
+    let m = [
+        mem[0], mem[1], mem[2], mem[3], mem[4], mem[5], mem[6], mem[7],
+    ];
+    let t0 = m[0] + m[7];
+    let t1 = m[1] + m[6];
+    let t2 = m[2] + m[5];
+    let t3 = m[3] + m[4];
+    let t4 = m[0] - m[7];
+    let t5 = m[1] - m[6];
+    let t6 = m[2] - m[5];
+    let t7 = m[3] - m[4];
+    // dct1d_4_val on first half (t0..t3).
+    let dct4 = |a: f32, b: f32, c: f32, d: f32| -> [f32; 4] {
+        let u0 = a + d;
+        let u1 = b + c;
+        let u2 = a - d;
+        let u3 = b - c;
+        let v0 = u0 + u1;
+        let v1 = u0 - u1;
+        let w0 = u2 * WC4[0];
+        let w1 = u3 * WC4[1];
+        let s0 = w0 + w1;
+        let s1 = w0 - w1;
+        [v0, SQRT2 * s0 + s1, v1, s1]
+    };
+    let r0 = dct4(t0, t1, t2, t3);
+    // Wc multiply on second half (t4..t7).
+    let w4 = t4 * WC8[0];
+    let w5 = t5 * WC8[1];
+    let w6 = t6 * WC8[2];
+    let w7 = t7 * WC8[3];
+    // dct1d_4_val on second half.
+    let r1 = dct4(w4, w5, w6, w7);
+    // B transform.
+    let b0 = SQRT2 * r1[0] + r1[1];
+    let b1 = r1[1] + r1[2];
+    let b2 = r1[2] + r1[3];
+    let b3 = r1[3];
+    // InverseEvenOdd: interleave dct4 results with B transform.
+    mem[0] = r0[0];
+    mem[1] = b0;
+    mem[2] = r0[1];
+    mem[3] = b1;
+    mem[4] = r0[2];
+    mem[5] = b2;
+    mem[6] = r0[3];
+    mem[7] = b3;
+}
+
+/// `DCT_RESAMPLE_SCALE_64_TO_8[i]` — scale factors for the 8-point
+/// resample used by the DC-from-DCT64 forward operation.
+/// Bit-for-bit from upstream.
+pub const DCT_RESAMPLE_SCALE_64_TO_8: [f32; 8] = [
+    1.0,
+    0.993_686_6,
+    0.974_886_8,
+    0.944_018_1,
+    0.901_764_2,
+    0.849_057_5,
+    0.787_054_9,
+    0.717_108_1,
+];
+
+/// Restore the 8×8 LLF coefficients of a DCT64×64 block from the 8×8
+/// stored DC grid. Mirrors upstream `restore_llf_from_dc` for
+/// `RAW_STRATEGY_DCT64X64` (reconstruct.rs lines 732-757).
+///
+/// `dc_grid[iy * 8 + ix]` is the dequantized DC value at sub-block
+/// `(iy, ix)` within the 8×8 region the DCT64×64 covers.
+///
+/// Returns `[f32; 64]` ordered as `out[iy * 8 + ix]` for
+/// `iy, ix in 0..8` — to be written at coefficient positions
+/// `coeffs[iy * 64 + ix]` in the 64×64 coefficient block.
+///
+/// Math: row-DCT (8-pt) → 1/8 scale → transpose → row-DCT (8-pt) →
+/// 1/8 scale → divide by `(scale_iy * scale_ix)`. Combined forward
+/// gain of 64 is split as two 1/8 scalings; the per-position
+/// resample scale completes the normalization.
+pub fn restore_llf_dct64x64(dc_grid: [f32; 64]) -> [f32; 64] {
+    let mut block = dc_grid;
+    // Forward 8-pt DCT on rows (8 rows of 8) with 1/8 scale.
+    for iy in 0..8 {
+        let s = iy * 8;
+        dct1d_8(&mut block[s..s + 8]);
+        for v in &mut block[s..s + 8] {
+            *v *= 1.0 / 8.0;
+        }
+    }
+    // Transpose 8×8.
+    let mut t = [0.0_f32; 64];
+    for iy in 0..8 {
+        for ix in 0..8 {
+            t[ix * 8 + iy] = block[iy * 8 + ix];
+        }
+    }
+    // Forward 8-pt DCT on rows again with 1/8 scale.
+    for iy in 0..8 {
+        let s = iy * 8;
+        dct1d_8(&mut t[s..s + 8]);
+        for v in &mut t[s..s + 8] {
+            *v *= 1.0 / 8.0;
+        }
+    }
+    // Square-block convention: do NOT transpose back (matches the
+    // libjxl `output[cx * 8 + cy] = ...` coefficient layout that
+    // dc_from_dct_64x64 inverts). Apply per-position scale.
+    let mut out = [0.0_f32; 64];
+    for iy in 0..8 {
+        for ix in 0..8 {
+            let scale = DCT_RESAMPLE_SCALE_64_TO_8[iy] * DCT_RESAMPLE_SCALE_64_TO_8[ix];
+            out[iy * 8 + ix] = t[iy * 8 + ix] / scale;
+        }
+    }
+    out
+}
+
 /// Restore the 2×4 LLF coefficients of a DCT32×16 block from the 4×2
 /// stored DC grid. Mirrors upstream `restore_llf_from_dc` for
 /// `RAW_STRATEGY_DCT32X16` (reconstruct.rs lines 643-684).
@@ -638,6 +761,32 @@ mod tests {
         let [r0, r1] = restore_llf_dct16x8_or_8x16(dc0, dc1);
         assert!((r0 - llf0).abs() < 1e-5, "got {r0} expected {llf0}");
         assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
+    }
+
+    #[test]
+    fn test_restore_llf_dct64x64_zero_in() {
+        let r = restore_llf_dct64x64([0.0; 64]);
+        for &v in &r {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_restore_llf_dct64x64_constant_dc() {
+        // Constant DC c: 8-pt DCT of [c]*8 = [8c, 0, ..., 0].
+        // After 1/8: [c, 0, ...]. Transpose puts c column 0.
+        // Second pass DCT on row 0 [c,0,...,0]: u-transform yields
+        // a complex row. But for [c,0,0,0,0,0,0,0]: each dct1d_8
+        // step splits into many components — let me just verify
+        // shape/finiteness rather than predict the exact pattern.
+        let c = 0.5_f32;
+        let r = restore_llf_dct64x64([c; 64]);
+        // After full 8x8 DCT of [c, c, ..., c] (=64 times constant c),
+        // only the (0,0) frequency tap survives the symmetric input.
+        // Our restoration: (8c)/8 per row × (8c)/8 per col = c at (0,0)
+        // (since SCALE_64_TO_8[0] = 1.0).
+        assert!(r[0].is_finite());
+        assert!((r[0] - c).abs() < 1e-4, "got {} expected ~{}", r[0], c);
     }
 
     #[test]
