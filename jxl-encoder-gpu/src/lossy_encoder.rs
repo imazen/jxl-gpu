@@ -88,7 +88,7 @@ impl<R: Runtime> LossyEncoder<R> {
     /// Width and height must be multiples of 8.
     pub fn new(enc: &GpuEncoder<R>, width: u32, height: u32) -> Self {
         assert!(
-            width % 8 == 0 && height % 8 == 0,
+            width.is_multiple_of(8) && height.is_multiple_of(8),
             "width/height must be multiples of 8"
         );
         let num_blocks = (width / 8) * (height / 8);

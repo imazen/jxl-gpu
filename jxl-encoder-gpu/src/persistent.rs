@@ -874,12 +874,12 @@ impl<R: Runtime> GpuEncoder<R> {
         tile_h: u32,
     ) -> GpuBlocks<R> {
         assert!(
-            plane.width % tile_w == 0,
+            plane.width.is_multiple_of(tile_w),
             "plane width {} not multiple of tile_w {tile_w}",
             plane.width
         );
         assert!(
-            plane.height % tile_h == 0,
+            plane.height.is_multiple_of(tile_h),
             "plane height {} not multiple of tile_h {tile_h}",
             plane.height
         );
@@ -920,8 +920,8 @@ impl<R: Runtime> GpuEncoder<R> {
         tile_w: u32,
         tile_h: u32,
     ) -> GpuPlane<R> {
-        assert!(width % tile_w == 0);
-        assert!(height % tile_h == 0);
+        assert!(width.is_multiple_of(tile_w));
+        assert!(height.is_multiple_of(tile_h));
         assert_eq!(blocks.coeffs_per_block, tile_w * tile_h);
         let blocks_per_row = width / tile_w;
         let blocks_per_col = height / tile_h;
@@ -1115,64 +1115,38 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_fused_dequant_idct8_y_persistent() {
-        // Fused dequant+IDCT (Y) matches split chain bit-exactly when
-        // CfL factors are zero (Y has no CfL anyway).
+        // Fused dequant+IDCT (Y) produces finite output. The bench
+        // (fused_dequant_idct_bench) already verifies bit-exact
+        // match vs split chain (3-channel dequant_dct8 + wide IDCT
+        // with CfL=0); here we just confirm the persistent wrapper
+        // executes end-to-end on synthetic input.
+        use cubecl::prelude::*;
         type B = cubecl::cuda::CudaRuntime;
         let enc: GpuEncoder<B> = GpuEncoder::new();
         let nb = 8_u32;
         let n = (nb as usize) * 64;
+
         let quant: Vec<i32> = (0..n).map(|i| ((i as i32 * 7) % 11) - 5).collect();
         let weights = vec![1.0_f32; n];
         let qac = vec![4.0_f32; nb as usize];
 
-        let q_blocks = enc.upload_blocks(&weights, nb, 64); // dummy weights uploaded as blocks
-        let q_blocks = q_blocks; // silence unused warning if compiler removes above
-        let _ = q_blocks;
-
-        // Fused
+        // Hand-construct a GpuI32Blocks since there's no public
+        // upload_i32_blocks yet (test-only access via client_ref_for_test).
         let q_handle = enc
             .client_ref_for_test()
             .create_from_slice(i32::as_bytes(&quant));
-        let _ = q_handle;
-        let q_input = jxl_encoder_gpu_test_helpers_no_op();
-
-        // Use the public APIs for the split path: 3-channel dequant +
-        // wide IDCT.
-        let _ = q_input;
-        // Simpler test: just check finite output and roundtrip via
-        // upload_blocks → download_blocks works (the bench already
-        // verified bit-exact match against split chain).
-        let q_blocks: Vec<i32> = (0..n).map(|i| ((i as i32 * 7) % 11) - 5).collect();
-        let q_buf = jxl_encoder_gpu_test_helpers_alloc_i32(&enc, &q_blocks, nb);
+        let q_buf = GpuI32Blocks {
+            handle: q_handle,
+            num_blocks: nb,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        };
         let w_buf = enc.upload_blocks(&weights, nb, 64);
         let recon = enc.dequant_idct8_fused_y_persistent(&q_buf, &w_buf, &qac);
         assert_eq!(recon.coeffs_per_block(), 64);
         let recon_host = enc.download_blocks(&recon);
         for v in &recon_host {
             assert!(v.is_finite());
-        }
-    }
-
-    // Test helpers — minimal indirection so the test reads naturally.
-    #[cfg(feature = "cuda")]
-    fn jxl_encoder_gpu_test_helpers_no_op() -> () {
-        ()
-    }
-    #[cfg(feature = "cuda")]
-    fn jxl_encoder_gpu_test_helpers_alloc_i32<R: cubecl::Runtime>(
-        enc: &GpuEncoder<R>,
-        data: &[i32],
-        num_blocks: u32,
-    ) -> GpuI32Blocks<R> {
-        use cubecl::prelude::*;
-        let handle = enc
-            .client_ref_for_test()
-            .create_from_slice(i32::as_bytes(data));
-        GpuI32Blocks {
-            handle,
-            num_blocks,
-            coeffs_per_block: 64,
-            _r: core::marker::PhantomData,
         }
     }
 
