@@ -122,10 +122,23 @@ fn main() {
 
     let xf = vec![0.0_f32; NB];
     let bf = vec![0.0_f32; NB];
-    let (dq_x, dq_y, dq_b) = dequant_dct8_blocks_gpu(
+    let (mut dq_x, mut dq_y, mut dq_b) = dequant_dct8_blocks_gpu(
         &enc, &q_x, &q_y, &q_b, &weights, &weights, &weights, &qac_qm, &qac_qm, &qac_qm, &xf, &bf,
     );
-    println!("5. dequant:    {} dequantized coefficients/channel", dq_y.len());
+    // Restore DC values (the GPU quantize_dct8 kernel always zeros the
+    // DC slot — in a real encoder, DC has its own quant + entropy
+    // coding via dc_coding.rs). Demo simulates that by carrying DC
+    // through bit-exact, focusing the quantize-loss demo on AC only.
+    for b in 0..NB {
+        let off = b * 64;
+        dq_x[off] = coeffs_x[off];
+        dq_y[off] = coeffs_y[off];
+        dq_b[off] = coeffs_b[off];
+    }
+    println!(
+        "5. dequant:    {} dequantized coeffs/channel (DC restored from forward pass)",
+        dq_y.len()
+    );
 
     // ------------------------------------------------------------
     // Stage 5: IDCT8 → XYB pixels
@@ -202,17 +215,20 @@ fn main() {
     println!("    G: MAE={:.4e}, max={:.4e}", sum_g / n, max_g);
     println!("    B: MAE={:.4e}, max={:.4e}", sum_b / n, max_b);
 
-    // The GPU quantize_dct8 kernel ALWAYS zeros DC (it's quantized
-    // separately in the real encoder). Plus the tight dead-zone wipes
-    // most AC for smooth-gradient input. So this is a "DC=0, mostly
-    // AC=0" reconstruction — expected to look like a uniform gray
-    // image. We assert the pipeline ran without producing NaN/Inf, not
-    // any specific quality bound — quality is governed by encoder
-    // orchestration (real DC quant, per-block scaling) which lives
-    // outside this primitives demo.
+    // With DC explicitly carried through, the demo achieves real
+    // visible-quality reconstruction. AC quant at qac_qm=4.0 is mild,
+    // so most error comes from gaborish + zeroed AC interactions.
     for v in r_recon.iter().chain(&g_recon).chain(&b_recon) {
         assert!(v.is_finite(), "got non-finite reconstruction value: {v}");
     }
+    // Sanity bounds on MAE (tolerant; XYB inverse amplifies B errors,
+    // and AC quant=4 zeros most AC for smooth gradients):
+    let mae_r = sum_r / n;
+    let mae_g = sum_g / n;
+    let mae_b = sum_b / n;
+    assert!(mae_r < 0.05, "R MAE too large: {mae_r:.3e}");
+    assert!(mae_g < 0.05, "G MAE too large: {mae_g:.3e}");
+    assert!(mae_b < 0.15, "B MAE too large: {mae_b:.3e}");
 
     println!(
         "\n✓ Full lossy roundtrip composes through 6 fork modules (xyb,\n  gaborish, transform, quantize, dequant, reconstruct)."
@@ -221,7 +237,7 @@ fn main() {
         "✓ Pipeline is single-threaded host code orchestrating ~10 GPU kernel\n  launches end-to-end."
     );
     println!(
-        "\nNote: large reconstruction error here is expected — the GPU\n  quantize_dct8 kernel always zeros DC (it's quantized separately in\n  the real encoder via dc_coding) and the dead-zone wipes most AC for\n  smooth-gradient input. Real fidelity requires separate DC handling +\n  per-channel/per-strategy quant matrices, both of which live outside\n  this primitives demo."
+        "\nNote: GPU quantize_dct8 always zeros DC in-kernel (DC has its own\n  quant + entropy coding in the real encoder via dc_coding). Demo\n  carries DC through bit-exact to isolate the AC quant loss; the real\n  encoder uses the dc_coding path."
     );
 }
 
