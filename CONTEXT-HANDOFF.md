@@ -1,6 +1,91 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-07 (session 6.6 — DCT8 reconstruct + EPF sharpness orchestrator on GPU)
+**Last updated:** 2026-05-08 (session 6.7 — mixed-strategy reconstruct + LLF family + G5.1 recovery + estimate_entropy_full DCT8)
+
+## Session 6.7 — mixed-strategy reconstruct + LLF family + G5.1 recovery + estimate_entropy_full DCT8
+
+Four major workstreams across this long session.
+
+### Mixed-strategy reconstruct (closes the second-largest gap from PORT_STATUS)
+
+| Helper | Commit | Notes |
+|---|---|---|
+| `tile_dims_pixels` (public) | `3359b065` | Per-strategy pixel block dims |
+| `scatter_block_to_plane` | `3359b065` | Block-major IDCT output → padded plane |
+| `idct_and_scatter_one_block_gpu` | `53e47679` | Single-block convenience (batch=1 IDCT + scatter) |
+| `batched_reconstruct_same_strategy_gpu` | `61ae5ae6` | N blocks of same strategy → 1 IDCT launch + per-block scatter |
+| `BlockRecipe<'a>` + `reconstruct_mixed_strategy_gpu` | `b7e55d15` | Multi-strategy dispatcher; ≤ 15 launches/image |
+| Docs roll-up | `4687b58c` | PORT_STATUS + CHANGELOG |
+
+### Per-strategy LLF restoration family (DCT16+ inverse coefficients from DC grid)
+
+9 helpers covering DCT16x8/8x16, DCT16x16, DCT32x32, DCT32x16, DCT16x32, DCT64x64, DCT64x32, DCT32x64. The 1×1-LLF strategies (DCT8, IDENTITY, DCT2X2, DCT4-family, AFV0-3) reuse `restore_dct8_dc_override`.
+
+| Family | Commit | LLF helpers + dispatcher |
+|---|---|---|
+| DCT16 | `a501b6a6` | `restore_llf_dct16x8_or_8x16` + `restore_llf_dct16x16` + `dequant_dc_channel` |
+| DCT32x32 | `9b8341e0` | `restore_llf_dct32x32` + private `dct1d_4` |
+| DCT32 rect | `b5ffb944` | `restore_llf_dct32x16` + `restore_llf_dct16x32` + private `dct1d_2` |
+| DCT64x64 | `ea19ff8f` | `restore_llf_dct64x64` + private `dct1d_8` |
+| DCT64 rect | `b6bb257e` | `restore_llf_dct64x32` + `restore_llf_dct32x64` |
+| LLF dispatcher | `a05f2dc9` | `dispatch_restore_llf` per `raw_strategy` |
+| Docs roll-up | `82c550eb` | PORT_STATUS |
+
+15 unit tests (zero-passthrough + constant-DC).
+
+### G5.1 validation recovery
+
+After noticing the LLF and AdjustQuantBlockAC family had only property-tests (zenmetrics CUBECL_GOTCHAS G5.1 violation: "validate against the published CPU crate, not a hand-rolled re-derivation"), recovered the LLF path and `EntropyMulTable` to G5.1 compliance without cross-repo work.
+
+The trick: upstream's `jxl_encoder::vardct::dct::dc_from_dct_*` are all `pub`, even though `restore_llf_from_dc` (their inverse) is private. So adding hand-rolled forward `dc_from_dct_*` host helpers + upstream-parity tests on the forwards + roundtrip tests on each pair gives **both directions verified against upstream** (transitively for the inverse, directly for the forward).
+
+| Step | Commit | Notes |
+|---|---|---|
+| Honest gap doc | `e81accbe` | PORT_STATUS validation gaps section |
+| DCT16 forwards + roundtrips | `c1ffd69e` | `dc_from_dct_16x16` / `dc_from_dct_16x8_or_8x16` |
+| DCT32 forwards + roundtrips | `2cf7eeec` | `dc_from_dct_32x32` / `dc_from_dct_32x16` / `dc_from_dct_16x32` + private `idct1d_4` |
+| DCT64 forwards + roundtrips | `6eb0faca` | `dc_from_dct_64x64` / `dc_from_dct_64x32` / `dc_from_dct_32x64` + private `idct1d_8` |
+| Roundtrip parity doc bump | `6de46b3a` | LLF roundtrip parity now in place |
+| 3 upstream parity tests | `a21872fd` | `dc_from_dct_32x32`/64x64/32x16 vs `jxl_encoder::vardct::dct` |
+| 5 more upstream parity | `b29cd555` | DCT16x16/16x8/16x32/64x32/32x64 — full family done |
+| EntropyMulTable parity | `632043ac` | reference + experimental field-by-field vs `jxl_encoder::effort` |
+| Validation status reorg | `abb79093` | Compliant vs in-tree-only tables |
+| CHANGELOG | `2659bbf5` | 9-commit rollup |
+
+**Currently G5.1-compliant**: 8 dc_from_dct + 9 restore_llf (transitive) + EntropyMulTable.
+
+**Still in-tree-only** (would need cross-repo visibility bumps in jxl-encoder): EPF Step 0 (private `epf_step0_strip`), AdjustQuantBlockAC heuristics (`pub(crate)` impl method), `compute_scaled_constants` (`pub(super)`), `ytox_ratio` / `ytob_ratio` (`pub fn` in `pub(crate) mod`), `INV_DC_QUANT` (`pub const` in private mod). User approval gates the cross-repo fix; until then the helpers are validated by line-by-line port + literal spot-checks.
+
+### estimate_entropy_full DCT8 orchestrator
+
+DCT8 fast path of upstream's per-block entropy + pixel-loss cost evaluator now composable on GPU via 7-commit build-out:
+
+| Helper | Commit | Notes |
+|---|---|---|
+| `compute_scaled_constants` + `COEFF_DOMAIN_CONSTANTS` | `d4b77cd1` | Distance-scaled / coefficient-domain constants |
+| `MASK_CHANNEL_OFFSET` + `CHANNEL_MUL` | `639a2d15` | Per-channel offset + 8th-power mul |
+| `ytox_ratio` + `ytob_ratio` + `K_INV_COLOR_FACTOR` | `fe4cdc32` | CfL ratio helpers |
+| `EntropyMulTable` + `entropy_mul_for_strategy` + `afv_entropy_mul` | `382d4717` | Per-strategy multipliers |
+| `combine_pixel_loss_3channel` | `aaf45d74` | CHANNEL_MUL-weighted X+Y+B sum |
+| `extract_per_block_entropy` + `sum_per_block_entropy_3channel` + `per_block_total_cost` | `07658a0e` | Host-side reshapers + final cost combiner |
+| `estimate_entropy_full_dct8_batch_gpu` | `706b59fe` | Orchestrator: ~12 GPU launches/call |
+| Docs roll-up | `4ed131ef` | PORT_STATUS + CHANGELOG |
+
+**Caveat**: the underlying entropy kernel only fills entropy_sum + nzeros_sum columns of the 4-stat output; info_loss + info_loss2 stay 0. Cost formula uses entropy_sum directly without upstream's `info_loss_mul × info_loss + zeros_mul × nzeros` re-weighting. `scaled_constants` is in the signature with `info_loss_mul` and `zeros_mul` reserved for the future kernel extension.
+
+### Remaining gaps (after this session)
+
+| Gap | Status |
+|-----|--------|
+| Mixed-strategy reconstruct on GPU | DONE (4687b58c) |
+| LLF restoration family | DONE (9 helpers + dispatcher; 15 tests) |
+| LLF G5.1 parity vs upstream | DONE (transitively via dc_from_dct + roundtrips) |
+| `estimate_entropy_full` DCT8 orchestrator | DONE (host composes leaves) |
+| Full upstream-parity entropy kernel (info_loss + zeros re-weighting) | NOT STARTED (kernel extension needed) |
+| AdjustQuantBlockAC G5.1 parity | BLOCKED — needs cross-repo visibility on `pub(crate)` impl method |
+| EPF Step 0 G5.1 parity | BLOCKED — needs cross-repo visibility on private `epf_step0_strip` |
+| Per-block-parallel `#[cube]` AdjustQuantBlockAC kernel | OPTIONAL OPT |
+| Per-(w,h) instance pre-allocation cache | OPTIONAL OPT |
 
 ## Session 6.6 — DCT8 reconstruct + full EPF sharpness orchestrator on GPU
 
