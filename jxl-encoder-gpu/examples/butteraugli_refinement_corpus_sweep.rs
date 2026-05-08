@@ -46,6 +46,19 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1.10);
+    let out_tsv = std::env::var("OUT_TSV").ok();
+    let mut tsv_writer: Option<std::fs::File> = out_tsv.as_ref().and_then(|p| {
+        let mut f = std::fs::File::create(p)
+            .unwrap_or_else(|e| panic!("create OUT_TSV {p}: {e}"));
+        // Header
+        use std::io::Write;
+        writeln!(
+            f,
+            "image\tdistance\tbutter_un\tbutter_aq\tbutter_rf\tbutter_sm\tssim2_un\tssim2_aq\tssim2_rf\tssim2_sm\tsmart_path\tsmart_aq_score\tsmart_un_score"
+        )
+        .ok();
+        Some(f)
+    });
 
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&corpus_dir)
         .unwrap_or_else(|e| panic!("read_dir {corpus_dir}: {e}"))
@@ -240,6 +253,35 @@ fn main() {
             }
             if s2_aq > s2_un + 0.05 {
                 ssim2_aq_beats_un[di] += 1;
+            }
+
+            // TSV row (if requested) — captures per-image, per-distance
+            // data for downstream analysis (e.g., training a per-content
+            // gating heuristic).
+            if let Some(f) = tsv_writer.as_mut() {
+                use std::io::Write;
+                let path_str = match smart_outcome.path {
+                    SmartGatePath::DistanceGated => "distance_gated",
+                    SmartGatePath::AqRegressedFallToUniform => "aq_regressed_fallback",
+                    SmartGatePath::Refined => "refined",
+                };
+                let _ = writeln!(
+                    f,
+                    "{}\t{:.2}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{}\t{:.4}\t{:.4}",
+                    name,
+                    d,
+                    s_un,
+                    s_aq,
+                    s_rf,
+                    s_sm,
+                    s2_un,
+                    s2_aq,
+                    s2_rf,
+                    s2_sm,
+                    path_str,
+                    smart_outcome.initial_aq_score.unwrap_or(f32::NAN),
+                    smart_outcome.uniform_score.unwrap_or(f32::NAN),
+                );
             }
 
             sum_un[di] += s_un as f64;
