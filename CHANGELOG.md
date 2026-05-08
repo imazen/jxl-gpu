@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Refinement loop fix — qac-domain adjustment no longer regresses (`87a6beb4`)
+
+Replace `refine_quant_field_one_iter` inside `refine_aq_field_gpu`
+with a defensive qac-domain-specific adjustment. Three changes:
+
+1. Skip the `cur_pow=0.2` "soften good blocks" path (upstream's
+   bit-budget tradeoff has no analog in our pipeline; softening
+   just degrades good blocks).
+2. Cap per-iter multiplier at 1.5 (prevents compound upward drift
+   across iters since our qac has no integer ceiling to absorb the
+   way upstream's `raw_quant ∈ [1, 255]` does).
+3. Skip the `kOriginalComparisonRound` clamp (no-op when softening
+   is skipped — it only fired to undo softening overshoot).
+
+Empirical impact (1024×1024 CLIC photo,
+`butteraugli_refinement_demo`):
+
+| distance | before refined | after refined | vs uniform |
+|---|---|---|---|
+| 1.0 | 1.5012 (+11.6% vs uniform) | 1.1944 | **-11.2% (BETTER)** |
+| 2.0 | 2.5322 (+17.6%) | 2.4968 | +16.0% (no longer drifting) |
+| 4.0 | 4.1164 (+19.6%) | 3.4395 | -0.0% (matches uniform) |
+
+At d=1.0 the refinement loop now provides a real -11% improvement
+over the uniform baseline — the loop infrastructure delivers
+quality value when given a sound underlying pipeline. The d=4.0
+catastrophic regression documented in the prior CHANGELOG entry
+is fully resolved. d=2.0 is no longer drifting upward but the
+underlying AQ-vs-uniform regression (+15%) persists due to the
+DCT8-only pipeline (next gap: AC strategy selection).
+
 ### Persistent EPF chain — saves ~65 ms/encode at 1024² (`710f760c`)
 
 Add persistent variants of EPF step 1 / step 2 launches plus an
