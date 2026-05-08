@@ -190,16 +190,20 @@ pub fn per_block_upstream_cost(
     let (k_info_loss_mul, _cost_delta, k_zeros_mul) = scaled_constants;
     let n_pix = block_pixel_count as f64;
     let inv_q = 1.0 / quant_for_coeffs as f64;
+    let covered_blocks = block_pixel_count / 64;
+    let x_w = x_multiblock_weight(covered_blocks);
 
     let mut out = Vec::with_capacity(n_blocks);
     for b in 0..n_blocks {
         // Per-channel entropy + nzeros bits cost.
-        let mut entropy = entropy_x[b]
-            + entropy_y[b]
-            + entropy_b[b]
-            + nzeros_bits_term(nzeros_x[b] as u32, k_zeros_mul)
-            + nzeros_bits_term(nzeros_y[b] as u32, k_zeros_mul)
-            + nzeros_bits_term(nzeros_b[b] as u32, k_zeros_mul);
+        // X gets the multiblock weight applied to its (entropy_sum +
+        // nzeros_bits_term) sum, matching upstream's
+        // `if c == 0 && num_blocks >= 2: entropy *= w`. For DCT8
+        // (covered_blocks=1) x_w = 1.0 and this is a no-op.
+        let x_part = (entropy_x[b] + nzeros_bits_term(nzeros_x[b] as u32, k_zeros_mul)) * x_w;
+        let y_part = entropy_y[b] + nzeros_bits_term(nzeros_y[b] as u32, k_zeros_mul);
+        let b_part = entropy_b[b] + nzeros_bits_term(nzeros_b[b] as u32, k_zeros_mul);
+        let mut entropy = x_part + y_part + b_part;
 
         // Combined pixel-loss → 8th-root scalar.
         let p = pixel_loss_total[b];
@@ -865,7 +869,7 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
     let pix_err_b = apply_idct_batch_gpu(enc, &b_err, raw_strategy);
 
     // Step 4: per-channel masked 8th-power pixel loss.
-    let loss_x = pixel_loss_blocks_gpu(
+    let mut loss_x = pixel_loss_blocks_gpu(
         enc, &pix_err_x, mask_image_plane, mask_row_base, mask_stride,
         MASK_CHANNEL_OFFSET[0], block_w as u32, block_h as u32,
     );
@@ -878,13 +882,26 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
         MASK_CHANNEL_OFFSET[2], block_w as u32, block_h as u32,
     );
 
-    // Step 5: combine per-channel losses.
-    let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
-
-    // Step 6: extract per-block entropy from each channel.
-    let entropy_x = extract_per_block_entropy(&x_stats, n_blocks);
+    // Step 5a: extract per-block entropy from each channel.
+    let entropy_x_raw = extract_per_block_entropy(&x_stats, n_blocks);
     let entropy_y = extract_per_block_entropy(&y_stats, n_blocks);
     let entropy_b = extract_per_block_entropy(&b_stats, n_blocks);
+
+    // Step 5b: apply upstream's X-channel multi-block weight to
+    // pixel loss (Upstream mode only; in Simple mode the weight is
+    // irrelevant for relative ranking). num_blocks = block_pixels / 64
+    // — for DCT8 = 1 (no-op); DCT16x16 = 4; DCT32x32 = 16; DCT64x64
+    // = 64 (capped at w=4.0). The X weight on ENTROPY is handled
+    // inside per_block_upstream_cost (it needs to multiply the sum
+    // of entropy_x + nzeros_bits_term per block).
+    let entropy_x = entropy_x_raw;
+    if matches!(mode, CostMode::Upstream { .. }) {
+        let covered_blocks = block_pixels / 64;
+        apply_x_multiblock_weight_to_loss(&mut loss_x, covered_blocks);
+    }
+
+    // Step 6: combine per-channel losses (after X weight applied).
+    let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
 
     // Step 7: final cost.
     match mode {
@@ -1019,6 +1036,51 @@ pub fn pixel_loss_blocks_gpu<R: Runtime>(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_estimate_entropy_full_strategy_batch_gpu_dct16x16_upstream_mode() {
+        // DCT16x16 in Upstream mode triggers the X-multiblock weight
+        // (covered_blocks = 256/64 = 4 → w = 1.5). For zero input,
+        // X's entropy is 0 anyway so the weighting is a no-op on the
+        // entropy term — but the result should still be FINITE and
+        // non-negative.
+        use crate::forks::transform::RAW_STRATEGY_DCT16X16;
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let n_blocks = 1_usize;
+        let zeros = alloc::vec![0.0_f32; n_blocks * 256];
+        let weights_one = alloc::vec![1.0_f32; 256];
+        let mask = alloc::vec![1.0_f32; 16 * 16];
+        let mask_row_base = alloc::vec![0_u32; n_blocks];
+
+        let costs = estimate_entropy_full_strategy_batch_gpu(
+            &enc,
+            &zeros, &zeros, &zeros,
+            RAW_STRATEGY_DCT16X16,
+            &weights_one, &weights_one, &weights_one,
+            &weights_one, &weights_one, &weights_one,
+            1.0, 1.0, 1.0,
+            0, 0,
+            &mask, &mask_row_base, 16,
+            COEFF_DOMAIN_CONSTANTS,
+            1.0,
+            CostMode::Upstream { quant_for_coeffs: 1.0 },
+        );
+        assert_eq!(costs.len(), n_blocks);
+        // Zero input → zero entropy in each channel + zero pixel loss.
+        // Per-channel nzeros_bits term: f(0) = 7. Y + B contribute
+        // 7 * COEFF_DOMAIN_CONSTANTS.2 each. X gets 7 * 7.565 * w
+        // where w = 1.5. So total = 7 * 7.565 * (2 + 1.5) ≈ 185.34.
+        let per_channel_nzero = 7.0 * COEFF_DOMAIN_CONSTANTS.2;
+        let expected = per_channel_nzero * (2.0 + 1.5);
+        for &c in &costs {
+            assert!(
+                (c - expected).abs() < 0.5,
+                "DCT16x16 upstream mode zero-input cost: got {c}, expected ~{expected}"
+            );
+        }
+    }
 
     #[cfg(feature = "cuda")]
     #[test]
