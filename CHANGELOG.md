@@ -2,6 +2,52 @@
 
 ## [Unreleased]
 
+### Tunable smart-gate threshold + per-metric optima sweep (`69e22df1`, `fee20969`)
+
+Expose the AQ-regression ratio as an explicit parameter via
+`refine_aq_field_gpu_smart_with_threshold`. The existing
+`refine_aq_field_gpu_smart` becomes a delegate that passes the
+default `SMART_GATE_AQ_REGRESSION_RATIO = 1.10`.
+
+Threshold tuning sweep (16 CLIC2025-1024 images, mean across
+d ∈ {1.0, 2.0, 4.0}):
+
+| threshold | mean butteraugli | mean SSIM2 |
+|-----------|------------------|------------|
+| 1.10 (current default) | **2.1514** | 80.115 |
+| 1.20                   | 2.2093           | 80.744 |
+| 1.30                   | 2.2767           | **81.195** |
+
+Per-distance, per-metric optima:
+
+| dist | metric      | best threshold |
+|------|-------------|----------------|
+| 1.0  | butteraugli | 1.20           |
+| 1.0  | SSIM2       | 1.30           |
+| 2.0  | butteraugli | 1.10           |
+| 2.0  | SSIM2       | 1.30           |
+| 4.0  | butteraugli | 1.10           |
+| 4.0  | SSIM2       | 1.30           |
+
+The trade-off is monotone: lower threshold → tighter fallback →
+better butteraugli, worse SSIM2. Higher threshold → more AQ
+through → better SSIM2, worse butteraugli. Even at 1.30 the smart
+gate still catches the 2 worst butteraugli regressions at d=1.0
+(paths 0/2/14), so the safety floor is preserved across the range.
+
+**Caller recommendation:**
+- Butteraugli/JXL pipeline: keep default 1.10
+- SSIMULACRA2 or general perceptual quality: pass 1.30 explicitly
+
+Archived sweeps:
+- `sweep_clic_16imgs_t110_2026-05-08.log`
+- `sweep_clic_16imgs_t120_2026-05-08.log`
+- `sweep_clic_16imgs_t130_2026-05-08.log`
+
+Future: a metric-configurable smart gate that uses SSIM2 internally
+for the regression check would auto-pick the right threshold per
+metric.
+
 ### Empirical: butteraugli and SSIMULACRA2 disagree on content-driven AQ (`0e470164`)
 
 Expanded the corpus sweep to compute SSIMULACRA2 for all four
