@@ -71,7 +71,26 @@ DCT8 fast path of upstream's per-block entropy + pixel-loss cost evaluator now c
 | `estimate_entropy_full_dct8_batch_gpu` | `706b59fe` | Orchestrator: ~12 GPU launches/call |
 | Docs roll-up | `4ed131ef` | PORT_STATUS + CHANGELOG |
 
-**Caveat**: the underlying entropy kernel only fills entropy_sum + nzeros_sum columns of the 4-stat output; info_loss + info_loss2 stay 0. Cost formula uses entropy_sum directly without upstream's `info_loss_mul × info_loss + zeros_mul × nzeros` re-weighting. `scaled_constants` is in the signature with `info_loss_mul` and `zeros_mul` reserved for the future kernel extension.
+**Note on entropy kernel**: the underlying `entropy_coeffs_pixel_blocks_gpu` only fills entropy_sum + nzeros_sum columns of the 4-stat output (info_loss + info_loss2 stay 0). This MATCHES upstream's pixel-domain mode behavior — `info_loss_sum` is intentionally 0 in upstream's pixel-domain `entropy_coeffs_scalar`; the `info_loss_mul` term is computed on the host from the combined pixel loss instead.
+
+### Session 6.7 follow-ons (after the initial DCT8 orchestrator)
+
+Continued the entropy work to full upstream parity:
+
+| Helper / Change | Commit | Notes |
+|---|---|---|
+| `per_block_upstream_cost` | `5787eec8` | Full upstream cost formula (per-channel `k_zeros_mul × f(nzeros)` + 8th-root pixel-loss scaling) |
+| `CostMode` selector + DCT8 orchestrator switch | `e5ca5e27` | `CostMode::{Simple, Upstream}` flag — Upstream extracts column-1 (nzeros_sum) from each 4-stat array and threads constants through |
+| Docs roll-up | `6c319625` | PORT_STATUS + CHANGELOG |
+| `per_block_upstream_cost` generic over `block_pixel_count` | `5f75ea2e` | Was 64-only (DCT8); now any strategy passes `block_w * block_h` |
+| `dct_blocks_gpu(blocks, raw_strategy)` | `3fea1e18` | Strategy-aware batched forward DCT for already-gathered block-major input |
+| `estimate_entropy_full_strategy_batch_gpu` | `3fea1e18` | Strategy-generic version (DCT8/16/32/64 family + IDENTITY/DCT2X2/DCT4-family). AFV0-3 still through `forks::afv` |
+| Docs roll-up | `cfcc18c1` | PORT_STATUS + CHANGELOG |
+| 3 X-multiblock weight helpers | `c344bbd2` | `x_multiblock_weight`, `apply_x_multiblock_weight_to_loss/_to_entropy` |
+| Bake X-multiblock weight into orchestrator | `c4513137` | `per_block_upstream_cost` applies it to (entropy_x + nzeros_bits_term); orchestrator applies it to loss_x |
+| Docs roll-up | `9aac6aba` | PORT_STATUS + CHANGELOG |
+
+DCT16x16 zero-input + Upstream mode validated to produce cost ≈ 185.34 (= 7 × COEFF_DOMAIN_CONSTANTS.2 × (2 + 1.5) where w=1.5 for covered_blocks=4). DCT8 path unchanged (covered_blocks=1 → w=1.0 no-op).
 
 ### Remaining gaps (after this session)
 
@@ -79,13 +98,17 @@ DCT8 fast path of upstream's per-block entropy + pixel-loss cost evaluator now c
 |-----|--------|
 | Mixed-strategy reconstruct on GPU | DONE (4687b58c) |
 | LLF restoration family | DONE (9 helpers + dispatcher; 15 tests) |
-| LLF G5.1 parity vs upstream | DONE (transitively via dc_from_dct + roundtrips) |
+| LLF G5.1 parity vs upstream | DONE (8 forward + roundtrip combined) |
 | `estimate_entropy_full` DCT8 orchestrator | DONE (host composes leaves) |
-| Full upstream-parity entropy kernel (info_loss + zeros re-weighting) | NOT STARTED (kernel extension needed) |
-| AdjustQuantBlockAC G5.1 parity | BLOCKED — needs cross-repo visibility on `pub(crate)` impl method |
-| EPF Step 0 G5.1 parity | BLOCKED — needs cross-repo visibility on private `epf_step0_strip` |
-| Per-block-parallel `#[cube]` AdjustQuantBlockAC kernel | OPTIONAL OPT |
-| Per-(w,h) instance pre-allocation cache | OPTIONAL OPT |
+| `estimate_entropy_full` strategy-generic orchestrator | DONE (DCT8/16/32/64 family + IDENTITY/DCT2X2/DCT4) |
+| Full upstream-faithful cost formula | DONE (`CostMode::Upstream` mode incl. X-multiblock weight) |
+| AdjustQuantBlockAC G5.1 parity | BLOCKED — needs cross-repo visibility bump on `pub(crate)` impl method |
+| EPF Step 0 G5.1 parity | BLOCKED — needs cross-repo visibility bump on private `epf_step0_strip` |
+| `compute_scaled_constants` G5.1 parity | BLOCKED — needs cross-repo visibility bump on `pub(super) fn` |
+| `ytox_ratio` / `ytob_ratio` G5.1 parity | BLOCKED — needs `pub mod chroma_from_luma` re-export |
+| `INV_DC_QUANT` G5.1 parity | BLOCKED — needs `pub mod quant` re-export |
+| Per-block-parallel `#[cube]` AdjustQuantBlockAC kernel | OPTIONAL OPT — host helpers in `forks::quantize` are sufficient until profiled bottleneck |
+| Per-(w,h) instance pre-allocation cache | OPTIONAL OPT — TODO in `encoder.rs:70`; not justified without bench numbers (cubecl handles are ref-counted; backend may already pool) |
 
 ## Session 6.6 — DCT8 reconstruct + full EPF sharpness orchestrator on GPU
 
