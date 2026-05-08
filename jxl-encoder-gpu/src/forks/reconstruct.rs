@@ -209,6 +209,198 @@ pub struct BlockRecipe<'a> {
 /// `forks::afv::afv_transform_batch_gpu` (forward) /
 /// `inverse_afv_transform_batch_gpu` (inverse). Caller must filter
 /// AFV blocks out and process them separately.
+///
+/// **Per-strategy LLF region dims** (in coefficient-grid units):
+/// matches the upstream `AcStrategy::ll_dim_x/y()` pair. DC values
+/// from the underlying 8×8 sub-blocks live in this rectangle; the
+/// rest of the LLF block is restored by the per-strategy
+/// `restore_llf_*` helpers.
+fn llf_dims_for_strategy(raw_strategy: u8) -> (u32, u32) {
+    use crate::forks::transform::{
+        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
+        RAW_STRATEGY_DCT8X4, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
+        RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+        RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_IDENTITY,
+    };
+    match raw_strategy {
+        RAW_STRATEGY_DCT
+        | RAW_STRATEGY_DCT4X4
+        | RAW_STRATEGY_DCT4X8
+        | RAW_STRATEGY_DCT8X4
+        | RAW_STRATEGY_IDENTITY
+        | RAW_STRATEGY_DCT2X2 => (1, 1),
+        RAW_STRATEGY_DCT16X8 => (1, 2),
+        RAW_STRATEGY_DCT8X16 => (2, 1),
+        RAW_STRATEGY_DCT16X16 => (2, 2),
+        RAW_STRATEGY_DCT32X16 => (2, 4),
+        RAW_STRATEGY_DCT16X32 => (4, 2),
+        RAW_STRATEGY_DCT32X32 => (4, 4),
+        RAW_STRATEGY_DCT64X32 => (4, 8),
+        RAW_STRATEGY_DCT32X64 => (8, 4),
+        RAW_STRATEGY_DCT64X64 => (8, 8),
+        _ => panic!(
+            "llf_dims_for_strategy: unsupported strategy {raw_strategy} \
+             (use forks::afv for AFV0-3)"
+        ),
+    }
+}
+
+/// Encode a single channel under a heterogeneous strategy assignment
+/// and reconstruct the result into a padded plane.
+///
+/// **Phase A MVP** of the AC strategy search orchestrator. Closes the
+/// gap between `pipeline::partitions_16x16_to_assignments` (host
+/// partition selector output) and
+/// `reconstruct_mixed_strategy_gpu` (mixed-strategy IDCT). The
+/// algorithm per strategy in the assignments:
+///
+/// 1. Gather pixel blocks at the strategy's tile size
+///    (`apply_dct_batch_gpu` does the gather + forward DCT in one).
+/// 2. Quantize via the broadcast-weights kernel (one weights template
+///    per strategy; per-block qac vector covers all blocks of that
+///    strategy).
+/// 3. Dequant via `dequant_simple_blocks_broadcast_w` (no CfL — that
+///    happens in the encoder-side dequant_dct8 path; for the
+///    strategy-search reconstruct we use the simpler per-coefficient
+///    dequant so the broadcast pattern works for all block sizes).
+/// 4. Per-block LLF restore via `dispatch_restore_llf` — pulls
+///    `llf_dim_x × llf_dim_y` DC values from `dc_grid` (which is in
+///    8×8-block units, raster order).
+/// 5. Build `BlockRecipe` slices into the dequantized buffer.
+/// 6. `reconstruct_mixed_strategy_gpu(...)` runs the mixed-strategy
+///    IDCT batch + scatter into `out_plane`.
+///
+/// **Single-channel only.** 3-channel orchestration is a thin
+/// wrapper that calls this 3 times (once per X / Y / B), reusing
+/// the same assignments + DC grid shape per channel. Each channel
+/// has its own quant matrix templates + qac scaling + dc_grid.
+///
+/// **Strategy support**: every standard JXL AC strategy except
+/// AFV0-3. The 8×8-class small strategies (DCT4×4, DCT4×8, DCT8×4,
+/// IDENTITY, DCT2X2) are handled identically to DCT8 via
+/// `apply_dct_batch_gpu`'s dispatch.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_channel: &[f32],
+    padded_width: usize,
+    padded_height: usize,
+    assignments: &[crate::pipeline::StrategyAssignment],
+    weights_template_for_strategy: &dyn Fn(u8) -> Vec<f32>,
+    qac_per_8x8_block: &[f32],
+    thresholds: &[f32; 4],
+    dc_grid_per_8x8_block: &[f32],
+    out_plane: &mut [f32],
+) {
+    use crate::forks::quantize::quantize_blocks_gpu_broadcast_w;
+    use crate::forks::dequant::dequant_blocks_gpu_broadcast_w;
+    use crate::forks::transform::{
+        apply_dct_batch_gpu, coeff_count_per_strategy, tile_dims_pixels,
+    };
+    use crate::pipeline::group_assignments_by_strategy;
+
+    debug_assert_eq!(xyb_channel.len(), padded_width * padded_height);
+    debug_assert_eq!(out_plane.len(), padded_width * padded_height);
+
+    let xsize_blocks_8 = padded_width / 8;
+    let ysize_blocks_8 = padded_height / 8;
+    debug_assert_eq!(qac_per_8x8_block.len(), xsize_blocks_8 * ysize_blocks_8);
+    debug_assert_eq!(dc_grid_per_8x8_block.len(), xsize_blocks_8 * ysize_blocks_8);
+
+    let groups = group_assignments_by_strategy(assignments);
+
+    // Per-strategy: encode and store dequant result. Buffers live in
+    // `coeff_buffers` for the lifetime of the recipe build + reconstruct
+    // call below.
+    let mut coeff_buffers: Vec<(u8, Vec<(usize, usize)>, Vec<f32>)> =
+        Vec::with_capacity(groups.len());
+
+    for (raw_strategy, coords) in groups {
+        let coeff_count = coeff_count_per_strategy(raw_strategy);
+        let (tile_w, tile_h) = tile_dims_pixels(raw_strategy);
+        // (grid_width, grid_height) in coefficient-grid units; same as tile pixels here.
+        let grid_w = tile_w as u32;
+        let grid_h = tile_h as u32;
+        let (llf_x, llf_y) = llf_dims_for_strategy(raw_strategy);
+
+        // Step 1: forward DCT (gather + dispatch in one).
+        let coeffs =
+            apply_dct_batch_gpu(enc, xyb_channel, padded_width, &coords, raw_strategy);
+        debug_assert_eq!(coeffs.len(), coords.len() * coeff_count);
+
+        // Per-block qac at this strategy's first-block coord.
+        let qac_for_strategy: Vec<f32> = coords
+            .iter()
+            .map(|&(bx, by)| qac_per_8x8_block[by * xsize_blocks_8 + bx])
+            .collect();
+
+        // Per-strategy quant matrix template (caller-supplied).
+        let weights_template = weights_template_for_strategy(raw_strategy);
+        debug_assert_eq!(
+            weights_template.len(),
+            coeff_count,
+            "weights template for strategy {raw_strategy} must have {coeff_count} entries"
+        );
+
+        // Step 2: quantize via broadcast-weights kernel.
+        let quant = quantize_blocks_gpu_broadcast_w(
+            enc,
+            &coeffs,
+            &weights_template,
+            &qac_for_strategy,
+            thresholds,
+            grid_w,
+            grid_h,
+            llf_x,
+            llf_y,
+        );
+
+        // Step 3: dequant via simple per-coefficient kernel.
+        let mut dequant =
+            dequant_blocks_gpu_broadcast_w(enc, &quant, &weights_template, coeff_count as u32);
+
+        // Step 4: per-block LLF restore. Pull this strategy's
+        // (llf_x × llf_y) DC values from dc_grid_per_8x8_block at the
+        // first-block position and pass to dispatch_restore_llf.
+        let llf_count = (llf_x as usize) * (llf_y as usize);
+        let mut dc_subgrid = vec![0.0_f32; llf_count];
+        for (i, &(bx, by)) in coords.iter().enumerate() {
+            // Gather 8×8 DC values for this strategy's footprint.
+            for dy in 0..llf_y as usize {
+                for dx in 0..llf_x as usize {
+                    dc_subgrid[dy * (llf_x as usize) + dx] =
+                        dc_grid_per_8x8_block[(by + dy) * xsize_blocks_8 + (bx + dx)];
+                }
+            }
+            let block_off = i * coeff_count;
+            dispatch_restore_llf(
+                &mut dequant[block_off..block_off + coeff_count],
+                &dc_subgrid,
+                raw_strategy,
+            );
+        }
+
+        coeff_buffers.push((raw_strategy, coords, dequant));
+    }
+
+    // Step 5: build BlockRecipe references into the per-strategy buffers.
+    let mut recipes: Vec<BlockRecipe<'_>> = Vec::with_capacity(assignments.len());
+    for (raw_strategy, coords, buf) in coeff_buffers.iter() {
+        let coeff_count = coeff_count_per_strategy(*raw_strategy);
+        for (i, &(bx, by)) in coords.iter().enumerate() {
+            recipes.push(BlockRecipe {
+                bx,
+                by,
+                raw_strategy: *raw_strategy,
+                coeffs: &buf[i * coeff_count..(i + 1) * coeff_count],
+            });
+        }
+    }
+
+    // Step 6: dispatch mixed-strategy reconstruct.
+    reconstruct_mixed_strategy_gpu(enc, &recipes, out_plane, padded_width);
+}
+
 pub fn reconstruct_mixed_strategy_gpu<R: Runtime>(
     enc: &GpuEncoder<R>,
     recipes: &[BlockRecipe<'_>],
@@ -1632,6 +1824,80 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
+    /// Smoke test: encode_and_reconstruct_mixed_strategy_single_channel
+    /// with a heterogeneous DCT8/DCT16x16 assignment over a synthetic
+    /// uniform-DC plane. Verifies it composes end-to-end without panic
+    /// and produces finite output. Quality validation deferred to
+    /// integration with LossyEncoder where real cost grids drive the
+    /// assignments.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_encode_and_reconstruct_mixed_strategy_single_channel_smoke() {
+        use crate::forks::transform::{RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16};
+        use crate::pipeline::StrategyAssignment;
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        let padded_w = 32_usize;
+        let padded_h = 32_usize;
+        let xsize_blocks_8 = padded_w / 8;
+        let ysize_blocks_8 = padded_h / 8;
+        let n_blocks = xsize_blocks_8 * ysize_blocks_8;
+
+        // Synthetic plane: uniform 0.5 → block DC = 4.0 (= 0.5 * 8 for
+        // mean-preserving 8x8 DCT) so non-DC coeffs are zero.
+        let xyb_channel = alloc::vec![0.5_f32; padded_w * padded_h];
+
+        // Mixed: top-left 16x16 region = DCT16x16; rest = DCT8.
+        let mut assignments = vec![StrategyAssignment {
+            bx: 0,
+            by: 0,
+            raw_strategy: RAW_STRATEGY_DCT16X16,
+        }];
+        for by in 0..ysize_blocks_8 {
+            for bx in 0..xsize_blocks_8 {
+                if bx < 2 && by < 2 {
+                    continue; // covered by the DCT16 block
+                }
+                assignments.push(StrategyAssignment {
+                    bx,
+                    by,
+                    raw_strategy: RAW_STRATEGY_DCT,
+                });
+            }
+        }
+
+        // Per-strategy weights: identity (all 1.0).
+        let weights_for = |raw_strategy: u8| -> Vec<f32> {
+            use crate::forks::transform::coeff_count_per_strategy;
+            alloc::vec![1.0_f32; coeff_count_per_strategy(raw_strategy)]
+        };
+
+        let qac = alloc::vec![1.0_f32; n_blocks];
+        let thresholds = [0.0_f32; 4]; // no dead-zone for this smoke test
+        // DC grid: from uniform 0.5 plane, every 8x8 block has DC = 4.0.
+        let dc_grid = alloc::vec![4.0_f32; n_blocks];
+
+        let mut out_plane = alloc::vec![0.0_f32; padded_w * padded_h];
+        encode_and_reconstruct_mixed_strategy_single_channel(
+            &enc,
+            &xyb_channel,
+            padded_w,
+            padded_h,
+            &assignments,
+            &weights_for,
+            &qac,
+            &thresholds,
+            &dc_grid,
+            &mut out_plane,
+        );
+
+        // All output pixels finite, roughly close to original (~0.5).
+        for (i, &v) in out_plane.iter().enumerate() {
+            assert!(v.is_finite(), "non-finite at i={i}: {v}");
+        }
+    }
+
     fn test_reconstruct_mixed_strategy_gpu_dct8_and_dct16x16() {
         // Mix two strategies: 3 DCT8 blocks + 2 DCT16x16 blocks at
         // non-overlapping positions.
