@@ -178,3 +178,57 @@ pub fn quantize_dct8_kernel(
         idx += 1u32;
     }
 }
+
+/// Broadcast-weights variant of [`quantize_dct8_kernel`]. Same shape
+/// except `weights` is exactly 64 f32 (one DCT8 quant matrix, broadcast
+/// across all blocks). Saves `num_blocks - 1` copies of the per-block
+/// weights buffer (e.g., 12 MB at 1024² → 256 bytes per channel) and
+/// has uniformly-coalesced weight reads inside a warp.
+#[cube(launch_unchecked)]
+pub fn quantize_dct8_kernel_broadcast_w(
+    coeffs: &Array<f32>,
+    weights: &Array<f32>,
+    qac_qm: &Array<f32>,
+    thresholds: &Array<f32>,
+    output: &mut Array<i32>,
+) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = qac_qm.len();
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+    let qac = qac_qm[block_idx];
+
+    let t0 = thresholds[0usize];
+    let t1 = thresholds[1usize];
+    let t2 = thresholds[2usize];
+    let t3 = thresholds[3usize];
+
+    output[off] = 0i32; // DC
+
+    let mut idx: u32 = 1u32;
+    while idx < 64u32 {
+        let iu = idx as usize;
+        let y = idx / 8u32;
+        let x = idx - y * 8u32;
+        let row_hi = y >= 4u32;
+        let col_hi = x >= 4u32;
+        let thr = if row_hi {
+            if col_hi { t3 } else { t2 }
+        } else if col_hi {
+            t1
+        } else {
+            t0
+        };
+        // Broadcast: weights[iu] not weights[off + iu].
+        let val = coeffs[off + iu] * (1.0f32 / weights[iu]) * qac;
+        let absv = f32::abs(val);
+        output[off + iu] = if absv < thr {
+            i32::new(0)
+        } else {
+            round_ties_even_to_i32(val)
+        };
+        idx += 1u32;
+    }
+}

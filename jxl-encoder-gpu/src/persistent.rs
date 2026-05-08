@@ -63,14 +63,14 @@ use crate::launch::dct8::{dct_8x8, dct_8x8_wide, idct_8x8, idct_8x8_wide};
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
-use crate::launch::dequant::dequant_dct8;
+use crate::launch::dequant::{dequant_dct8, dequant_dct8_broadcast_w};
 use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
 use crate::launch::fused_dct_quant::{dct8_quantize_fused_wide, dequant_idct8_fused_y_wide};
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::gather::{gather_blocks, scatter_blocks};
 use crate::launch::mask1x1::mask1x1;
-use crate::launch::quantize::quantize_dct8;
+use crate::launch::quantize::{quantize_dct8, quantize_dct8_broadcast_w};
 use crate::launch::xyb::{xyb_forward, xyb_inverse};
 
 /// Typed handle to a GPU-resident `f32` plane. Owns the underlying
@@ -955,6 +955,49 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Broadcast-weights variant of [`Self::quantize_dct8_persistent`].
+    /// `weights` must be a `GpuBlocks` with `num_blocks == 1` and
+    /// `coeffs_per_block == 64` (one DCT8 quant matrix, kernel
+    /// broadcasts across all input blocks). Algorithmically identical
+    /// to the per-block variant when called with replicated weights;
+    /// saves the per-block weight-buffer storage and replication.
+    pub fn quantize_dct8_persistent_broadcast_w(
+        &self,
+        coeffs: &GpuBlocks<R>,
+        weights: &GpuBlocks<R>,
+        qac_qm: &[f32],
+        thresholds: &[f32; 4],
+    ) -> GpuI32Blocks<R> {
+        assert_eq!(coeffs.coeffs_per_block, 64);
+        assert_eq!(
+            weights.num_blocks, 1,
+            "broadcast_w expects a single 64-coeff weights template"
+        );
+        assert_eq!(weights.coeffs_per_block, 64);
+        assert_eq!(qac_qm.len() as u32, coeffs.num_blocks);
+        let n = coeffs.total_floats();
+        let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
+        let h_thr = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(thresholds));
+        let h_out = self.client_ref().empty(n * 4);
+        quantize_dct8_broadcast_w::<R>(
+            self.client_ref(),
+            coeffs.handle.clone(),
+            weights.handle.clone(),
+            h_qac,
+            h_thr,
+            h_out.clone(),
+            coeffs.num_blocks,
+        );
+        GpuI32Blocks {
+            handle: h_out,
+            num_blocks: coeffs.num_blocks,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Persistent-API 3-channel DCT8 dequant. Takes quantized i32
     /// blocks for each channel + per-coefficient weights + per-block
     /// scale + CfL factors. Returns 3 `GpuBlocks` (X, Y, B) of
@@ -1001,6 +1044,75 @@ impl<R: Runtime> GpuEncoder<R> {
         let h_oy = self.client_ref().empty(n * 4);
         let h_ob = self.client_ref().empty(n * 4);
         dequant_dct8::<R>(
+            self.client_ref(),
+            quant_x.handle.clone(),
+            quant_y.handle.clone(),
+            quant_b.handle.clone(),
+            weights_x.handle.clone(),
+            weights_y.handle.clone(),
+            weights_b.handle.clone(),
+            h_qmx,
+            h_qmy,
+            h_qmb,
+            h_xf,
+            h_bf,
+            h_ox.clone(),
+            h_oy.clone(),
+            h_ob.clone(),
+            nb,
+        );
+        let mk = |h| GpuBlocks {
+            handle: h,
+            num_blocks: nb,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        };
+        (mk(h_ox), mk(h_oy), mk(h_ob))
+    }
+
+    /// Broadcast-weights variant of [`Self::dequant_dct8_persistent`].
+    /// Each `weights_*` must be a `GpuBlocks` with `num_blocks == 1` and
+    /// `coeffs_per_block == 64`. Algorithmically identical to the
+    /// per-block variant when called with replicated weights; saves the
+    /// per-block weight-buffer storage and replication.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dequant_dct8_persistent_broadcast_w(
+        &self,
+        quant_x: &GpuI32Blocks<R>,
+        quant_y: &GpuI32Blocks<R>,
+        quant_b: &GpuI32Blocks<R>,
+        weights_x: &GpuBlocks<R>,
+        weights_y: &GpuBlocks<R>,
+        weights_b: &GpuBlocks<R>,
+        qac_qm_x: &[f32],
+        qac_qm_y: &[f32],
+        qac_qm_b: &[f32],
+        x_factor: &[f32],
+        b_factor: &[f32],
+    ) -> (GpuBlocks<R>, GpuBlocks<R>, GpuBlocks<R>) {
+        let nb = quant_x.num_blocks;
+        assert_eq!(quant_y.num_blocks, nb);
+        assert_eq!(quant_b.num_blocks, nb);
+        for q in [quant_x, quant_y, quant_b] {
+            assert_eq!(q.coeffs_per_block, 64);
+        }
+        for w in [weights_x, weights_y, weights_b] {
+            assert_eq!(w.coeffs_per_block, 64);
+            assert_eq!(w.num_blocks, 1, "broadcast_w expects 1-block templates");
+        }
+        for s in [qac_qm_x, qac_qm_y, qac_qm_b, x_factor, b_factor] {
+            assert_eq!(s.len() as u32, nb);
+        }
+        let n = (nb as usize) * 64;
+        let h_qmx = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_x));
+        let h_qmy = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_y));
+        let h_qmb = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_b));
+        let h_xf = self.client_ref().create_from_slice(f32::as_bytes(x_factor));
+        let h_bf = self.client_ref().create_from_slice(f32::as_bytes(b_factor));
+        let h_ox = self.client_ref().empty(n * 4);
+        let h_oy = self.client_ref().empty(n * 4);
+        let h_ob = self.client_ref().empty(n * 4);
+        dequant_dct8_broadcast_w::<R>(
             self.client_ref(),
             quant_x.handle.clone(),
             quant_y.handle.clone(),

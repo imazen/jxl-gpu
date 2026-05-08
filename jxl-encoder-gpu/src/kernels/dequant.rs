@@ -98,3 +98,58 @@ pub fn dequant_dct8_kernel(
         i += 1u32;
     }
 }
+
+/// Broadcast-weights variant of [`dequant_dct8_kernel`]. `weights_x/y/b`
+/// are each exactly 64 f32 (one DCT8 quant matrix per channel,
+/// broadcast across all blocks). Same algorithmic semantics as the
+/// per-block variant; saves the per-block replication overhead
+/// (matched with [`quantize_dct8_kernel_broadcast_w`]).
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn dequant_dct8_kernel_broadcast_w(
+    quant_x: &Array<i32>,
+    quant_y: &Array<i32>,
+    quant_b: &Array<i32>,
+    weights_x: &Array<f32>,
+    weights_y: &Array<f32>,
+    weights_b: &Array<f32>,
+    qac_qm_x: &Array<f32>,
+    qac_qm_y: &Array<f32>,
+    qac_qm_b: &Array<f32>,
+    x_factor: &Array<f32>,
+    b_factor: &Array<f32>,
+    out_x: &mut Array<f32>,
+    out_y: &mut Array<f32>,
+    out_b: &mut Array<f32>,
+) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = qac_qm_y.len();
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+    let inv_qx = 1.0f32 / qac_qm_x[block_idx];
+    let inv_qy = 1.0f32 / qac_qm_y[block_idx];
+    let inv_qb = 1.0f32 / qac_qm_b[block_idx];
+    let xf = x_factor[block_idx];
+    let bf = b_factor[block_idx];
+
+    out_x[off] = f32::new(0.0);
+    out_y[off] = f32::new(0.0);
+    out_b[off] = f32::new(0.0);
+
+    let mut i: u32 = 1u32;
+    while i < 64u32 {
+        let iu = i as usize;
+        let bx = adjust_quant_bias(quant_x[off + iu], BIAS_X);
+        let by = adjust_quant_bias(quant_y[off + iu], BIAS_Y);
+        let bb = adjust_quant_bias(quant_b[off + iu], BIAS_B);
+
+        // Broadcast: weights_*[iu] not weights_*[off + iu].
+        let dq_y = by * weights_y[iu] * inv_qy;
+        out_y[off + iu] = dq_y;
+        out_x[off + iu] = bx * weights_x[iu] * inv_qx + xf * dq_y;
+        out_b[off + iu] = bb * weights_b[iu] * inv_qb + bf * dq_y;
+        i += 1u32;
+    }
+}

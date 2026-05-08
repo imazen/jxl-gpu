@@ -436,17 +436,15 @@ impl<R: Runtime> LossyEncoder<R> {
         let padded_width = align_up(width, 8);
         let padded_height = align_up(height, 8);
         let num_blocks = (padded_width / 8) * (padded_height / 8);
-        // Upload one weights buffer per channel (X, Y, B) using the
-        // libjxl DCT8 per-channel quant matrices. Y has the gentlest
+        // Upload one weights TEMPLATE per channel (X, Y, B) — exactly
+        // 64 floats, broadcast across all blocks by the
+        // *_broadcast_w persistent kernels. Saves
+        // 3 × (num_blocks - 1) × 64 × 4 bytes of GPU memory + upload
+        // traffic vs the per-block replicated form (e.g., 12 MB at
+        // 1024² for the three channels combined). Y has the gentlest
         // quant (preserves luma); X/B have steeper quant (chroma).
         let all_weights = generate_dct8_quant_weights();
-        let upload_channel = |slice: &[f32]| {
-            let mut buf = Vec::with_capacity((num_blocks as usize) * 64);
-            for _ in 0..num_blocks {
-                buf.extend_from_slice(slice);
-            }
-            enc.upload_blocks(&buf, num_blocks, 64)
-        };
+        let upload_channel = |slice: &[f32]| enc.upload_blocks(slice, 1, 64);
         let weights_x = upload_channel(&all_weights[0..64]);
         let weights_y = upload_channel(&all_weights[64..128]);
         let weights_b = upload_channel(&all_weights[128..192]);
@@ -899,13 +897,25 @@ impl<R: Runtime> LossyEncoder<R> {
         let coeffs_x = enc.dct_8x8_wide_persistent(&bx_g);
         let coeffs_y = enc.dct_8x8_wide_persistent(&by_g);
         let coeffs_b = enc.dct_8x8_wide_persistent(&bb_g);
-        let q_x =
-            enc.quantize_dct8_persistent(&coeffs_x, &self.weights_x, qac_vec, &self.thresholds_x);
-        let q_y =
-            enc.quantize_dct8_persistent(&coeffs_y, &self.weights_y, qac_vec, &self.thresholds_y);
-        let q_b =
-            enc.quantize_dct8_persistent(&coeffs_b, &self.weights_b, qac_vec, &self.thresholds_b);
-        let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
+        let q_x = enc.quantize_dct8_persistent_broadcast_w(
+            &coeffs_x,
+            &self.weights_x,
+            qac_vec,
+            &self.thresholds_x,
+        );
+        let q_y = enc.quantize_dct8_persistent_broadcast_w(
+            &coeffs_y,
+            &self.weights_y,
+            qac_vec,
+            &self.thresholds_y,
+        );
+        let q_b = enc.quantize_dct8_persistent_broadcast_w(
+            &coeffs_b,
+            &self.weights_b,
+            qac_vec,
+            &self.thresholds_b,
+        );
+        let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent_broadcast_w(
             &q_x,
             &q_y,
             &q_b,
