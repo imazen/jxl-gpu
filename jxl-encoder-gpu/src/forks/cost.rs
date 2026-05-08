@@ -59,6 +59,69 @@ use cubecl::Runtime;
 
 use crate::encoder::GpuEncoder;
 
+/// Extract per-block entropy values from the
+/// `entropy_coeffs_pixel_blocks_gpu` 4-stat output.
+///
+/// The kernel returns `num_blocks * 4` floats per channel, where
+/// `[block * 4 + 0]` is the per-block entropy sum (the other three
+/// slots are nzeros, info_loss, info_loss2 — used by other code
+/// paths that consume them but not always needed for the cost model).
+///
+/// Returns one `f32` per block — a thin reshape of the kernel
+/// output for the cost-model orchestrator.
+pub fn extract_per_block_entropy(stats_4x: &[f32], n_blocks: usize) -> Vec<f32> {
+    debug_assert_eq!(stats_4x.len(), n_blocks * 4);
+    (0..n_blocks).map(|b| stats_4x[b * 4]).collect()
+}
+
+/// Sum per-block entropy across 3 channels. Mirrors the
+/// X+Y+B accumulation in upstream's `estimate_entropy_full`'s
+/// process_channel inner loop.
+///
+/// All three input slices must be `n_blocks` floats long
+/// (typically extracted via [`extract_per_block_entropy`] from the
+/// 3 per-channel stat arrays).
+pub fn sum_per_block_entropy_3channel(
+    entropy_x: &[f32],
+    entropy_y: &[f32],
+    entropy_b: &[f32],
+) -> Vec<f32> {
+    debug_assert_eq!(entropy_x.len(), entropy_y.len());
+    debug_assert_eq!(entropy_x.len(), entropy_b.len());
+    entropy_x
+        .iter()
+        .zip(entropy_y.iter())
+        .zip(entropy_b.iter())
+        .map(|((&x, &y), &b)| x + y + b)
+        .collect()
+}
+
+/// Per-block total cost combiner — the final per-block scalar that
+/// upstream's `estimate_entropy_full` returns. Mirrors the formula
+/// `entropy_mul * total_entropy + total_pixel_loss` per block.
+///
+/// `entropy_total` is the sum of per-channel entropy values across
+/// X/Y/B (output of [`sum_per_block_entropy_3channel`]).
+/// `pixel_loss_total` is the sum of per-channel pixel-domain losses
+/// scaled by [`CHANNEL_MUL`] (output of
+/// [`combine_pixel_loss_3channel`]). `entropy_mul` is the per-strategy
+/// multiplier from [`entropy_mul_for_strategy`].
+///
+/// Returns one `f32` cost per block — the final per-block cost the
+/// AC strategy search would compare across candidates.
+pub fn per_block_total_cost(
+    entropy_total: &[f32],
+    pixel_loss_total: &[f64],
+    entropy_mul: f32,
+) -> Vec<f32> {
+    debug_assert_eq!(entropy_total.len(), pixel_loss_total.len());
+    entropy_total
+        .iter()
+        .zip(pixel_loss_total.iter())
+        .map(|(&e, &p)| entropy_mul * e + p as f32)
+        .collect()
+}
+
 /// Combine per-block per-channel pixel-domain losses (output of
 /// [`pixel_loss_blocks_gpu`] called once per channel) into a single
 /// per-block total via the [`CHANNEL_MUL`] weights.
@@ -396,6 +459,51 @@ pub fn pixel_loss_blocks_gpu<R: Runtime>(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn test_extract_per_block_entropy_takes_column_zero() {
+        // 3 blocks × 4 stats = 12 floats. Column 0 is the entropy.
+        let stats = vec![
+            10.0_f32, 1.0, 2.0, 3.0, // block 0: entropy=10
+            20.0_f32, 4.0, 5.0, 6.0, // block 1: entropy=20
+            30.0_f32, 7.0, 8.0, 9.0, // block 2: entropy=30
+        ];
+        let e = extract_per_block_entropy(&stats, 3);
+        assert_eq!(e, vec![10.0_f32, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn test_sum_per_block_entropy_3channel_adds() {
+        let x = vec![1.0_f32, 2.0, 3.0];
+        let y = vec![10.0_f32, 20.0, 30.0];
+        let b = vec![100.0_f32, 200.0, 300.0];
+        let total = sum_per_block_entropy_3channel(&x, &y, &b);
+        assert_eq!(total, vec![111.0_f32, 222.0, 333.0]);
+    }
+
+    #[test]
+    fn test_per_block_total_cost_formula() {
+        // total_cost[b] = entropy_mul * entropy_total[b] + pixel_loss_total[b]
+        let entropy = vec![1.0_f32, 2.0, 3.0];
+        let pixel_loss = vec![10.0_f64, 20.0, 30.0];
+        let cost = per_block_total_cost(&entropy, &pixel_loss, 0.5);
+        // Block 0: 0.5 * 1.0 + 10.0 = 10.5
+        assert!((cost[0] - 10.5).abs() < 1e-6);
+        // Block 1: 0.5 * 2.0 + 20.0 = 21.0
+        assert!((cost[1] - 21.0).abs() < 1e-6);
+        // Block 2: 0.5 * 3.0 + 30.0 = 31.5
+        assert!((cost[2] - 31.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_per_block_total_cost_zero_loss_only_entropy_term() {
+        let entropy = vec![1.0_f32, 2.0, 3.0];
+        let zero_loss = vec![0.0_f64; 3];
+        let cost = per_block_total_cost(&entropy, &zero_loss, 1.5);
+        for (i, &c) in cost.iter().enumerate() {
+            assert!((c - 1.5 * entropy[i]).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn test_combine_pixel_loss_3channel_zero_in() {
