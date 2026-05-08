@@ -451,6 +451,24 @@ pub fn compute_scaled_constants(
     (info_loss_mul, cost_delta, zeros_mul)
 }
 
+/// Cost-formula selector for [`estimate_entropy_full_dct8_batch_gpu`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CostMode {
+    /// Simpler formula `entropy_mul * sum(channel_entropies) +
+    /// total_pixel_loss` — fast and sufficient for ranking
+    /// candidates relative to each other on small benches. Wraps
+    /// [`per_block_total_cost`].
+    Simple,
+    /// Upstream-faithful formula matching `estimate_entropy_full`'s
+    /// DCT8 fast path exactly. Includes the per-channel
+    /// `k_zeros_mul * f(nzeros)` bits-cost term and the 8th-root
+    /// `loss_scalar = (loss/64)^(1/8) * 64 / quant` scaling on the
+    /// pixel-loss component. Wraps [`per_block_upstream_cost`].
+    /// Pass the per-block `quant_for_coeffs` value via the
+    /// orchestrator's argument.
+    Upstream { quant_for_coeffs: f32 },
+}
+
 /// Batched per-block cost evaluator for DCT8 — the inner loop of
 /// upstream's `estimate_entropy_full` for one strategy.
 ///
@@ -513,6 +531,7 @@ pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
     mask_stride: u32,
     scaled_constants: (f32, f32, f32),
     entropy_mul: f32,
+    mode: CostMode,
 ) -> Vec<f32> {
     use crate::forks::cfl::{ytob_ratio, ytox_ratio};
 
@@ -620,14 +639,36 @@ pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
     // Step 5: combine per-channel losses via CHANNEL_MUL.
     let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
 
-    // Step 6: extract per-block entropy from each channel and sum.
+    // Step 6: extract per-block entropy from each channel.
     let entropy_x = extract_per_block_entropy(&x_stats, n_blocks);
     let entropy_y = extract_per_block_entropy(&y_stats, n_blocks);
     let entropy_b = extract_per_block_entropy(&b_stats, n_blocks);
-    let entropy_total = sum_per_block_entropy_3channel(&entropy_x, &entropy_y, &entropy_b);
 
-    // Step 7: final cost.
-    per_block_total_cost(&entropy_total, &pixel_loss_total, entropy_mul)
+    // Step 7: final cost — formula selector.
+    match mode {
+        CostMode::Simple => {
+            let entropy_total =
+                sum_per_block_entropy_3channel(&entropy_x, &entropy_y, &entropy_b);
+            per_block_total_cost(&entropy_total, &pixel_loss_total, entropy_mul)
+        }
+        CostMode::Upstream { quant_for_coeffs } => {
+            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            per_block_upstream_cost(
+                &entropy_x,
+                &entropy_y,
+                &entropy_b,
+                &nzeros_x,
+                &nzeros_y,
+                &nzeros_b,
+                &pixel_loss_total,
+                entropy_mul,
+                scaled_constants,
+                quant_for_coeffs,
+            )
+        }
+    }
 }
 
 /// Per-block entropy estimation in the pixel-domain — wraps
@@ -771,6 +812,7 @@ mod tests {
             &mask, &mask_row_base, 16,
             COEFF_DOMAIN_CONSTANTS,
             1.0,
+            CostMode::Simple,
         );
         assert_eq!(costs.len(), n_blocks);
         for &c in &costs {
@@ -852,6 +894,54 @@ mod tests {
         //            = (0.015625)^(1/8) * 64 = 0.6086... * 64 ≈ 38.95
         // entropy += 1.0 * 38.95
         assert!(costs[0] > 30.0 && costs[0] < 50.0, "loss-dominated cost {} not in range", costs[0]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_estimate_entropy_full_dct8_batch_gpu_upstream_mode() {
+        // Same zero input as the Simple-mode test but with CostMode::Upstream.
+        // For zero input: zero entropy, zero pixel loss, zero nzeros.
+        // Per upstream's nzeros bits term: f(0) = ceil_log2(1)+1 + ceil_log2(2+17)
+        //                                       = 2 + 5 = 7. Multiplied by k_zeros_mul.
+        // For COEFF_DOMAIN_CONSTANTS k_zeros_mul = 7.565..., per-channel
+        // contribution = 7 * 7.565 ≈ 52.96. ×3 channels = 158.87.
+        // entropy_mul = 1.0, info_loss_mul × loss = 0.
+        // Final: ≈ 158.87.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let n_blocks = 4_usize;
+        let zeros = alloc::vec![0.0_f32; n_blocks * 64];
+        let weights_one = [1.0_f32; 64];
+        let mask = alloc::vec![1.0_f32; 16 * 16];
+        let mask_row_base: alloc::vec::Vec<u32> = (0..n_blocks)
+            .map(|b| {
+                let by = (b / 2) as u32;
+                let bx = (b % 2) as u32;
+                by * 8 * 16 + bx * 8
+            })
+            .collect();
+
+        let costs = estimate_entropy_full_dct8_batch_gpu(
+            &enc,
+            &zeros, &zeros, &zeros,
+            &weights_one, &weights_one, &weights_one,
+            &weights_one, &weights_one, &weights_one,
+            1.0, 1.0, 1.0,
+            0, 0,
+            &mask, &mask_row_base, 16,
+            COEFF_DOMAIN_CONSTANTS,
+            1.0,
+            CostMode::Upstream { quant_for_coeffs: 1.0 },
+        );
+        assert_eq!(costs.len(), n_blocks);
+        let expected_per_channel = 7.0 * COEFF_DOMAIN_CONSTANTS.2;
+        let expected_total = expected_per_channel * 3.0;
+        for &c in &costs {
+            assert!(
+                (c - expected_total).abs() < 1e-2,
+                "expected ~{expected_total:.3}, got {c}"
+            );
+        }
     }
 
     #[test]
