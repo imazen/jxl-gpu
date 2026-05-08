@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Corpus-level refinement validation: butteraugli_refinement_corpus_sweep (`36b91171`)
+
+Multi-image sweep example that validates whether the single-image
+refinement gain (-11.2% at d=1.0 on one CLIC photo) generalizes
+across content. Runs uniform / initial AQ / refined-AQ at d ∈ {1.0,
+2.0, 4.0} across a corpus directory and reports aggregate
+butteraugli statistics including win counts and worst-case losses.
+
+Configurable via env vars: `CORPUS_DIR`, `MAX_IMAGES`, `ITERS`.
+
+Sweep results (8 CLIC2025-1024 photos, iters=2, archived at
+`/mnt/v/output/jxl-encoder-gpu/butteraugli-refinement-sweep/sweep_clic_8imgs_2026-05-08.log`):
+
+| dist | uniform µ | AQ µ | refined µ | rf<un | rf<AQ |
+|---|---|---|---|---|---|
+| 1.0 | 1.2467 | 1.3533 | 1.1753 (-5.7%) | 5/8 | 7/8 |
+| 2.0 | 2.0292 | 2.1296 | 2.0765 (+2.3%) | 3/8 | 3/8 |
+| 4.0 | 3.2115 | 3.3866 | 3.3866 (+5.4%) | 3/8 | 0/8 |
+
+**Findings:**
+- **d=1.0:** refinement wins on 5 of 8 images vs uniform, beats AQ
+  on 7 of 8. Mean -5.7% improvement vs uniform. The d=1.0 win
+  GENERALIZES across content (not image-specific). Single-image
+  -11.2% on the original test photo was an upper-tail result;
+  the corpus mean is a more representative -5.7%.
+- **d=2.0:** refinement is mixed (3/5 win/loss vs uniform). Slight
+  regression on average (+2.3%); the single-image +16% regression
+  observed earlier is partially content-specific.
+- **d=4.0:** refinement matches AQ exactly across the corpus (no
+  improvement vs AQ baseline). One image shows a +1.021 score
+  regression — content where refinement overshoots.
+
+**Production recommendation:** enable refinement at d ≤ 1.5; skip
+or gate at higher distances until per-content gating heuristics
+land. Refinement infrastructure is correct and provides real
+value in the high-quality regime where it matters most.
+
 ### Refinement loop fix — qac-domain adjustment no longer regresses (`87a6beb4`)
 
 Replace `refine_quant_field_one_iter` inside `refine_aq_field_gpu`
