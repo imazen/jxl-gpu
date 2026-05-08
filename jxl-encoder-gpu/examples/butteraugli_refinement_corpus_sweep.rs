@@ -72,11 +72,13 @@ fn main() {
     let mut losses_rf_vs_un = vec![0_usize; nd];
     let mut worst_rf_vs_un: Vec<(f32, String)> = vec![(0.0, String::new()); nd];
     let mut smart_paths: Vec<[usize; 3]> = vec![[0; 3]; nd]; // [DistanceGated, AqRegressed, Refined]
-    // SSIMULACRA2 cross-validation (uniform + smart only — the two
-    // production-path comparisons we care about).
+    // SSIMULACRA2 cross-validation (all four reconstructions).
     let mut sum_ssim2_un = vec![0.0_f64; nd];
+    let mut sum_ssim2_aq = vec![0.0_f64; nd];
+    let mut sum_ssim2_rf = vec![0.0_f64; nd];
     let mut sum_ssim2_sm = vec![0.0_f64; nd];
     let mut ssim2_sm_beats_un = vec![0_usize; nd];
+    let mut ssim2_aq_beats_un = vec![0_usize; nd];
 
     let to_linear = |c: u8| -> f32 {
         let f = c as f32 / 255.0;
@@ -210,26 +212,37 @@ fn main() {
             let src_img = imgref::ImgVec::new(src_rgb3, w as usize, h as usize);
 
             let (rr_un, gg_un, bb_un) = lossy.encode_one(&enc, &r, &g, &b, q_un);
-            let recon_un_srgb = linear_planar_to_srgb_u8_interleaved(
-                &rr_un,
-                &gg_un,
-                &bb_un,
-                w as usize,
-                h as usize,
-            );
-            let dst_un = imgref::ImgVec::new(to_rgb3(&recon_un_srgb), w as usize, h as usize);
-            let recon_sm_srgb = linear_planar_to_srgb_u8_interleaved(
-                &rrs, &ggs, &bbs, w as usize, h as usize,
-            );
-            let dst_sm = imgref::ImgVec::new(to_rgb3(&recon_sm_srgb), w as usize, h as usize);
+            let make_dst = |rr: &[f32], gg: &[f32], bb: &[f32]| {
+                let srgb = linear_planar_to_srgb_u8_interleaved(rr, gg, bb, w as usize, h as usize);
+                imgref::ImgVec::new(to_rgb3(&srgb), w as usize, h as usize)
+            };
+            let dst_un = make_dst(&rr_un, &gg_un, &bb_un);
+            // Re-encode AQ + refined to capture pixels for ssim2 (the
+            // first-pass measurements above did not retain rec_*).
+            let (rr_aq, gg_aq, bb_aq) =
+                lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
+            let dst_aq = make_dst(&rr_aq, &gg_aq, &bb_aq);
+            let (rr_rf, gg_rf, bb_rf) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &refined);
+            let dst_rf = make_dst(&rr_rf, &gg_rf, &bb_rf);
+            let dst_sm = make_dst(&rrs, &ggs, &bbs);
+
             let s2_un = fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_un.as_ref())
                 .expect("ssim2 un") as f64;
+            let s2_aq = fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_aq.as_ref())
+                .expect("ssim2 aq") as f64;
+            let s2_rf = fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_rf.as_ref())
+                .expect("ssim2 rf") as f64;
             let s2_sm = fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_sm.as_ref())
                 .expect("ssim2 sm") as f64;
             sum_ssim2_un[di] += s2_un;
+            sum_ssim2_aq[di] += s2_aq;
+            sum_ssim2_rf[di] += s2_rf;
             sum_ssim2_sm[di] += s2_sm;
             if s2_sm > s2_un + 0.05 {
                 ssim2_sm_beats_un[di] += 1;
+            }
+            if s2_aq > s2_un + 0.05 {
+                ssim2_aq_beats_un[di] += 1;
             }
 
             sum_un[di] += s_un as f64;
@@ -281,18 +294,24 @@ fn main() {
     }
     println!("\n=== SSIMULACRA2 cross-validation (higher = better, 100=identical) ===");
     println!(
-        "  {:>5}  {:>9}  {:>9}  {:>9}  {:>5}",
-        "dist", "uniform µ", "smart µ", "Δsm-un µ", "sm>un"
+        "  {:>5}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>5}/{:>5}",
+        "dist", "uniform µ", "AQ µ", "refined µ", "smart µ", "Δaq-un", "Δsm-un", "aq>un", "sm>un"
     );
     for (di, d) in distances.iter().enumerate() {
         let m_un = sum_ssim2_un[di] / nf;
+        let m_aq = sum_ssim2_aq[di] / nf;
+        let m_rf = sum_ssim2_rf[di] / nf;
         let m_sm = sum_ssim2_sm[di] / nf;
         println!(
-            "  {:>5.2}  {:>9.3}  {:>9.3}  {:>+9.3}  {:>5}",
+            "  {:>5.2}  {:>9.3}  {:>9.3}  {:>9.3}  {:>9.3}  {:>+9.3}  {:>+9.3}  {:>5}/{:>5}",
             d,
             m_un,
+            m_aq,
+            m_rf,
             m_sm,
+            m_aq - m_un,
             m_sm - m_un,
+            ssim2_aq_beats_un[di],
             ssim2_sm_beats_un[di],
         );
     }
