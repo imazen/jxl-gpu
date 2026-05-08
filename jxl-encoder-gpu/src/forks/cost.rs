@@ -96,6 +96,107 @@ pub fn sum_per_block_entropy_3channel(
         .collect()
 }
 
+/// `ceil_log2_nonzero` — bit-for-bit port of upstream
+/// `jxl_encoder::vardct::ac_strategy::ceil_log2_nonzero` used inside
+/// `estimate_entropy_full`'s per-channel `f(nzeros)` term. Matches
+/// `(usize::BITS - x.leading_zeros())` for `x > 0`. For `x == 0` the
+/// upstream macro returns 0 (we mirror that).
+#[inline]
+fn ceil_log2_nonzero(x: u32) -> u32 {
+    if x == 0 {
+        0
+    } else {
+        u32::BITS - x.leading_zeros()
+    }
+}
+
+/// Per-channel "nzeros bits" cost contribution from upstream's
+/// `estimate_entropy_full` DCT8 fast path. Mirrors the lines:
+///
+/// ```text
+///   let num_nzeros = coeff_result.nzeros_sum as usize;
+///   let nbits = ceil_log2_nonzero(num_nzeros + 1) as usize + 1;
+///   entropy += k_zeros_mul * (ceil_log2_nonzero(nbits + 17) + nbits as u32) as f32;
+/// ```
+///
+/// Returns the per-channel entropy contribution to add for the
+/// nzeros-cost term.
+#[inline]
+pub fn nzeros_bits_term(num_nzeros: u32, k_zeros_mul: f32) -> f32 {
+    let nbits = ceil_log2_nonzero(num_nzeros + 1) + 1;
+    k_zeros_mul * (ceil_log2_nonzero(nbits + 17) + nbits) as f32
+}
+
+/// Full upstream-shape per-block cost combiner — implements the
+/// estimate_entropy_full DCT8 fast path's final cost formula
+/// (lines 766-771 of `vardct/ac_strategy.rs`):
+///
+/// ```text
+///   per_channel:
+///     entropy += entropy_sum
+///     entropy += k_zeros_mul * f(nzeros_sum)
+///   final:
+///     loss_scalar = (total_pixel_loss / 64).sqrt().sqrt().sqrt() * 64 / quant
+///     entropy *= entropy_mul
+///     entropy += k_info_loss_mul * loss_scalar
+///     return entropy
+/// ```
+///
+/// Inputs are per-block arrays for entropy_sum and nzeros_sum across
+/// all 3 channels, plus per-block combined pixel loss (output of
+/// [`combine_pixel_loss_3channel`]). `scaled_constants` is the
+/// `(info_loss_mul, cost_delta, zeros_mul)` tuple from
+/// [`compute_scaled_constants`] (or [`COEFF_DOMAIN_CONSTANTS`]).
+/// `quant_for_coeffs` is the per-block raw quant value (the
+/// `quant_field` entry, not the scaled `qac`).
+///
+/// All per-channel arrays must be the same length.
+#[allow(clippy::too_many_arguments)]
+pub fn per_block_upstream_cost(
+    entropy_x: &[f32],
+    entropy_y: &[f32],
+    entropy_b: &[f32],
+    nzeros_x: &[f32],
+    nzeros_y: &[f32],
+    nzeros_b: &[f32],
+    pixel_loss_total: &[f64],
+    entropy_mul: f32,
+    scaled_constants: (f32, f32, f32),
+    quant_for_coeffs: f32,
+) -> Vec<f32> {
+    let n = entropy_x.len();
+    debug_assert_eq!(entropy_y.len(), n);
+    debug_assert_eq!(entropy_b.len(), n);
+    debug_assert_eq!(nzeros_x.len(), n);
+    debug_assert_eq!(nzeros_y.len(), n);
+    debug_assert_eq!(nzeros_b.len(), n);
+    debug_assert_eq!(pixel_loss_total.len(), n);
+
+    let (k_info_loss_mul, _cost_delta, k_zeros_mul) = scaled_constants;
+    const DCT_BLOCK_SIZE: f64 = 64.0;
+    let inv_q = 1.0 / quant_for_coeffs as f64;
+
+    let mut out = Vec::with_capacity(n);
+    for b in 0..n {
+        // Per-channel entropy + nzeros bits cost.
+        let mut entropy = entropy_x[b]
+            + entropy_y[b]
+            + entropy_b[b]
+            + nzeros_bits_term(nzeros_x[b] as u32, k_zeros_mul)
+            + nzeros_bits_term(nzeros_y[b] as u32, k_zeros_mul)
+            + nzeros_bits_term(nzeros_b[b] as u32, k_zeros_mul);
+
+        // Combined pixel-loss → 8th-root scalar.
+        let p = pixel_loss_total[b];
+        let loss_scalar = (p / DCT_BLOCK_SIZE).sqrt().sqrt().sqrt() * DCT_BLOCK_SIZE * inv_q;
+
+        entropy *= entropy_mul;
+        entropy += k_info_loss_mul * loss_scalar as f32;
+        out.push(entropy);
+    }
+    out
+}
+
 /// Per-block total cost combiner — the final per-block scalar that
 /// upstream's `estimate_entropy_full` returns. Mirrors the formula
 /// `entropy_mul * total_entropy + total_pixel_loss` per block.
@@ -675,6 +776,82 @@ mod tests {
         for &c in &costs {
             assert!(c.abs() < 1e-3, "cost should be ~0 on zero input, got {c}");
         }
+    }
+
+    #[test]
+    fn test_ceil_log2_nonzero() {
+        assert_eq!(ceil_log2_nonzero(0), 0);
+        assert_eq!(ceil_log2_nonzero(1), 1); // 1 needs 1 bit
+        assert_eq!(ceil_log2_nonzero(2), 2);
+        assert_eq!(ceil_log2_nonzero(3), 2);
+        assert_eq!(ceil_log2_nonzero(4), 3);
+        assert_eq!(ceil_log2_nonzero(7), 3);
+        assert_eq!(ceil_log2_nonzero(8), 4);
+        assert_eq!(ceil_log2_nonzero(255), 8);
+        assert_eq!(ceil_log2_nonzero(256), 9);
+    }
+
+    #[test]
+    fn test_nzeros_bits_term_zero_input() {
+        // num_nzeros = 0 → nbits = ceil_log2(1) + 1 = 1 + 1 = 2
+        // → entry = ceil_log2(2 + 17) + 2 = ceil_log2(19) + 2 = 5 + 2 = 7
+        // → 7 * k_zeros_mul
+        let v = nzeros_bits_term(0, 1.0);
+        // ceil_log2_nonzero(1) = 1, so nbits = 2, ceil_log2_nonzero(19) = 5
+        // term = 5 + 2 = 7
+        assert!((v - 7.0).abs() < 1e-6, "got {v}");
+    }
+
+    #[test]
+    fn test_nzeros_bits_term_typical() {
+        // num_nzeros = 10 → nbits = ceil_log2(11) + 1 = 4 + 1 = 5
+        // → ceil_log2(5+17) + 5 = ceil_log2(22) + 5 = 5 + 5 = 10
+        let v = nzeros_bits_term(10, 1.0);
+        assert!((v - 10.0).abs() < 1e-6, "got {v}");
+    }
+
+    #[test]
+    fn test_per_block_upstream_cost_zero_loss_zero_nzeros() {
+        // entropy_X = entropy_Y = entropy_B = 5.0 each
+        // nzeros = 0 each → nzeros_term = 7 * k_zeros_mul each (3 channels)
+        // pixel_loss = 0 → loss_scalar = 0
+        // entropy = (5 + 5 + 5 + 3 * 7 * k_zeros_mul) * entropy_mul
+        let entropy = vec![5.0_f32, 5.0];
+        let nzeros = vec![0.0_f32, 0.0];
+        let zero_loss = vec![0.0_f64, 0.0];
+        let costs = per_block_upstream_cost(
+            &entropy, &entropy, &entropy,
+            &nzeros, &nzeros, &nzeros,
+            &zero_loss,
+            1.0,                       // entropy_mul
+            (10.0, 5.0, 1.0),          // (info_loss_mul, cost_delta, zeros_mul)
+            1.0,                       // quant_for_coeffs
+        );
+        // Expected: (15.0 + 21.0) * 1.0 + 10.0 * 0 = 36.0
+        assert!((costs[0] - 36.0).abs() < 1e-3, "got {}", costs[0]);
+        assert!((costs[1] - 36.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_per_block_upstream_cost_nonzero_loss() {
+        // Small but non-zero pixel loss. loss_scalar is the 8th-root,
+        // which makes a small loss into a sizable contribution.
+        let entropy = vec![0.0_f32];
+        let nzeros = vec![0.0_f32];
+        let loss = vec![1.0_f64]; // total pixel loss = 1
+        let costs = per_block_upstream_cost(
+            &entropy, &entropy, &entropy,
+            &nzeros, &nzeros, &nzeros,
+            &loss,
+            1.0,
+            (1.0, 1.0, 0.0), // info_loss_mul=1, zeros_mul=0 to isolate loss term
+            1.0,
+        );
+        // entropy = 0 + 0_zero_term*3 = 0, entropy *= 1.0 → 0
+        // loss_scalar = (1/64).sqrt().sqrt().sqrt() * 64 / 1
+        //            = (0.015625)^(1/8) * 64 = 0.6086... * 64 ≈ 38.95
+        // entropy += 1.0 * 38.95
+        assert!(costs[0] > 30.0 && costs[0] < 50.0, "loss-dominated cost {} not in range", costs[0]);
     }
 
     #[test]
