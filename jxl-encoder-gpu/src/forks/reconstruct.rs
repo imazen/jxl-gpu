@@ -165,10 +165,13 @@ fn dct1d_8(mem: &mut [f32]) {
 /// Returns one f32 per block in raster order (row-major over 8×8
 /// block grid).
 ///
-/// DC value matches the DCT8 forward DCT's coefficient[0]: the mean
-/// of the 64 pixels in the block multiplied by 8.0 (because the DCT
-/// orthonormal basis gives coefficient[0] = sum / sqrt(64) = sum / 8;
-/// for our convention coefficient[0] = mean × 8).
+/// DC value matches this codebase's DCT forward convention: the
+/// **mean** of the 64 pixels in the block (`sum / 64`). Verified
+/// against the kernels: a uniform-0.4 input gives `forward_dct8(...)
+/// .coeffs[0] = 0.4`, and `dc_from_dct_16x16(forward_dct16x16(...))
+/// = [0.4, 0.4, 0.4, 0.4]`. (libjxl's CPU code uses an orthonormal
+/// `sum / 8` convention; the GPU kernels here normalize by N² instead,
+/// so the DC frame stores mean values.)
 ///
 /// Used by [`encode_and_reconstruct_mixed_strategy_single_channel`]
 /// to build the `dc_grid_per_8x8_block` argument that
@@ -195,8 +198,8 @@ pub fn compute_dc_grid_per_8x8_block(
                     sum += plane[row_off + dx];
                 }
             }
-            // mean × 8 = (sum / 64) × 8 = sum / 8
-            out[by * xsize_blocks + bx] = sum * 0.125;
+            // mean = sum / 64
+            out[by * xsize_blocks + bx] = sum * (1.0 / 64.0);
         }
     }
     out
@@ -331,12 +334,17 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     qac_per_8x8_block: &[f32],
     thresholds: &[f32; 4],
     dc_grid_per_8x8_block: &[f32],
+    // Channel index for adjust_quant_bias: 0=X, 1=Y, 2=B. Used only
+    // for DCT8 (RAW_STRATEGY_DCT) — non-DCT8 strategies skip the bias
+    // correction in upstream too.
+    channel: usize,
     out_plane: &mut [f32],
 ) {
+    use crate::forks::dequant::adjust_quant_bias;
     use crate::forks::quantize::quantize_blocks_gpu_broadcast_w;
-    use crate::forks::dequant::dequant_blocks_gpu_broadcast_w;
     use crate::forks::transform::{
         apply_dct_batch_gpu, coeff_count_per_strategy, tile_dims_pixels,
+        RAW_STRATEGY_DCT,
     };
     use crate::pipeline::group_assignments_by_strategy;
 
@@ -396,9 +404,34 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             llf_y,
         );
 
-        // Step 3: dequant via simple per-coefficient kernel.
-        let mut dequant =
-            dequant_blocks_gpu_broadcast_w(enc, &quant, &weights_template, coeff_count as u32);
+        // Step 3: dequant — host-side, with proper inv_qac scaling
+        // and (for DCT8 only) adjust_quant_bias. The GPU
+        // dequant_simple kernel produces `quant * weights` which is
+        // missing the inv_qac divisor and the bias correction;
+        // applying both on host produces upstream-faithful values.
+        //
+        // Formula (matches upstream dequant_dct8):
+        //   For DCT8:    dequant[i] = adjust_quant_bias(quant[i], channel) * weight[i] / qac
+        //   For others:  dequant[i] = quant[i] * weight[i] / qac
+        //
+        // (No CfL is applied here — Phase A has CfL=0 baked in. Phase
+        // B will add per-strategy CfL via dequant_dct8 for the DCT8
+        // group when we wire 3-channel encode through this path.)
+        let mut dequant = vec![0.0_f32; quant.len()];
+        let is_dct8 = raw_strategy == RAW_STRATEGY_DCT;
+        for (block_i, &(_bx, _by)) in coords.iter().enumerate() {
+            let inv_qac = 1.0 / qac_for_strategy[block_i];
+            let off = block_i * coeff_count;
+            for i in 0..coeff_count {
+                let q_int = quant[off + i];
+                let q_f32 = if is_dct8 {
+                    adjust_quant_bias(q_int, channel)
+                } else {
+                    q_int as f32
+                };
+                dequant[off + i] = q_f32 * weights_template[i] * inv_qac;
+            }
+        }
 
         // Step 4: per-block LLF restore. Pull this strategy's
         // (llf_x × llf_y) DC values from dc_grid_per_8x8_block at the
@@ -490,6 +523,7 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
         qac_x_per_8x8_block,
         thresholds_x,
         dc_grid_x_per_8x8_block,
+        0,
         out_plane_x,
     );
     encode_and_reconstruct_mixed_strategy_single_channel(
@@ -502,6 +536,7 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
         qac_y_per_8x8_block,
         thresholds_y,
         dc_grid_y_per_8x8_block,
+        1,
         out_plane_y,
     );
     encode_and_reconstruct_mixed_strategy_single_channel(
@@ -514,6 +549,7 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
         qac_b_per_8x8_block,
         thresholds_b,
         dc_grid_b_per_8x8_block,
+        2,
         out_plane_b,
     );
 }
@@ -2038,6 +2074,7 @@ mod tests {
             &qac,
             &thresholds,
             &dc_grid,
+            1, // Y channel for the test
             &mut out_plane,
         );
 

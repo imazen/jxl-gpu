@@ -898,6 +898,7 @@ impl<R: Runtime> LossyEncoder<R> {
             &mut plane_b,
         );
 
+
         // Stage 8: postpass (gab_smooth + xyb_to_linear; EPF deferred)
         let recon_x_p =
             enc.upload_plane(&plane_x, self.padded_width, self.padded_height);
@@ -1459,6 +1460,120 @@ mod tests {
         assert_eq!(bb.len(), n);
         for v in rr.iter().chain(&gg).chain(&bb) {
             assert!(v.is_finite());
+        }
+    }
+
+    /// Diagnostic: dump DCT8 and DCT16x16 forward-coeffs[0] for a
+    /// uniform 0.4 input. Reveals the actual normalization convention
+    /// used by this codebase's DCT kernels — needed to decide what the
+    /// DC frame value should be for use with restore_llf_dct*.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dct_scale_convention_diag() {
+        use crate::forks::transform::{
+            apply_dct_batch_gpu, RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16,
+        };
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // 16x16 plane uniformly = 0.4
+        let plane: Vec<f32> = vec![0.4_f32; 16 * 16];
+        let stride = 16;
+
+        // DCT8 on first 8x8 block
+        let dct8_coeffs = apply_dct_batch_gpu(&enc, &plane, stride, &[(0, 0)], RAW_STRATEGY_DCT);
+        // DCT16x16 on the entire 16x16 region
+        let dct16_coeffs =
+            apply_dct_batch_gpu(&enc, &plane, stride, &[(0, 0)], RAW_STRATEGY_DCT16X16);
+
+        std::println!("[scale-diag] DCT8  coeffs[0..4]  = {:?}", &dct8_coeffs[0..4]);
+        std::println!("[scale-diag] DCT16 coeffs[0..4]  = {:?}", &dct16_coeffs[0..4]);
+        std::println!("[scale-diag] DCT16 coeffs[16..18]= {:?}", &dct16_coeffs[16..18]);
+        // Predict:
+        // - if orthonormal: DCT8 [0] = sum/8 = 3.2, DCT16 [0] = sum/16 = 6.4
+        // - if mean-scaled: DCT8 [0] = 0.4, DCT16 [0] = 0.4
+        // - if unnorm: DCT8 [0] = sum = 25.6, DCT16 [0] = sum = 102.4
+
+        // Now run dc_from_dct_16x16-equivalent on dct16_coeffs to see what
+        // values the encoder would store in the DC frame for this block.
+        use crate::forks::reconstruct::DCT_RESAMPLE_SCALE_16_TO_2;
+        let s0 = DCT_RESAMPLE_SCALE_16_TO_2[0];
+        let s1 = DCT_RESAMPLE_SCALE_16_TO_2[1];
+        let b00 = dct16_coeffs[0] * s0 * s0;
+        let b01 = dct16_coeffs[1] * s0 * s1;
+        let b10 = dct16_coeffs[16] * s1 * s0;
+        let b11 = dct16_coeffs[17] * s1 * s1;
+        let dc00 = (b00 + b01) + (b10 + b11);
+        let dc01 = (b00 + b01) - (b10 + b11);
+        let dc10 = (b00 - b01) + (b10 - b11);
+        let dc11 = (b00 - b01) - (b10 - b11);
+        std::println!(
+            "[scale-diag] dc_from_dct_16x16 -> [{:.4}, {:.4}, {:.4}, {:.4}]",
+            dc00, dc01, dc10, dc11
+        );
+    }
+
+    /// Diagnostic test for the Phase A strat-search bug: compare
+    /// encode_one (uniform-qac DCT8) vs encode_one_with_strategy_search_dct8_16
+    /// on a smooth gradient where DCT8 should be near-perfect. Reports
+    /// per-channel RMSE and relative error.
+    ///
+    /// Expectation: both paths produce roughly equal reconstructions.
+    /// If strat-search RMSE >> encode_one RMSE, the strat-search
+    /// pipeline has a bug (wrong dequant / DC / IDCT layout).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_lossy_encoder_strat_search_vs_encode_one_diag() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // 64×64 smooth gradient → almost zero DCT AC, DC dominates.
+        // Reconstruction should be near-perfect for either path.
+        let w = 64_u32;
+        let h = 64_u32;
+        let lossy = LossyEncoder::new(&enc, w, h);
+        let n = (w * h) as usize;
+        let r: Vec<f32> = (0..n).map(|i| 0.30 + 0.20 * (i as f32 / n as f32)).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.40 + 0.15 * (i as f32 / n as f32)).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.20 + 0.10 * (i as f32 / n as f32)).collect();
+
+        let qac = distance_to_qac(1.0);
+        let (e1_r, e1_g, e1_b) = lossy.encode_one(&enc, &r, &g, &b, qac);
+        let (es_r, es_g, es_b) =
+            lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, 1.0);
+
+        let rmse = |orig: &[f32], rec: &[f32]| -> f64 {
+            let mut s = 0.0_f64;
+            for i in 0..orig.len() {
+                s += ((orig[i] - rec[i]) as f64).powi(2);
+            }
+            (s / orig.len() as f64).sqrt()
+        };
+        let mut min1 = f32::INFINITY;
+        let mut max1 = f32::NEG_INFINITY;
+        let mut mins = f32::INFINITY;
+        let mut maxs = f32::NEG_INFINITY;
+        for &v in e1_g.iter() {
+            min1 = min1.min(v);
+            max1 = max1.max(v);
+        }
+        for &v in es_g.iter() {
+            mins = mins.min(v);
+            maxs = maxs.max(v);
+        }
+        std::println!(
+            "[strat-diag] encode_one     R={:.6} G={:.6} B={:.6}  G range=[{:.4},{:.4}]",
+            rmse(&r, &e1_r), rmse(&g, &e1_g), rmse(&b, &e1_b), min1, max1
+        );
+        std::println!(
+            "[strat-diag] strat-search   R={:.6} G={:.6} B={:.6}  G range=[{:.4},{:.4}]",
+            rmse(&r, &es_r), rmse(&g, &es_g), rmse(&b, &es_b), mins, maxs
+        );
+        std::println!(
+            "[strat-diag] G original range=[{:.4},{:.4}], first 8 px input/e1/es:",
+            g.iter().copied().fold(f32::INFINITY, f32::min),
+            g.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        );
+        for i in 0..8 {
+            std::println!("  [{i}] input={:.4} e1={:.4} es={:.4}", g[i], e1_g[i], es_g[i]);
         }
     }
 
