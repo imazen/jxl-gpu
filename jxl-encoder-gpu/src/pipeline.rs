@@ -3478,12 +3478,68 @@ pub fn partitions_16x16_to_assignments(
     out
 }
 
+/// Group strategy assignments by `raw_strategy` code. Returns a
+/// `Vec<(raw_strategy, Vec<(bx, by)>)>` with strategies in
+/// ascending raw_strategy order — convenient for the per-strategy
+/// encode pass (each entry batches all blocks of one strategy
+/// into a single DCT + quantize + dequant launch).
+///
+/// The returned `(bx, by)` pairs preserve the order they appeared
+/// in `assignments` (within each strategy group), so callers can
+/// match them back to the original assignment list.
+pub fn group_assignments_by_strategy(
+    assignments: &[StrategyAssignment],
+) -> Vec<(u8, Vec<(usize, usize)>)> {
+    use alloc::collections::BTreeMap;
+    let mut by_strat: BTreeMap<u8, Vec<(usize, usize)>> = BTreeMap::new();
+    for a in assignments {
+        by_strat
+            .entry(a.raw_strategy)
+            .or_default()
+            .push((a.bx, a.by));
+    }
+    by_strat.into_iter().collect()
+}
+
 #[cfg(test)]
 mod strategy_assignment_tests {
     use super::*;
     use crate::forks::transform::{
         RAW_STRATEGY_DCT, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
     };
+
+    #[test]
+    fn test_group_assignments_by_strategy() {
+        let assignments = vec![
+            StrategyAssignment {
+                bx: 0,
+                by: 0,
+                raw_strategy: RAW_STRATEGY_DCT16X16,
+            },
+            StrategyAssignment {
+                bx: 2,
+                by: 0,
+                raw_strategy: RAW_STRATEGY_DCT,
+            },
+            StrategyAssignment {
+                bx: 3,
+                by: 0,
+                raw_strategy: RAW_STRATEGY_DCT,
+            },
+            StrategyAssignment {
+                bx: 0,
+                by: 2,
+                raw_strategy: RAW_STRATEGY_DCT16X16,
+            },
+        ];
+        let groups = group_assignments_by_strategy(&assignments);
+        // BTreeMap orders by raw_strategy: DCT (0) before DCT16X16 (3)
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, RAW_STRATEGY_DCT);
+        assert_eq!(groups[0].1, vec![(2, 0), (3, 0)]);
+        assert_eq!(groups[1].0, RAW_STRATEGY_DCT16X16);
+        assert_eq!(groups[1].1, vec![(0, 0), (0, 2)]);
+    }
 
     #[test]
     fn test_partitions_to_assignments_all_dct16() {
