@@ -78,6 +78,43 @@ LLF helpers in place, the dispatcher just needs to: read DC grid →
 call the right LLF restorer → write LLF positions into the
 coefficient block → run per-strategy IDCT → scatter.
 
+### estimate_entropy_full DCT8 orchestrator (`d4b77cd1`, `639a2d15`, `fe4cdc32`, `382d4717`, `aaf45d74`, `07658a0e`, `706b59fe`)
+
+The DCT8 fast path of upstream's per-block entropy + pixel-loss
+cost evaluator is now composable on GPU. Builds out from G5.1-
+compliant leaf primitives (commits this same series):
+
+1. `compute_scaled_constants` + `COEFF_DOMAIN_CONSTANTS`
+   (`d4b77cd1`) — distance-scaled constants for pixel-domain mode.
+2. `MASK_CHANNEL_OFFSET` + `CHANNEL_MUL` (`639a2d15`) — per-channel
+   8th-power mask offsets and multipliers (literal-spot-checked
+   against libjxl).
+3. `K_INV_COLOR_FACTOR` + `ytox_ratio` + `ytob_ratio` (`fe4cdc32`)
+   — CfL ratio helpers re-exposed from kernels/cfl.
+4. `EntropyMulTable` + `entropy_mul_for_strategy` + `afv_entropy_mul`
+   (`382d4717`) — per-strategy entropy multipliers, field-by-field
+   parity-tested vs upstream.
+5. `combine_pixel_loss_3channel` (`aaf45d74`) — per-block
+   CHANNEL_MUL-weighted sum across X/Y/B losses.
+6. `extract_per_block_entropy` + `sum_per_block_entropy_3channel`
+   + `per_block_total_cost` (`07658a0e`) — host-side per-block
+   reshape and cost combiner.
+7. **`estimate_entropy_full_dct8_batch_gpu`** (`706b59fe`) — the
+   orchestrator. ~12 GPU launches per call regardless of n_blocks:
+   3 forward DCT + 3 entropy_coeffs_pixel + 3 IDCT + 3 pixel_loss.
+   Mask is image-plane with explicit per-block mask_row_base offsets.
+
+**Caveat documented**: the underlying entropy kernel only fills
+entropy_sum + nzeros_sum columns (info_loss + info_loss2 stay 0).
+The cost formula uses entropy_sum directly without upstream's
+`info_loss_mul × info_loss + zeros_mul × nzeros` re-weighting.
+That requires a kernel extension; `scaled_constants` is in the
+signature with `info_loss_mul` and `zeros_mul` reserved for the
+future use.
+
+GPU smoke test (zero pixel input → zero per-block cost on 4 blocks)
+verifies the orchestrator composes correctly.
+
 ### G5.1 validation recovery (`e81accbe`, `c1ffd69e`, `2cf7eeec`, `6eb0faca`, `6de46b3a`, `a21872fd`, `b29cd555`, `632043ac`, `abb79093`)
 
 After noticing a pattern of helpers committed with property-only
