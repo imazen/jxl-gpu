@@ -72,6 +72,11 @@ fn main() {
     let mut losses_rf_vs_un = vec![0_usize; nd];
     let mut worst_rf_vs_un: Vec<(f32, String)> = vec![(0.0, String::new()); nd];
     let mut smart_paths: Vec<[usize; 3]> = vec![[0; 3]; nd]; // [DistanceGated, AqRegressed, Refined]
+    // SSIMULACRA2 cross-validation (uniform + smart only — the two
+    // production-path comparisons we care about).
+    let mut sum_ssim2_un = vec![0.0_f64; nd];
+    let mut sum_ssim2_sm = vec![0.0_f64; nd];
+    let mut ssim2_sm_beats_un = vec![0_usize; nd];
 
     let to_linear = |c: u8| -> f32 {
         let f = c as f32 / 255.0;
@@ -195,6 +200,38 @@ fn main() {
                 SmartGatePath::Refined => smart_paths[di][2] += 1,
             }
 
+            // SSIMULACRA2 cross-validation: re-use the uniform recon
+            // from earlier (rr/gg/bb were overwritten by AQ/refined; we
+            // need to encode uniform again here for ssim2).
+            let to_rgb3 = |buf: &[u8]| -> Vec<[u8; 3]> {
+                buf.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+            };
+            let src_rgb3 = to_rgb3(&pixels);
+            let src_img = imgref::ImgVec::new(src_rgb3, w as usize, h as usize);
+
+            let (rr_un, gg_un, bb_un) = lossy.encode_one(&enc, &r, &g, &b, q_un);
+            let recon_un_srgb = linear_planar_to_srgb_u8_interleaved(
+                &rr_un,
+                &gg_un,
+                &bb_un,
+                w as usize,
+                h as usize,
+            );
+            let dst_un = imgref::ImgVec::new(to_rgb3(&recon_un_srgb), w as usize, h as usize);
+            let recon_sm_srgb = linear_planar_to_srgb_u8_interleaved(
+                &rrs, &ggs, &bbs, w as usize, h as usize,
+            );
+            let dst_sm = imgref::ImgVec::new(to_rgb3(&recon_sm_srgb), w as usize, h as usize);
+            let s2_un = fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_un.as_ref())
+                .expect("ssim2 un") as f64;
+            let s2_sm = fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_sm.as_ref())
+                .expect("ssim2 sm") as f64;
+            sum_ssim2_un[di] += s2_un;
+            sum_ssim2_sm[di] += s2_sm;
+            if s2_sm > s2_un + 0.05 {
+                ssim2_sm_beats_un[di] += 1;
+            }
+
             sum_un[di] += s_un as f64;
             sum_aq[di] += s_aq as f64;
             sum_rf[di] += s_rf as f64;
@@ -242,6 +279,24 @@ fn main() {
             smart_paths[di][2],
         );
     }
+    println!("\n=== SSIMULACRA2 cross-validation (higher = better, 100=identical) ===");
+    println!(
+        "  {:>5}  {:>9}  {:>9}  {:>9}  {:>5}",
+        "dist", "uniform µ", "smart µ", "Δsm-un µ", "sm>un"
+    );
+    for (di, d) in distances.iter().enumerate() {
+        let m_un = sum_ssim2_un[di] / nf;
+        let m_sm = sum_ssim2_sm[di] / nf;
+        println!(
+            "  {:>5.2}  {:>9.3}  {:>9.3}  {:>+9.3}  {:>5}",
+            d,
+            m_un,
+            m_sm,
+            m_sm - m_un,
+            ssim2_sm_beats_un[di],
+        );
+    }
+
     println!("\nWorst refinement-vs-uniform regressions (per distance):");
     for (di, d) in distances.iter().enumerate() {
         let (worst_d, worst_name) = &worst_rf_vs_un[di];
