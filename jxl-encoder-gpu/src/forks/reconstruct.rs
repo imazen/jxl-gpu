@@ -375,6 +375,185 @@ pub fn scatter_block_to_plane(
     }
 }
 
+/// Fast 1D IDCT for N=8 — bit-for-bit port of upstream
+/// `vardct::dct::inverse::idct1d_8`. Pure scalar; matched inverse
+/// of our private `dct1d_8` (i.e., `idct1d_8(dct1d_8(x)) == x`).
+///
+/// Includes the `*= 8` scaling to compensate for the `1/8` scaling
+/// applied by upstream's `dct_8x8` wrapper.
+fn idct1d_8(mem: &mut [f32]) {
+    const INV_SQRT2: f32 = 1.0 / 1.414_213_5;
+    const INV_WC4: [f32; 2] = [1.0 / 0.541_196_1, 1.0 / 1.306_563_0];
+    const INV_WC8: [f32; 4] = [
+        1.0 / 0.509_795_6,
+        1.0 / 0.601_344_9,
+        1.0 / 0.899_976_2,
+        1.0 / 2.562_915_4,
+    ];
+
+    // Scale by 8 to compensate for forward's 1/8.
+    let m = [
+        mem[0] * 8.0,
+        mem[1] * 8.0,
+        mem[2] * 8.0,
+        mem[3] * 8.0,
+        mem[4] * 8.0,
+        mem[5] * 8.0,
+        mem[6] * 8.0,
+        mem[7] * 8.0,
+    ];
+
+    // De-interleave: even = [m[0],m[2],m[4],m[6]], odd = [m[1],m[3],m[5],m[7]].
+    let (e0, e1, e2, e3) = (m[0], m[2], m[4], m[6]);
+    let (mut o0, mut o1, mut o2, o3) = (m[1], m[3], m[5], m[7]);
+
+    // Reverse B transform on odd half.
+    o2 -= o3;
+    o1 -= o2;
+    o0 = (o0 - o1) * INV_SQRT2;
+
+    // Reverse idct1d_4_val on odd half (uses idct1d_4_val signature
+    // from upstream — caller pre-orders args so internal de-interleave
+    // does the right thing).
+    let idct4_val = |a: f32, b: f32, c: f32, d: f32| -> [f32; 4] {
+        let odd0 = (c - d) * INV_SQRT2;
+        let o0p = (odd0 + d) * 0.5;
+        let o1p = (odd0 - d) * 0.5;
+        let o0 = o0p * INV_WC4[0];
+        let o1 = o1p * INV_WC4[1];
+        let e0_l = (a + b) * 0.5;
+        let e1_l = (a - b) * 0.5;
+        [
+            (e0_l + o0) * 0.5,
+            (e1_l + o1) * 0.5,
+            (e1_l - o1) * 0.5,
+            (e0_l - o0) * 0.5,
+        ]
+    };
+    let odd = idct4_val(o0, o2, o1, o3);
+    let o = [
+        odd[0] * INV_WC8[0],
+        odd[1] * INV_WC8[1],
+        odd[2] * INV_WC8[2],
+        odd[3] * INV_WC8[3],
+    ];
+
+    // Reverse idct1d_4 on even half.
+    let e = idct4_val(e0, e2, e1, e3);
+
+    // Combine even/odd.
+    mem[0] = (e[0] + o[0]) * 0.5;
+    mem[1] = (e[1] + o[1]) * 0.5;
+    mem[2] = (e[2] + o[2]) * 0.5;
+    mem[3] = (e[3] + o[3]) * 0.5;
+    mem[4] = (e[3] - o[3]) * 0.5;
+    mem[5] = (e[2] - o[2]) * 0.5;
+    mem[6] = (e[1] - o[1]) * 0.5;
+    mem[7] = (e[0] - o[0]) * 0.5;
+}
+
+/// Forward DC extraction for DCT64×64 — inverse of
+/// [`restore_llf_dct64x64`]. Mirrors upstream's
+/// `dc_from_dct_64x64` (forward_large.rs:315).
+///
+/// Takes the 8×8 LLF coefficient grid (positions
+/// `coeffs[iy * 64 + ix]` for `iy, ix in 0..8`) and returns the
+/// 8×8 DC grid. Applies SCALE_64_TO_8 in both dims, then 8×8 IDCT
+/// (idct1d_8 rows × 2 with transpose).
+pub fn dc_from_dct_64x64(llf_grid: [f32; 64]) -> [f32; 64] {
+    let mut block = [0.0_f32; 64];
+    for iy in 0..8 {
+        for ix in 0..8 {
+            block[iy * 8 + ix] = llf_grid[iy * 8 + ix]
+                * DCT_RESAMPLE_SCALE_64_TO_8[iy]
+                * DCT_RESAMPLE_SCALE_64_TO_8[ix];
+        }
+    }
+    for iy in 0..8 {
+        idct1d_8(&mut block[iy * 8..(iy + 1) * 8]);
+    }
+    let mut transposed = [0.0_f32; 64];
+    for iy in 0..8 {
+        for ix in 0..8 {
+            transposed[ix * 8 + iy] = block[iy * 8 + ix];
+        }
+    }
+    for iy in 0..8 {
+        idct1d_8(&mut transposed[iy * 8..(iy + 1) * 8]);
+    }
+    transposed
+}
+
+/// Forward DC extraction for DCT64×32 — inverse of
+/// [`restore_llf_dct64x32`]. Mirrors upstream
+/// `dc_from_dct_64x32` (forward_large.rs:364).
+pub fn dc_from_dct_64x32(llf_grid: [f32; 32]) -> [f32; 32] {
+    // llf_grid[iy*8+ix] for iy in 0..4, ix in 0..8 (matches restore_llf output).
+    let mut block = [0.0_f32; 32];
+    for iy in 0..4 {
+        for ix in 0..8 {
+            block[iy * 8 + ix] = llf_grid[iy * 8 + ix]
+                * DCT_RESAMPLE_SCALE_32_TO_4[iy]
+                * DCT_RESAMPLE_SCALE_64_TO_8[ix]
+                * 4.0;
+        }
+    }
+    // IDCT on 8-element rows (4 rows).
+    for iy in 0..4 {
+        idct1d_8(&mut block[iy * 8..(iy + 1) * 8]);
+    }
+    // Transpose 4×8 → 8×4.
+    let mut t = [0.0_f32; 32];
+    for iy in 0..4 {
+        for ix in 0..8 {
+            t[ix * 4 + iy] = block[iy * 8 + ix];
+        }
+    }
+    // IDCT on 4-element rows (8 rows).
+    for iy in 0..8 {
+        idct1d_4(&mut t[iy * 4..(iy + 1) * 4]);
+    }
+    t
+}
+
+/// Forward DC extraction for DCT32×64 — inverse of
+/// [`restore_llf_dct32x64`]. Mirrors upstream
+/// `dc_from_dct_32x64` (forward_large.rs:410).
+pub fn dc_from_dct_32x64(llf_grid: [f32; 32]) -> [f32; 32] {
+    let mut block = [0.0_f32; 32];
+    for iy in 0..4 {
+        for ix in 0..8 {
+            block[iy * 8 + ix] = llf_grid[iy * 8 + ix]
+                * DCT_RESAMPLE_SCALE_32_TO_4[iy]
+                * DCT_RESAMPLE_SCALE_64_TO_8[ix]
+                * 4.0;
+        }
+    }
+    // IDCT on 8-element rows (4 rows).
+    for iy in 0..4 {
+        idct1d_8(&mut block[iy * 8..(iy + 1) * 8]);
+    }
+    // Transpose 4×8 → 8×4.
+    let mut t = [0.0_f32; 32];
+    for iy in 0..4 {
+        for ix in 0..8 {
+            t[ix * 4 + iy] = block[iy * 8 + ix];
+        }
+    }
+    // IDCT on 4-element rows (8 rows).
+    for iy in 0..8 {
+        idct1d_4(&mut t[iy * 4..(iy + 1) * 4]);
+    }
+    // Transpose back 8×4 → 4×8.
+    let mut result = [0.0_f32; 32];
+    for iy in 0..8 {
+        for ix in 0..4 {
+            result[ix * 8 + iy] = t[iy * 4 + ix];
+        }
+    }
+    result
+}
+
 /// Fast 1D IDCT for N=4 — bit-for-bit port of upstream
 /// `vardct::dct::inverse::idct1d_4`. Pure scalar; matched inverse of
 /// our private `dct1d_4` (i.e., `idct1d_4(dct1d_4(x)) == x`).
@@ -1789,6 +1968,83 @@ mod tests {
         assert!((r[0] - c).abs() < 1e-5);
         for i in 1..16 {
             assert!(r[i].abs() < 1e-5, "pos {i}: got {} expected 0", r[i]);
+        }
+    }
+
+    #[test]
+    fn test_dct64x64_forward_inverse_roundtrip() {
+        // 5 trial inputs covering corner cases.
+        let mut single0 = [0.0_f32; 64];
+        single0[0] = 1.0;
+        let mut single_mid = [0.0_f32; 64];
+        single_mid[27] = 1.0;
+        let mut single_last = [0.0_f32; 64];
+        single_last[63] = 1.0;
+        let mut sign_mixed = [0.0_f32; 64];
+        for (i, v) in sign_mixed.iter_mut().enumerate() {
+            *v = if i % 2 == 0 { 0.5 } else { -0.5 };
+        }
+        let arbitrary: [f32; 64] = core::array::from_fn(|i| (i as f32 * 0.13).sin() * 0.7);
+        for (ti, trial) in [single0, single_mid, single_last, sign_mixed, arbitrary]
+            .iter()
+            .enumerate()
+        {
+            let dc = dc_from_dct_64x64(*trial);
+            let restored = restore_llf_dct64x64(dc);
+            for i in 0..64 {
+                assert!(
+                    (restored[i] - trial[i]).abs() < 5e-3,
+                    "trial {ti} pos {i}: got {} expected {}",
+                    restored[i],
+                    trial[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dct64x32_forward_inverse_roundtrip() {
+        let mut single0 = [0.0_f32; 32];
+        single0[0] = 1.0;
+        let mut single_mid = [0.0_f32; 32];
+        single_mid[15] = 1.0;
+        let mut single_last = [0.0_f32; 32];
+        single_last[31] = 1.0;
+        let arbitrary: [f32; 32] = core::array::from_fn(|i| (i as f32 * 0.21).cos() * 0.6);
+        for (ti, trial) in [single0, single_mid, single_last, arbitrary].iter().enumerate() {
+            let dc = dc_from_dct_64x32(*trial);
+            let restored = restore_llf_dct64x32(dc);
+            for i in 0..32 {
+                assert!(
+                    (restored[i] - trial[i]).abs() < 5e-3,
+                    "trial {ti} pos {i}: got {} expected {}",
+                    restored[i],
+                    trial[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dct32x64_forward_inverse_roundtrip() {
+        let mut single0 = [0.0_f32; 32];
+        single0[0] = 1.0;
+        let mut single_mid = [0.0_f32; 32];
+        single_mid[15] = 1.0;
+        let mut single_last = [0.0_f32; 32];
+        single_last[31] = 1.0;
+        let arbitrary: [f32; 32] = core::array::from_fn(|i| (i as f32 * 0.17).sin() * 0.6);
+        for (ti, trial) in [single0, single_mid, single_last, arbitrary].iter().enumerate() {
+            let dc = dc_from_dct_32x64(*trial);
+            let restored = restore_llf_dct32x64(dc);
+            for i in 0..32 {
+                assert!(
+                    (restored[i] - trial[i]).abs() < 5e-3,
+                    "trial {ti} pos {i}: got {} expected {}",
+                    restored[i],
+                    trial[i]
+                );
+            }
         }
     }
 
