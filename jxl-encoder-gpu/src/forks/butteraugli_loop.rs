@@ -685,6 +685,13 @@ pub enum SmartGatePath {
 
 /// Content-aware auto-gated refinement.
 ///
+/// Thin delegate to [`refine_aq_field_gpu_smart_with_threshold`]
+/// using the default [`SMART_GATE_AQ_REGRESSION_RATIO`] (1.10). Use
+/// the `_with_threshold` variant when you need a different
+/// AQ-regression tolerance (e.g., 1.30 for SSIM2-targeted output
+/// where AQ is more often genuinely better, +infinity to never fall
+/// back, 0 to always fall back to uniform).
+///
 /// Always measures AQ vs uniform baselines first, then chooses one
 /// of three paths:
 ///
@@ -702,9 +709,12 @@ pub enum SmartGatePath {
 /// and uniform). At 1024×1024 on RTX 5070 ≈ 100 ms additional vs
 /// [`refine_aq_field_gpu_auto`]. The benefit is that at high d this
 /// catches AQ-regressing content that distance-gated returned
-/// blindly. Empirically this is the best-mean-quality path in the
-/// 16-image CLIC corpus sweep at d=1.0 (1.1886 vs 1.2105 refined,
-/// 1.2386 uniform, 1.4221 AQ).
+/// blindly. Empirically this is the best-mean-quality path on
+/// butteraugli in the 16-image CLIC corpus sweep at d=1.0
+/// (1.1886 vs 1.2105 refined, 1.2386 uniform, 1.4221 AQ). On
+/// SSIMULACRA2 the optimal threshold is higher (less aggressive
+/// fallback) — see CHANGELOG `0e470164` for the metric-disagreement
+/// finding.
 ///
 /// Returns a [`SmartGateOutcome`] with the selected field plus
 /// diagnostics so callers can log / decide. The trace callback is
@@ -721,6 +731,56 @@ pub fn refine_aq_field_gpu_smart<R: Runtime>(
     initial_aq_field: &[f32],
     target_distance: f32,
     iters: usize,
+    trace: impl FnMut(RefineIterTrace),
+) -> butteraugli_gpu::Result<SmartGateOutcome> {
+    refine_aq_field_gpu_smart_with_threshold(
+        enc,
+        lossy,
+        bg,
+        r,
+        g,
+        b,
+        ref_srgb,
+        initial_aq_field,
+        target_distance,
+        iters,
+        SMART_GATE_AQ_REGRESSION_RATIO,
+        trace,
+    )
+}
+
+/// Generalized smart gate with explicit AQ-regression threshold.
+///
+/// Same logic as [`refine_aq_field_gpu_smart`] but the
+/// `aq_regression_ratio` is a parameter instead of the
+/// [`SMART_GATE_AQ_REGRESSION_RATIO`] const. Use this when targeting
+/// a different metric than butteraugli's default 1.10:
+///
+/// - **1.10 (default)**: butteraugli-targeted; tight fallback to
+///   uniform on AQ regression. Optimal mean butteraugli on the
+///   CLIC sweep but loses some SSIM2 wins.
+/// - **1.30**: more permissive; lets more AQ through. Better SSIM2
+///   trade-off because AQ wins on SSIM2 even when butteraugli sees
+///   it as a small regression.
+/// - **`f32::INFINITY`**: never fall back to uniform. Equivalent to
+///   distance-only gating ([`refine_aq_field_gpu_auto`]).
+/// - **`0.0`**: always fall back to uniform. Equivalent to never
+///   using AQ at all — useful as a "uniform baseline" path that
+///   still routes through the smart-gate API for logging
+///   consistency.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_aq_field_gpu_smart_with_threshold<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    lossy: &LossyEncoder<R>,
+    bg: &mut ButteraugliLoopGpu<R>,
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    ref_srgb: &[u8],
+    initial_aq_field: &[f32],
+    target_distance: f32,
+    iters: usize,
+    aq_regression_ratio: f32,
     trace: impl FnMut(RefineIterTrace),
 ) -> butteraugli_gpu::Result<SmartGateOutcome> {
     let (width, height) = lossy.dimensions();
@@ -751,7 +811,7 @@ pub fn refine_aq_field_gpu_smart<R: Runtime>(
 
     // Path 1: AQ regresses uniform — fall back to uniform regardless
     // of distance. Refinement can't recover from a doomed initial.
-    if s_aq > s_un * SMART_GATE_AQ_REGRESSION_RATIO {
+    if s_aq > s_un * aq_regression_ratio {
         return Ok(SmartGateOutcome {
             aq_field: alloc::vec![qac_uniform; initial_aq_field.len()],
             path: SmartGatePath::AqRegressedFallToUniform,
@@ -1412,6 +1472,68 @@ mod tests {
         assert!(!should_refine_at_distance(f32::INFINITY));
         // NaN: comparison returns false → not refined (safe default)
         assert!(!should_refine_at_distance(f32::NAN));
+    }
+
+    /// Smart gate with threshold = +infinity: AQ never falls back,
+    /// behaves like distance-only auto-gate. Verifies the new
+    /// `_with_threshold` parameter degrades gracefully at the extreme.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_refine_aq_field_gpu_smart_threshold_infinity_no_fallback() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, 64, 64);
+        let mut bg = ButteraugliLoopGpu::new(&enc, 64, 64);
+        let n = 64 * 64;
+        let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.5 * (i as f32 / n as f32)).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * (i as f32 / n as f32)).collect();
+        let ref_srgb = linear_planar_to_srgb_u8_interleaved(&r, &g, &b, 64, 64);
+        let initial = lossy.compute_aq_field(&enc, &r, &g, &b, 4.0);
+
+        let outcome = refine_aq_field_gpu_smart_with_threshold(
+            &enc, &lossy, &mut bg, &r, &g, &b, &ref_srgb, &initial, 4.0, 2,
+            f32::INFINITY, |_| (),
+        )
+        .expect("smart");
+
+        // With threshold=inf, never falls back. At d=4.0 distance gate
+        // fires → DistanceGated, never AqRegressedFallToUniform.
+        assert!(matches!(
+            outcome.path,
+            SmartGatePath::DistanceGated | SmartGatePath::Refined
+        ));
+    }
+
+    /// Smart gate with threshold = 0.0: AQ always falls back to uniform
+    /// (any AQ score > uniform * 0 = AQ score > 0 fires). The result
+    /// should be a uniform field.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_refine_aq_field_gpu_smart_threshold_zero_always_fallback() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, 64, 64);
+        let mut bg = ButteraugliLoopGpu::new(&enc, 64, 64);
+        let n = 64 * 64;
+        let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.5 * (i as f32 / n as f32)).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * (i as f32 / n as f32)).collect();
+        let ref_srgb = linear_planar_to_srgb_u8_interleaved(&r, &g, &b, 64, 64);
+        let initial = lossy.compute_aq_field(&enc, &r, &g, &b, 1.0);
+
+        let outcome = refine_aq_field_gpu_smart_with_threshold(
+            &enc, &lossy, &mut bg, &r, &g, &b, &ref_srgb, &initial, 1.0, 2,
+            0.0, |_| (),
+        )
+        .expect("smart");
+
+        assert_eq!(outcome.path, SmartGatePath::AqRegressedFallToUniform);
+        // Returned field is uniform — all elements equal.
+        let first = outcome.aq_field[0];
+        for &v in &outcome.aq_field {
+            assert!((v - first).abs() < 1e-6);
+        }
     }
 
     /// Smart gate at high distance: never refines (refinement gated by
