@@ -2,6 +2,58 @@
 
 ## [Unreleased]
 
+### Persistent EPF chain — saves ~65 ms/encode at 1024² (`710f760c`)
+
+Add persistent variants of EPF step 1 / step 2 launches plus an
+`upload_inv_sigma` helper to GpuEncoder. Wire into
+`run_pipeline_with_qac` so the entire pipeline stays GPU-resident
+through XYB → DCT → quantize → dequant → IDCT → scatter →
+gab_smooth → EPF → xyb_to_linear; only the final 4 MB linear-RGB
+download survives.
+
+Quality is bit-for-bit identical (1.3456 / 1.5400 / 1.5012 in
+butteraugli_refinement_demo before and after the perf change).
+Timing on a 1024×1024 CLIC photo at d=1.0, RTX 5070:
+
+  Before:  111 ms/iter (12 MB XYB download + Vec-based EPF chain
+                         + Vec-based xyb_to_linear)
+  After:    46 ms/iter (fully persistent, single 4 MB output download)
+  Saving:   65 ms/iter (-58%)
+
+Total demo time: 334 ms → 138 ms.
+
+### Refinement loop regression at high distances (observed, not yet fixed)
+
+Empirical scores from `butteraugli_refinement_demo` at d ∈ {1.0,
+2.0, 4.0} reveal a real quality regression in the refinement loop's
+qac-domain adaptation that wasn't visible at d=1.0:
+
+| distance | uniform | initial AQ | refined AQ |
+|---|---|---|---|
+| 1.0 | 1.3456 | 1.5400 (+14.4%) | 1.5012 (-2.5% vs AQ) |
+| 2.0 | 2.1525 | 2.4736 (+14.9%) | 2.5322 (+2.4% vs AQ) |
+| 4.0 | 3.4407 | 3.4395 (-0.0%) | 4.1164 (+19.7% vs AQ) |
+
+At d=2.0 refinement *worsens* AQ slightly (+2.4%); at d=4.0 it
+**catastrophically regresses** (+19.7% — back almost to the d=4.0
+uniform score from a +0% AQ baseline).
+
+Likely root cause: the deviation bounds (`sqrt(250/ratio)`) were
+designed for upstream's float-qf domain where qf is in `[~0.3, 1.5]`
+and clamped to integer raw_quant `[1, 255]`. In our qac-domain
+adaptation the integer-step bump is neutered and there's no integer
+ceiling, so per-iteration `qac *= diff` compounds without limit
+when `diff > 1`. At d=4.0 most blocks have `tile_dist > 4` so
+`diff = tile_dist / 4 > 1`, causing systematic upward drift each
+iteration. The refined qac field then diverges far from the
+calibration-tested range and quality degrades.
+
+Fix candidates (none implemented yet): tighter deviation-bound
+clamping, qac↔qf-float conversion at the loop boundary, or
+disabling refinement for our pipeline until it gains the AC
+strategy + CfL features that absorb the variance upstream's qf
+range assumes.
+
 ### LossyEncoder pipeline gap closure: gab_smooth + EPF + IEC sRGB linearization (`691c0aab`, `d9a201ca`, `d1738660`)
 
 Three commits that drop the `butteraugli_refinement_demo` baseline at
