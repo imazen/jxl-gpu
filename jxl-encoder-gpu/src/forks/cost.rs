@@ -350,6 +350,185 @@ pub fn compute_scaled_constants(
     (info_loss_mul, cost_delta, zeros_mul)
 }
 
+/// Batched per-block cost evaluator for DCT8 — the inner loop of
+/// upstream's `estimate_entropy_full` for one strategy.
+///
+/// Composes the existing leaf primitives:
+/// 1. `dct_8x8_blocks` × 3 (forward DCT for X/Y/B)
+/// 2. `entropy_coeffs_pixel_blocks_gpu` × 3 (per-channel entropy +
+///    error-coefficient writeback). Y first (no CfL), then X with
+///    `cmap_factor = ytox_ratio(ytox)`, then B with `cmap_factor =
+///    ytob_ratio(ytob)`.
+/// 3. `idct_8x8_blocks` × 3 (IDCT of error coefficients to get
+///    pixel-domain reconstruction error)
+/// 4. `pixel_loss_blocks_gpu` × 3 (per-channel masked 8th-power norm)
+/// 5. host: `combine_pixel_loss_3channel` (CHANNEL_MUL-weighted sum)
+/// 6. host: `extract_per_block_entropy` × 3 + `sum_per_block_entropy_3channel`
+/// 7. host: `per_block_total_cost(entropy_total, pixel_loss_total, entropy_mul)`
+///
+/// Total: ~12 GPU launches per call regardless of `n_blocks`.
+///
+/// Returns `Vec<f32>` of length `n_blocks` — the per-block cost for
+/// the AC strategy search to compare against other candidates.
+///
+/// **Caveat**: the underlying `entropy_coeffs_pixel_blocks_gpu`
+/// kernel currently only computes the entropy_sum + nzeros_sum
+/// columns of the 4-stat output (info_loss_sum + info_loss2_sum
+/// stay 0). The cost formula here uses entropy_sum directly without
+/// the upstream `info_loss_mul * info_loss + zeros_mul * nzeros`
+/// re-weighting. For full upstream parity those terms need to be
+/// added — currently a simplification on top of the leaves. The
+/// `scaled_constants` argument is included in the signature so the
+/// caller documents intent, but `info_loss_mul` and `zeros_mul`
+/// are not yet consumed (the field is reserved for the future
+/// extension).
+///
+/// **All weights / inv_weights buffers are flat replicated
+/// across `n_blocks`** — caller passes per-block (64-float) tables;
+/// this function expands them internally to `n_blocks * 64`. The
+/// mask is image-plane: `mask_row_base[b]` is the start offset of
+/// block `b` in `mask_image_plane` (typically
+/// `by * 8 * padded_width + bx * 8`); `mask_stride` is the
+/// padded_width of the mask plane.
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    pixel_blocks_x: &[f32],
+    pixel_blocks_y: &[f32],
+    pixel_blocks_b: &[f32],
+    weights_x_per_block: &[f32; 64],
+    weights_y_per_block: &[f32; 64],
+    weights_b_per_block: &[f32; 64],
+    inv_weights_x_per_block: &[f32; 64],
+    inv_weights_y_per_block: &[f32; 64],
+    inv_weights_b_per_block: &[f32; 64],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    mask_image_plane: &[f32],
+    mask_row_base: &[u32],
+    mask_stride: u32,
+    scaled_constants: (f32, f32, f32),
+    entropy_mul: f32,
+) -> Vec<f32> {
+    use crate::forks::cfl::{ytob_ratio, ytox_ratio};
+
+    debug_assert!(pixel_blocks_x.len().is_multiple_of(64));
+    debug_assert_eq!(pixel_blocks_x.len(), pixel_blocks_y.len());
+    debug_assert_eq!(pixel_blocks_x.len(), pixel_blocks_b.len());
+    let n_blocks = pixel_blocks_x.len() / 64;
+    debug_assert_eq!(mask_row_base.len(), n_blocks);
+    let (_info_loss_mul, cost_delta, _zeros_mul) = scaled_constants;
+
+    // Step 1: forward DCT8 each channel.
+    let dct_x = enc.dct_8x8_blocks(pixel_blocks_x);
+    let dct_y = enc.dct_8x8_blocks(pixel_blocks_y);
+    let dct_b = enc.dct_8x8_blocks(pixel_blocks_b);
+
+    // Replicate per-block weight + inv_weight tables.
+    let mut weights_x = Vec::with_capacity(n_blocks * 64);
+    let mut weights_y = Vec::with_capacity(n_blocks * 64);
+    let mut weights_b = Vec::with_capacity(n_blocks * 64);
+    let mut inv_weights_x = Vec::with_capacity(n_blocks * 64);
+    let mut inv_weights_y = Vec::with_capacity(n_blocks * 64);
+    let mut inv_weights_b = Vec::with_capacity(n_blocks * 64);
+    for _ in 0..n_blocks {
+        weights_x.extend_from_slice(weights_x_per_block);
+        weights_y.extend_from_slice(weights_y_per_block);
+        weights_b.extend_from_slice(weights_b_per_block);
+        inv_weights_x.extend_from_slice(inv_weights_x_per_block);
+        inv_weights_y.extend_from_slice(inv_weights_y_per_block);
+        inv_weights_b.extend_from_slice(inv_weights_b_per_block);
+    }
+
+    // Step 2: per-channel entropy + error-coef writeback.
+    let (y_stats, y_err) = entropy_coeffs_pixel_blocks_gpu(
+        enc,
+        &dct_y,
+        &dct_y,
+        &weights_y,
+        &inv_weights_y,
+        64,
+        0.0,
+        quant_y,
+        cost_delta,
+    );
+    let (x_stats, x_err) = entropy_coeffs_pixel_blocks_gpu(
+        enc,
+        &dct_x,
+        &dct_y,
+        &weights_x,
+        &inv_weights_x,
+        64,
+        ytox_ratio(ytox),
+        quant_x,
+        cost_delta,
+    );
+    let (b_stats, b_err) = entropy_coeffs_pixel_blocks_gpu(
+        enc,
+        &dct_b,
+        &dct_y,
+        &weights_b,
+        &inv_weights_b,
+        64,
+        ytob_ratio(ytob),
+        quant_b,
+        cost_delta,
+    );
+
+    // Step 3: IDCT of error coefficients per channel.
+    let pix_err_x = enc.idct_8x8_blocks(&x_err);
+    let pix_err_y = enc.idct_8x8_blocks(&y_err);
+    let pix_err_b = enc.idct_8x8_blocks(&b_err);
+
+    // Step 4: per-channel masked 8th-power pixel loss.
+    // mask_offset = MASK_CHANNEL_OFFSET[c]; block_w = block_h = 8 for DCT8.
+    let loss_x = pixel_loss_blocks_gpu(
+        enc,
+        &pix_err_x,
+        mask_image_plane,
+        mask_row_base,
+        mask_stride,
+        MASK_CHANNEL_OFFSET[0],
+        8,
+        8,
+    );
+    let loss_y = pixel_loss_blocks_gpu(
+        enc,
+        &pix_err_y,
+        mask_image_plane,
+        mask_row_base,
+        mask_stride,
+        MASK_CHANNEL_OFFSET[1],
+        8,
+        8,
+    );
+    let loss_b = pixel_loss_blocks_gpu(
+        enc,
+        &pix_err_b,
+        mask_image_plane,
+        mask_row_base,
+        mask_stride,
+        MASK_CHANNEL_OFFSET[2],
+        8,
+        8,
+    );
+
+    // Step 5: combine per-channel losses via CHANNEL_MUL.
+    let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
+
+    // Step 6: extract per-block entropy from each channel and sum.
+    let entropy_x = extract_per_block_entropy(&x_stats, n_blocks);
+    let entropy_y = extract_per_block_entropy(&y_stats, n_blocks);
+    let entropy_b = extract_per_block_entropy(&b_stats, n_blocks);
+    let entropy_total = sum_per_block_entropy_3channel(&entropy_x, &entropy_y, &entropy_b);
+
+    // Step 7: final cost.
+    per_block_total_cost(&entropy_total, &pixel_loss_total, entropy_mul)
+}
+
 /// Per-block entropy estimation in the pixel-domain — wraps
 /// [`GpuEncoder::entropy_coeffs_pixel_blocks`].
 ///
@@ -459,6 +638,44 @@ pub fn pixel_loss_blocks_gpu<R: Runtime>(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_estimate_entropy_full_dct8_batch_gpu_zero_input() {
+        // All-zero pixels → zero DCT → zero entropy + zero pixel loss
+        // → zero per-block cost. Smoke test that the orchestrator
+        // composes correctly end-to-end.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let n_blocks = 4_usize;
+        let zeros = alloc::vec![0.0_f32; n_blocks * 64];
+        let weights_one = [1.0_f32; 64];
+        // mask plane is 16x16 (= 2x2 blocks) with all 1.0
+        let mask = alloc::vec![1.0_f32; 16 * 16];
+        let mask_row_base: alloc::vec::Vec<u32> = (0..n_blocks)
+            .map(|b| {
+                let by = (b / 2) as u32;
+                let bx = (b % 2) as u32;
+                by * 8 * 16 + bx * 8
+            })
+            .collect();
+
+        let costs = estimate_entropy_full_dct8_batch_gpu(
+            &enc,
+            &zeros, &zeros, &zeros,
+            &weights_one, &weights_one, &weights_one,
+            &weights_one, &weights_one, &weights_one,
+            1.0, 1.0, 1.0,
+            0, 0,
+            &mask, &mask_row_base, 16,
+            COEFF_DOMAIN_CONSTANTS,
+            1.0,
+        );
+        assert_eq!(costs.len(), n_blocks);
+        for &c in &costs {
+            assert!(c.abs() < 1e-3, "cost should be ~0 on zero input, got {c}");
+        }
+    }
 
     #[test]
     fn test_extract_per_block_entropy_takes_column_zero() {
