@@ -173,6 +173,54 @@ DCT64x64 = 64 → w=4.0 capped. For DCT8 the weight is a no-op
 (uniform per-channel scaling doesn't affect relative ranking). **Mixed-strategy
 reconstruct on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_mixed_strategy_gpu` accepts a heterogeneous `&[BlockRecipe]` (each carrying `bx, by, raw_strategy, coeffs`), groups by strategy, emits ≤ 15 GPU launches per image (one per supported strategy that appears in the recipes). AFV0-3 still route through `forks::afv` separately. **`compute_epf_sharpness_dct8_gpu` fully composed as of 2026-05-07** — runs reconstruct → gaborish (opt) → per-candidate EPF + L2 → two-pass selection on GPU end-to-end for the DCT8-only path. **All per-strategy LLF restoration helpers ported as of 2026-05-07** — `forks::reconstruct::restore_llf_*` covers DCT16×8, DCT8×16, DCT16×16, DCT32×32, DCT32×16, DCT16×32, DCT64×64, DCT64×32, DCT32×64 (15 unit tests), each as a pure-scalar host helper. The 1×1-LLF strategies (IDENTITY/DCT2X2/DCT4×*/AFV0-3) reuse `restore_dct8_dc_override`'s simple DC formula. **AdjustQuantBlockAC fully ported as host helpers as of 2026-05-07** — pre-scan + all 6 heuristics A-F + orchestrator (`forks::quantize::adjust_quant_block_ac_host`) match upstream. A future `#[cube]` kernel can transcribe the now-standalone heuristics for per-block-parallel execution without further reverse-engineering. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **DCT8-only reconstruct path on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_xyb_dct8_only_gpu` composes dequant + DC override + IDCT + scatter into 4 GPU launches per image. Sufficient for the all-blocks-are-DCT8 case (common for straightforward distance values). **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
 
+## Phase 6 — Butteraugli quant-refinement loop
+
+End-to-end GPU-substituted iterative quant refinement, mirroring upstream
+`jxl_encoder::vardct::butteraugli_loop::butteraugli_refine_quant_field`.
+Gated behind the new `butteraugli-loop` cargo feature. Lives in
+`forks::butteraugli_loop`.
+
+| Component | Status | Notes |
+|---|---|---|
+| `ButteraugliLoopGpu<R>` wrapper | ✓ | Persistent `butteraugli_gpu::Butteraugli` instance; `set_reference` once + `compute_with_reference` per iter for cached-opsin re-use |
+| `DeviationBounds::compute` | ✓ | qf_lower/qf_higher derived from initial float qf (`sqrt(250 / ratio)` formula). Mirrors upstream lines 105-122 exactly. |
+| `compute_tile_distances` + `AcStrategyInfo<'_>` | ✓ | AC-strategy-aware 16th-power-mean diffmap reduction, `K_TILE_NORM = 1.2`. Mirrors upstream lines 230-271. |
+| `clamp_toward_initial` | ✓ | kOriginalComparisonRound `K_INIT_MUL = 0.6` blend toward initial qf. Mirrors upstream lines 314-336. |
+| `adjust_quant_field` | ✓ | Per-iter `cur_pow=0.2` / `cur_pow=0.0` regimes with integer-quantizer-step minimum bump. Mirrors upstream lines 338-406. |
+| `refine_quant_field_one_iter` + `RefineConfig` | ✓ | Composes the four helpers in upstream's per-iter order. Returns `tile_dist` for caller diagnostics. |
+| `refine_aq_field_gpu` + `RefineIterTrace` | ✓ | Multi-iter loop wiring `LossyEncoder::encode_one_adaptive` + the host-side helpers. **Qac-domain adaptation:** integer-step bump is neutered (no integer rounding in our pipeline). |
+| `linear_f32_to_srgb_u8` + `linear_planar_to_srgb_u8_interleaved` | ✓ | IEC 61966-2-1 piecewise transfer matching butteraugli-gpu's `srgb_byte_to_linear` inverse. Caller passes ORIGINAL sRGB U8 bytes as ref to avoid transfer-function-mismatch score inflation. |
+| `examples/butteraugli_refinement_demo.rs` | ✓ | Turnkey demo on a CLIC2025 photo. |
+
+**Test coverage:** 21 unit tests pass (4 helpers individually + per-iter
+composition + 3 sRGB conversion + 1 CUDA end-to-end smoke test on a 64×64
+gradient). Loop runs at ~217 ms/iter on a 1024×1024 image (RTX 5070,
+CUDA 13.2).
+
+**Empirical finding (2026-05-08 demo run, 1024×1024 CLIC photo, d=1.0,
+iters=2):** baseline butteraugli is ~8.9 (target ~1.0). The loop runs
+end-to-end correctly but score barely moves because the underlying
+LossyEncoder pipeline has known gaps:
+
+- `run_pipeline_with_qac` is DCT8-only (no DCT16/32/64 strategy selection)
+- No EPF in the LossyEncoder reconstruction path
+- No CfL (chroma-from-luma)
+- Input linearization uses simplified `powf(2.4)`, not IEC piecewise
+
+The loop infrastructure is complete and ready; it'll show real value once
+the underlying pipeline gaps land. Score reduction at the current
+baseline is dominated by these missing stages, not by the refinement
+algorithm itself.
+
+**G5.1 status:** the four host-side helpers are pure line-by-line ports
+of inline upstream code (not separately-callable upstream functions);
+they're validated by hand-derived unit tests covering edge cases
+(uniform inputs, single peaks, AC-strategy splat, edge clipping,
+deviation-bounds extremes, integer-step bump). Parity validation against
+the full upstream loop awaits either (a) upstream extraction +
+`__internals` re-export, or (b) a full integration harness running both
+encoders on the same image and comparing final quant fields.
+
 ## Coverage summary
 
 - Phase 1: 7 of 7 ✓ (xyb fwd/inv, gab, gaborish_5x5, mask1x1, denoise, pad_plane)
