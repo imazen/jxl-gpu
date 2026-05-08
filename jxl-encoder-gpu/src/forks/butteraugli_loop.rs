@@ -410,6 +410,92 @@ pub fn adjust_quant_field(
     }
 }
 
+/// Constant per-encode parameters for the refinement loop. Holds the
+/// inputs that don't change across iterations (image dims, block grid,
+/// AC strategy info, target_distance, iters, deviation bounds). Built
+/// once at the top of the loop; passed to every per-iteration call.
+///
+/// The `info` borrow keeps the AC strategy slices alive for the duration
+/// of the loop; callers pass `&dct8_only_info(...)` or a real strategy
+/// view backed by their AcStrategyMap state.
+pub struct RefineConfig<'a> {
+    pub width: usize,
+    pub height: usize,
+    pub xsize_blocks: usize,
+    pub ysize_blocks: usize,
+    pub info: AcStrategyInfo<'a>,
+    pub target_distance: f32,
+    /// Total iterations the loop will run. Used to detect the final
+    /// "compare-only" iteration (no adjustment).
+    pub iters: usize,
+    pub bounds: DeviationBounds,
+}
+
+/// One iteration of the host-side quant-field refinement.
+///
+/// Composes the four helpers in the order upstream uses (lines 230-406):
+/// 1. `compute_tile_distances(diffmap)` → per-block tile distances
+/// 2. If `iter == cfg.iters`, return early (last iter is compare-only)
+/// 3. If `iter == K_ORIGINAL_COMPARISON_ROUND` (==1),
+///    `clamp_toward_initial` to prevent oscillation
+/// 4. `adjust_quant_field` with the iter-appropriate cur_pow regime
+///
+/// `inv_global_scale` and `quantizer_scale` come from the CURRENT
+/// iteration's [`jxl_encoder::vardct::frame::DistanceParams`] — recomputed
+/// from `quant_field_float` at the top of each iteration via
+/// `DistanceParams::compute_from_quant_field` BEFORE this call.
+///
+/// Returns the per-block `tile_dist` slice (caller may log it for
+/// per-iteration diagnostics; mirrors upstream's `bfly/iter` debug_rect).
+#[allow(clippy::too_many_arguments)]
+pub fn refine_quant_field_one_iter(
+    quant_field_float: &mut [f32],
+    initial_quant_field_float: &[f32],
+    diffmap: &[f32],
+    iter: usize,
+    inv_global_scale: f32,
+    quantizer_scale: f32,
+    cfg: &RefineConfig<'_>,
+) -> Vec<f32> {
+    debug_assert_eq!(quant_field_float.len(), initial_quant_field_float.len());
+    debug_assert_eq!(
+        quant_field_float.len(),
+        cfg.xsize_blocks * cfg.ysize_blocks
+    );
+    debug_assert_eq!(diffmap.len(), cfg.width * cfg.height);
+
+    let tile_dist = compute_tile_distances(
+        diffmap,
+        cfg.width,
+        cfg.height,
+        cfg.xsize_blocks,
+        cfg.ysize_blocks,
+        &cfg.info,
+    );
+
+    // Last iteration is compare-only — no adjustment. Caller still gets
+    // tile_dist for logging.
+    if iter == cfg.iters {
+        return tile_dist;
+    }
+
+    if iter == K_ORIGINAL_COMPARISON_ROUND {
+        clamp_toward_initial(quant_field_float, initial_quant_field_float, cfg.bounds);
+    }
+
+    adjust_quant_field(
+        quant_field_float,
+        &tile_dist,
+        cfg.target_distance,
+        iter,
+        cfg.bounds,
+        inv_global_scale,
+        quantizer_scale,
+    );
+
+    tile_dist
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,6 +745,102 @@ mod tests {
         adjust_quant_field(&mut qf, &tile_dist, 1.0, 0, bounds, 1.0, 1.0);
         // diff = 10 → qf = 100; clamped to 50.
         assert_eq!(qf[0], 50.0);
+    }
+
+    // ===== refine_quant_field_one_iter =====
+
+    /// Helper: build a uniform-diffmap test config.
+    fn make_uniform_cfg<'a>(
+        is_first: &'a [bool],
+        cx: &'a [u8],
+        cy: &'a [u8],
+        target_distance: f32,
+        iters: usize,
+        bounds: DeviationBounds,
+    ) -> RefineConfig<'a> {
+        RefineConfig {
+            width: 16,
+            height: 16,
+            xsize_blocks: 2,
+            ysize_blocks: 2,
+            info: dct8_only_info(is_first, cx, cy),
+            target_distance,
+            iters,
+            bounds,
+        }
+    }
+
+    /// Final iteration (iter == iters): no adjustment, only return tile_dist.
+    #[test]
+    fn test_refine_one_iter_final_no_adjustment() {
+        let n = 4;
+        let mut qf = alloc::vec![1.0_f32; n];
+        let init = qf.clone();
+        let diffmap = alloc::vec![0.5_f32; 16 * 16];
+        let (is_first, cx, cy) = dct8_only_storage(n);
+        let bounds = DeviationBounds {
+            qf_lower: 0.0,
+            qf_higher: 100.0,
+        };
+        let cfg = make_uniform_cfg(&is_first, &cx, &cy, 1.0, 2, bounds);
+        let td = refine_quant_field_one_iter(&mut qf, &init, &diffmap, 2, 1.0, 1.0, &cfg);
+        // qf unchanged
+        for &v in &qf {
+            assert_eq!(v, 1.0);
+        }
+        // td reflects compute_tile_distances result
+        for &v in &td {
+            assert!((v - K_TILE_NORM * 0.5).abs() < 1e-5);
+        }
+    }
+
+    /// iter == 1 fires the kOriginalComparisonRound clamp BEFORE the
+    /// adjustment. Verify by setting cur << init so clamp bumps qf up,
+    /// then a uniform diff < target keeps the bump (cur_pow=0.2 softens).
+    #[test]
+    fn test_refine_one_iter_iter1_applies_clamp() {
+        let n = 4;
+        let mut qf = alloc::vec![0.4_f32; n];
+        let init = alloc::vec![1.0_f32; n];
+        // Diff = 0.5 (< target) → cur_pow=0.2 path softens by 0.5^0.2.
+        let diffmap = alloc::vec![0.5_f32 / K_TILE_NORM; 16 * 16];
+        let (is_first, cx, cy) = dct8_only_storage(n);
+        let bounds = DeviationBounds {
+            qf_lower: 0.0,
+            qf_higher: 100.0,
+        };
+        let cfg = make_uniform_cfg(&is_first, &cx, &cy, 1.0, 3, bounds);
+        let _td = refine_quant_field_one_iter(&mut qf, &init, &diffmap, 1, 1.0, 1.0, &cfg);
+        // After clamp: qf bumped to 0.4 * 0.4 + 0.6 * 1.0 = 0.76
+        // After adjust (diff=0.5, cur_pow=0.2): qf *= 0.5^0.2 ≈ 0.8706
+        // Final: 0.76 * 0.8706 ≈ 0.6617
+        let expected = 0.76_f32 * 0.5_f32.powf(0.2);
+        for &v in &qf {
+            assert!((v - expected).abs() < 1e-4, "got {v} expected {expected}");
+        }
+    }
+
+    /// iter == 0 does NOT fire the clamp (only iter == 1 does).
+    /// Verify by setting cur << init: without clamp, qf stays at cur
+    /// then adjust softens.
+    #[test]
+    fn test_refine_one_iter_iter0_no_clamp() {
+        let n = 4;
+        let mut qf = alloc::vec![0.4_f32; n];
+        let init = alloc::vec![1.0_f32; n];
+        let diffmap = alloc::vec![0.5_f32 / K_TILE_NORM; 16 * 16];
+        let (is_first, cx, cy) = dct8_only_storage(n);
+        let bounds = DeviationBounds {
+            qf_lower: 0.0,
+            qf_higher: 100.0,
+        };
+        let cfg = make_uniform_cfg(&is_first, &cx, &cy, 1.0, 3, bounds);
+        let _td = refine_quant_field_one_iter(&mut qf, &init, &diffmap, 0, 1.0, 1.0, &cfg);
+        // No clamp: qf stays 0.4. Then adjust: 0.4 * 0.5^0.2 ≈ 0.348
+        let expected = 0.4_f32 * 0.5_f32.powf(0.2);
+        for &v in &qf {
+            assert!((v - expected).abs() < 1e-4, "got {v} expected {expected}");
+        }
     }
 
     #[cfg(feature = "cuda")]
