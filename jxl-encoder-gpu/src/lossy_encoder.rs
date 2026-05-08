@@ -905,21 +905,63 @@ impl<R: Runtime> LossyEncoder<R> {
         // libjxl's decoder pipeline runs gab_smooth on the reconstructed
         // XYB before xyb_to_linear; without it, the gaborish
         // pre-sharpening from the encoder side persists in the output
-        // and the reconstruction is over-sharp/blocky. Skipping this
-        // was a primary contributor to the ~8.7 butteraugli baseline
-        // observed in `butteraugli_refinement_demo` at d=1.0.
+        // and the reconstruction is over-sharp/blocky.
         let (gw_c, gw1, gw2) = crate::forks::reconstruct::gab_weights();
         let recon_x_p = enc.gab_smooth_persistent(&recon_x_p, gw_c, gw1, gw2);
         let recon_y_p = enc.gab_smooth_persistent(&recon_y_p, gw_c, gw1, gw2);
         let recon_b_p = enc.gab_smooth_persistent(&recon_b_p, gw_c, gw1, gw2);
 
+        // EPF chain (decoder edge-preserving filter). Runs after
+        // gab_smooth on the reconstructed XYB planes, before
+        // xyb_to_linear.
+        //
+        // Qac→quant_field mapping: our pipeline carries per-block
+        // float qac in `qac_vec`. EPF's compute_inv_sigma_map expects
+        // u8 raw_quant + scalar quant_scale; the formula's "effective"
+        // quant scale is `quant_scale * raw_quant`. In upstream at
+        // distance=1.0 this product equals `qf_float ≈ 0.39`; our
+        // `qac ≈ 0.765` is 2× of that (because `K_AC_QUANT = 0.765` vs
+        // upstream's `q = 0.39`). We map `u8_qf = clamp(qac * 50,
+        // 1, 255)` and `quant_scale = 0.01`, giving
+        // `quant_scale * raw_quant ≈ qac / 2 ≈ qf_float_equivalent`.
+        // Sharpness is uniform 4 (mid LUT index, libjxl's default
+        // when per-block sharpness selection is not run).
+        let nb_blocks = (self.padded_width / 8) as usize
+            * (self.padded_height / 8) as usize;
+        debug_assert_eq!(qac_vec.len(), nb_blocks);
+        let qf_u8: Vec<u8> = qac_vec
+            .iter()
+            .map(|&q| (q * 50.0).round().clamp(1.0, 255.0) as u8)
+            .collect();
+        let sharpness = vec![4_u8; nb_blocks];
+        let inv_sigma = crate::forks::epf::compute_inv_sigma_map(
+            &qf_u8,
+            &sharpness,
+            0.01,
+            (self.padded_width / 8) as usize,
+            (self.padded_height / 8) as usize,
+        );
+        // Download persistent XYB planes (one upload per encode is
+        // unavoidable here because apply_epf_chain_gpu is Vec-based).
+        let xyb_x_vec = enc.download_plane(&recon_x_p);
+        let xyb_y_vec = enc.download_plane(&recon_y_p);
+        let xyb_b_vec = enc.download_plane(&recon_b_p);
+        let [post_x, post_y, post_b] = crate::forks::epf::apply_epf_chain_gpu(
+            enc,
+            &xyb_x_vec,
+            &xyb_y_vec,
+            &xyb_b_vec,
+            &inv_sigma,
+            2, // 2 iters: step 1 + step 2 (step 0 is 3+ iters)
+            self.padded_width,
+            self.padded_height,
+            self.padded_width / 8,
+            self.padded_height / 8,
+        );
+
         let (rgb_r, rgb_g, rgb_b) =
-            enc.xyb_to_linear_rgb_planar_persistent(&recon_x_p, &recon_y_p, &recon_b_p);
-        (
-            enc.download_plane(&rgb_r),
-            enc.download_plane(&rgb_g),
-            enc.download_plane(&rgb_b),
-        )
+            enc.xyb_to_linear_rgb_planar(&post_x, &post_y, &post_b);
+        (rgb_r, rgb_g, rgb_b)
     }
 }
 

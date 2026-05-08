@@ -46,8 +46,20 @@ fn main() {
     let pixels: Vec<u8> = img.into_raw();
     let n = (w * h) as usize;
 
-    // Match LossyEncoder's interpretation of input: powf(2.4) gamma.
-    let to_linear = |c: u8| (c as f32 / 255.0).powf(2.4);
+    // Use the same IEC 61966-2-1 piecewise transfer that butteraugli-gpu
+    // uses internally. Linearizing input via simplified powf(2.4) instead
+    // creates an asymmetry: recon → IEC sRGB U8, butteraugli linearizes
+    // via IEC, original via IEC — so the pipeline operating on a
+    // gamma-2.4 linear interpretation doesn't match what butteraugli
+    // sees as ground truth.
+    let to_linear = |c: u8| -> f32 {
+        let f = c as f32 / 255.0;
+        if f <= 0.04045 {
+            f / 12.92
+        } else {
+            ((f + 0.055) / 1.055).powf(2.4)
+        }
+    };
     let mut r = Vec::with_capacity(n);
     let mut g = Vec::with_capacity(n);
     let mut b = Vec::with_capacity(n);
