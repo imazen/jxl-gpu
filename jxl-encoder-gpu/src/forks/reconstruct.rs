@@ -1493,7 +1493,15 @@ pub fn reconstruct_xyb_dct8_only_gpu<R: Runtime>(
 
 /// Decoder-side gab smoothing weights from libjxl epf.cc / loop_filter.h.
 /// Duplicated bit-for-bit from upstream `gab_smooth`.
-fn gab_weights() -> (f32, f32, f32) {
+///
+/// Returns `(w_center, w1, w2)` — center weight, edge-neighbor weight,
+/// corner-neighbor weight. All four edges share `w1`, all four corners
+/// share `w2`. Sum is 1.0 (energy-preserving).
+///
+/// Public so callers chaining `GpuEncoder::gab_smooth_persistent` (e.g.,
+/// `LossyEncoder`) can pass the same constants the upstream decoder
+/// would produce.
+pub fn gab_weights() -> (f32, f32, f32) {
     let w1_base = 0.104_699_57_f32 * 1.1;
     let w2_base = 0.055_680_54_f32 * 1.1;
     let div = 1.0 + 4.0 * (w1_base + w2_base);

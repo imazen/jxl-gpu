@@ -899,6 +899,20 @@ impl<R: Runtime> LossyEncoder<R> {
             enc.scatter_blocks_persistent(&recon_y_b, self.padded_width, self.padded_height, 8, 8);
         let recon_b_p =
             enc.scatter_blocks_persistent(&recon_b_b, self.padded_width, self.padded_height, 8, 8);
+
+        // Decoder-side gab_smooth: 3x3 plus-shaped inverse of the
+        // forward `gaborish_5x5` applied earlier in this pipeline.
+        // libjxl's decoder pipeline runs gab_smooth on the reconstructed
+        // XYB before xyb_to_linear; without it, the gaborish
+        // pre-sharpening from the encoder side persists in the output
+        // and the reconstruction is over-sharp/blocky. Skipping this
+        // was a primary contributor to the ~8.7 butteraugli baseline
+        // observed in `butteraugli_refinement_demo` at d=1.0.
+        let (gw_c, gw1, gw2) = crate::forks::reconstruct::gab_weights();
+        let recon_x_p = enc.gab_smooth_persistent(&recon_x_p, gw_c, gw1, gw2);
+        let recon_y_p = enc.gab_smooth_persistent(&recon_y_p, gw_c, gw1, gw2);
+        let recon_b_p = enc.gab_smooth_persistent(&recon_b_p, gw_c, gw1, gw2);
+
         let (rgb_r, rgb_g, rgb_b) =
             enc.xyb_to_linear_rgb_planar_persistent(&recon_x_p, &recon_y_p, &recon_b_p);
         (
