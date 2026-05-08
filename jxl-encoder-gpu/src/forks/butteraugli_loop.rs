@@ -611,11 +611,18 @@ pub struct RefineIterTrace {
 /// `clamp_toward_initial`, `adjust_quant_field`) operate identically.
 ///
 /// **Callers**: pass `r/g/b` as linear-light f32 planes (the same input
-/// you'd hand to [`LossyEncoder::encode_one_adaptive`]) plus an initial
-/// `aq_field` (e.g., from [`LossyEncoder::compute_aq_field`]). Returns
-/// the refined per-block `aq_field` after `iters + 1` iterations.
+/// you'd hand to [`LossyEncoder::encode_one_adaptive`]) plus
+/// `ref_srgb` — the **actual original sRGB U8 bytes** for the
+/// butteraugli reference. The reference must be the source bytes, not
+/// a re-encoding of the linear planes — round-tripping through any
+/// transfer function (especially the simplified `powf(2.4)` ↔ IEC
+/// piecewise asymmetry) inflates butteraugli scores even when the
+/// reconstruction is bit-perfect. See CLAUDE.md "PNG Color Metadata
+/// Causes Bogus Butteraugli Scores" for the same root-cause class.
 ///
-/// **`trace`**: optional per-iteration callback invoked with the
+/// Returns the refined per-block `aq_field` after `iters + 1` iterations.
+///
+/// **`trace`**: per-iteration callback invoked with the
 /// reconstruction's butteraugli score + tile distances. Pass `|_| ()`
 /// to ignore.
 #[allow(clippy::too_many_arguments)]
@@ -626,6 +633,7 @@ pub fn refine_aq_field_gpu<R: Runtime>(
     r: &[f32],
     g: &[f32],
     b: &[f32],
+    ref_srgb: &[u8],
     initial_aq_field: &[f32],
     target_distance: f32,
     iters: usize,
@@ -638,9 +646,15 @@ pub fn refine_aq_field_gpu<R: Runtime>(
     };
     let n_pixels = (width as usize) * (height as usize);
 
-    // Upload reference (original) sRGB once. Cached internally.
-    let ref_srgb = linear_planar_to_srgb_u8_interleaved(r, g, b, width as usize, height as usize);
-    bg.set_reference(&ref_srgb)?;
+    debug_assert_eq!(
+        ref_srgb.len(),
+        n_pixels * 3,
+        "ref_srgb must be {n_pixels} * 3 bytes"
+    );
+
+    // Upload reference (original) sRGB U8 once. Cached internally for
+    // the lifetime of all subsequent compute_with_reference calls.
+    bg.set_reference(ref_srgb)?;
 
     // Per-encode invariants: deviation bounds + AC strategy info.
     let bounds = DeviationBounds::compute(initial_aq_field);
@@ -1136,6 +1150,7 @@ mod tests {
         let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.5 * (i as f32 / n as f32)).collect();
         let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * (i as f32 / n as f32)).collect();
         let initial = lossy.compute_aq_field(&enc, &r, &g, &b, 1.0);
+        let ref_srgb = linear_planar_to_srgb_u8_interleaved(&r, &g, &b, 64, 64);
         let mut traces = alloc::vec![];
         let refined = refine_aq_field_gpu(
             &enc,
@@ -1144,6 +1159,7 @@ mod tests {
             &r,
             &g,
             &b,
+            &ref_srgb,
             &initial,
             1.0,
             2,
