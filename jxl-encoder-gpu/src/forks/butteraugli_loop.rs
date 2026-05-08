@@ -594,6 +594,76 @@ pub struct RefineIterTrace {
     pub tile_dist: Vec<f32>,
 }
 
+/// Empirically-derived distance threshold above which butteraugli
+/// refinement does not generalize as a quality win across the
+/// CLIC2025-1024 corpus. At `distance > REFINEMENT_DISTANCE_THRESHOLD`
+/// the corpus sweep showed mean refined butteraugli equal-to or
+/// worse-than the AQ baseline, with occasional severe per-image
+/// regressions (worst case: +1.021 score at d=4.0).
+///
+/// Source data (`/mnt/v/output/jxl-encoder-gpu/butteraugli-refinement-sweep/
+/// sweep_clic_8imgs_2026-05-08.log`):
+/// - d=1.0: refined wins on 5/8 images, mean -5.7% vs uniform
+/// - d=2.0: refined matches uniform on average (mixed wins/losses)
+/// - d=4.0: refined matches AQ exactly, no improvement
+///
+/// Use [`should_refine_at_distance`] to query, or [`refine_aq_field_gpu_auto`]
+/// for the full auto-gated wrapper.
+pub const REFINEMENT_DISTANCE_THRESHOLD: f32 = 1.5;
+
+/// Returns `true` when butteraugli refinement is empirically expected
+/// to improve quality at the given target distance. See
+/// [`REFINEMENT_DISTANCE_THRESHOLD`] for the source data.
+#[inline]
+pub fn should_refine_at_distance(distance: f32) -> bool {
+    distance <= REFINEMENT_DISTANCE_THRESHOLD
+}
+
+/// Distance-aware auto-gated wrapper around [`refine_aq_field_gpu`].
+///
+/// Calls the full refinement loop iff [`should_refine_at_distance`]
+/// returns true; otherwise returns `initial_aq_field` unchanged
+/// without spending GPU time on doomed iteration. The trace callback
+/// is NOT invoked when refinement is skipped (no per-iteration
+/// measurements happened).
+///
+/// Sets the production-ready default policy from the corpus sweep:
+/// refine at `distance ≤ 1.5`, skip otherwise. Override with
+/// [`refine_aq_field_gpu`] directly if you have content-specific
+/// knowledge that justifies a different threshold.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_aq_field_gpu_auto<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    lossy: &LossyEncoder<R>,
+    bg: &mut ButteraugliLoopGpu<R>,
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    ref_srgb: &[u8],
+    initial_aq_field: &[f32],
+    target_distance: f32,
+    iters: usize,
+    trace: impl FnMut(RefineIterTrace),
+) -> butteraugli_gpu::Result<Vec<f32>> {
+    if should_refine_at_distance(target_distance) {
+        refine_aq_field_gpu(
+            enc,
+            lossy,
+            bg,
+            r,
+            g,
+            b,
+            ref_srgb,
+            initial_aq_field,
+            target_distance,
+            iters,
+            trace,
+        )
+    } else {
+        Ok(initial_aq_field.to_vec())
+    }
+}
+
 /// End-to-end butteraugli refinement loop with GPU-substituted
 /// per-iteration distance compute.
 ///
@@ -1149,6 +1219,63 @@ mod tests {
             // 0.5 linear → ~0.7354 sRGB → ~187
             assert!((out[i * 3 + 2] as i32 - 188).abs() <= 1);
         }
+    }
+
+    // ===== should_refine_at_distance =====
+
+    #[test]
+    fn test_should_refine_at_distance_thresholds() {
+        // d <= 1.5 → refine; d > 1.5 → skip
+        assert!(should_refine_at_distance(0.5));
+        assert!(should_refine_at_distance(1.0));
+        assert!(should_refine_at_distance(1.5));
+        assert!(!should_refine_at_distance(1.6));
+        assert!(!should_refine_at_distance(2.0));
+        assert!(!should_refine_at_distance(4.0));
+        assert!(!should_refine_at_distance(8.0));
+        // Edge cases
+        assert!(should_refine_at_distance(0.0));
+        assert!(!should_refine_at_distance(f32::INFINITY));
+        // NaN: comparison returns false → not refined (safe default)
+        assert!(!should_refine_at_distance(f32::NAN));
+    }
+
+    /// Auto-gate at high distance returns initial unchanged with no
+    /// GPU work. Pure-CPU test (no cuda feature needed).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_refine_aq_field_gpu_auto_gates_off_at_high_distance() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, 64, 64);
+        let mut bg = ButteraugliLoopGpu::new(&enc, 64, 64);
+        let n = 64 * 64;
+        let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.5 * (i as f32 / n as f32)).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * (i as f32 / n as f32)).collect();
+        let ref_srgb = linear_planar_to_srgb_u8_interleaved(&r, &g, &b, 64, 64);
+        let initial = lossy.compute_aq_field(&enc, &r, &g, &b, 4.0); // high d
+
+        let mut trace_count = 0;
+        let refined = refine_aq_field_gpu_auto(
+            &enc,
+            &lossy,
+            &mut bg,
+            &r,
+            &g,
+            &b,
+            &ref_srgb,
+            &initial,
+            4.0, // > REFINEMENT_DISTANCE_THRESHOLD
+            2,
+            |_| trace_count += 1,
+        )
+        .expect("auto-gated refine");
+
+        // Gated off: no trace events, identical field.
+        assert_eq!(trace_count, 0);
+        assert_eq!(refined.len(), initial.len());
+        assert_eq!(refined, initial);
     }
 
     #[cfg(feature = "cuda")]
