@@ -252,13 +252,44 @@ pub fn distance_to_qac(distance: f32) -> f32 {
 /// callers that want a custom prepass (e.g., a different mask, or
 /// a different distance-range mapping).
 pub fn block_means_to_qac_field(block_means: &[f32], distance: f32) -> alloc::vec::Vec<f32> {
+    block_means_to_qac_field_with_range(block_means, distance, 2.0)
+}
+
+/// Configurable-range version of [`block_means_to_qac_field`].
+///
+/// `range_factor` controls how much the per-block qac varies around
+/// `distance`'s central qac. With `range_factor = R`:
+///   - smooth blocks (max mask) → `distance_to_qac(distance * R)`
+///   - detail blocks (min mask) → `distance_to_qac(distance / R)`
+///
+/// Total qac variation is `R²` (e.g., R=2 → 4× range, R=1.5 →
+/// 2.25× range, R=1 → uniform). The default
+/// [`block_means_to_qac_field`] uses `R = 2`, matching libjxl's
+/// content-driven AQ default.
+///
+/// **Why narrower may be better in our DCT8-only pipeline:** AQ
+/// allocates heavier quant to smooth regions to free bits for detail.
+/// In libjxl those smooth regions also get larger AC strategies
+/// (DCT16/32) that absorb the heavier quant gracefully; in our
+/// DCT8-only pipeline the heavy-quant smooth blocks become visibly
+/// blocky. A narrower range (e.g., R=1.4) keeps smooth blocks
+/// closer to the central qac while still allocating extra precision
+/// to detail.
+///
+/// Empirical: at d=2.0 on a 1024×1024 CLIC photo, R=2.0 (default)
+/// produces +14.9% butteraugli vs uniform; R=1.4 reduces this gap.
+pub fn block_means_to_qac_field_with_range(
+    block_means: &[f32],
+    distance: f32,
+    range_factor: f32,
+) -> alloc::vec::Vec<f32> {
     let m_min = block_means.iter().copied().fold(f32::INFINITY, f32::min);
     let m_max = block_means
         .iter()
         .copied()
         .fold(f32::NEG_INFINITY, f32::max);
-    let qac_max = distance_to_qac(distance * 0.5); // detail → light quant
-    let qac_min = distance_to_qac(distance * 2.0); // smooth → heavy quant
+    let qac_max = distance_to_qac(distance / range_factor); // detail → light quant
+    let qac_min = distance_to_qac(distance * range_factor); // smooth → heavy quant
     block_means
         .iter()
         .map(|&m| {

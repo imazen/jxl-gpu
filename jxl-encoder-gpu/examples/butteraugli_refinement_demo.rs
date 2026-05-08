@@ -21,7 +21,9 @@ fn main() {
     use jxl_encoder_gpu::forks::butteraugli_loop::{
         ButteraugliLoopGpu, linear_planar_to_srgb_u8_interleaved, refine_aq_field_gpu,
     };
-    use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
+    use jxl_encoder_gpu::lossy_encoder::{
+        LossyEncoder, block_means_to_qac_field_with_range, distance_to_qac,
+    };
 
     type Backend = cubecl::cuda::CudaRuntime;
     let enc: GpuEncoder<Backend> = GpuEncoder::new();
@@ -123,7 +125,19 @@ fn main() {
         lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
     let (score_aq, pn3_aq) = measure_score(&mut bg, &rec_r_aq, &rec_g_aq, &rec_b_aq);
     println!(
-        "  initial AQ:     score={score_aq:.4}  pnorm_3={pn3_aq:.4}  (qac min={qac_min:.3} max={qac_max:.3} mean={qac_mean:.3})\n"
+        "  initial AQ:     score={score_aq:.4}  pnorm_3={pn3_aq:.4}  (qac min={qac_min:.3} max={qac_max:.3} mean={qac_mean:.3})"
+    );
+
+    // Baseline 2b: narrow-range AQ (R=1.4 instead of default R=2.0).
+    let block_means = lossy.compute_block_mask_means(&enc, &r, &g, &b);
+    let narrow_aq = block_means_to_qac_field_with_range(&block_means, distance, 1.4);
+    let q_n_min = narrow_aq.iter().copied().fold(f32::INFINITY, f32::min);
+    let q_n_max = narrow_aq.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let (rec_r_n, rec_g_n, rec_b_n) =
+        lossy.encode_one_adaptive(&enc, &r, &g, &b, &narrow_aq);
+    let (score_n, pn3_n) = measure_score(&mut bg, &rec_r_n, &rec_g_n, &rec_b_n);
+    println!(
+        "  narrow AQ R=1.4: score={score_n:.4}  pnorm_3={pn3_n:.4}  (qac min={q_n_min:.3} max={q_n_max:.3})\n"
     );
 
     // Use the original sRGB U8 bytes directly as the butteraugli
@@ -192,21 +206,27 @@ fn main() {
     let refined_score = traces.last().map(|t| t.score).unwrap_or(0.0);
     let refined_pn3 = traces.last().map(|t| t.pnorm_3).unwrap_or(0.0);
     println!("\n=== Quality summary (lower butteraugli = better) ===");
-    println!("  uniform qac:    score={score_un:.4}  pnorm_3={pn3_un:.4}");
-    println!("  initial AQ:     score={score_aq:.4}  pnorm_3={pn3_aq:.4}");
-    println!("  refined AQ:     score={refined_score:.4}  pnorm_3={refined_pn3:.4}");
+    println!("  uniform qac:      score={score_un:.4}  pnorm_3={pn3_un:.4}");
+    println!("  initial AQ R=2.0: score={score_aq:.4}  pnorm_3={pn3_aq:.4}");
+    println!("  narrow AQ R=1.4:  score={score_n:.4}  pnorm_3={pn3_n:.4}");
+    println!("  refined AQ R=2.0: score={refined_score:.4}  pnorm_3={refined_pn3:.4}");
     println!(
-        "  AQ vs uniform:    {:+.4} ({:+.1}%)",
+        "  AQ R=2.0 vs uniform:   {:+.4} ({:+.1}%)",
         score_aq - score_un,
         100.0 * (score_aq - score_un) / score_un
     );
     println!(
-        "  refined vs AQ:    {:+.4} ({:+.1}%)",
+        "  AQ R=1.4 vs uniform:   {:+.4} ({:+.1}%)",
+        score_n - score_un,
+        100.0 * (score_n - score_un) / score_un
+    );
+    println!(
+        "  refined vs AQ R=2.0:   {:+.4} ({:+.1}%)",
         refined_score - score_aq,
         100.0 * (refined_score - score_aq) / score_aq
     );
     println!(
-        "  refined vs uniform: {:+.4} ({:+.1}%)",
+        "  refined vs uniform:    {:+.4} ({:+.1}%)",
         refined_score - score_un,
         100.0 * (refined_score - score_un) / score_un
     );
