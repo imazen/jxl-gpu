@@ -137,7 +137,18 @@ fn main() {
         lossy.encode_one_adaptive(&enc, &r, &g, &b, &narrow_aq);
     let (score_n, pn3_n) = measure_score(&mut bg, &rec_r_n, &rec_g_n, &rec_b_n);
     println!(
-        "  narrow AQ R=1.4: score={score_n:.4}  pnorm_3={pn3_n:.4}  (qac min={q_n_min:.3} max={q_n_max:.3})\n"
+        "  narrow AQ R=1.4: score={score_n:.4}  pnorm_3={pn3_n:.4}  (qac min={q_n_min:.3} max={q_n_max:.3})"
+    );
+
+    // Baseline 2c: AC strategy search (Phase A MVP — DCT8 vs DCT16x16).
+    let t_strat = std::time::Instant::now();
+    let (rec_r_s, rec_g_s, rec_b_s) =
+        lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, distance);
+    let dt_strat = t_strat.elapsed();
+    let (score_strat, pn3_strat) = measure_score(&mut bg, &rec_r_s, &rec_g_s, &rec_b_s);
+    println!(
+        "  strat-search:    score={score_strat:.4}  pnorm_3={pn3_strat:.4}  (DCT8/DCT16x16, {:.0} ms)\n",
+        dt_strat.as_secs_f64() * 1000.0
     );
 
     // Use the original sRGB U8 bytes directly as the butteraugli
