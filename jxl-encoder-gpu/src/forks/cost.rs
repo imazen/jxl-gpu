@@ -24,8 +24,9 @@
 //! kernel. Step 3 (entropy estimation) is the one with no batched
 //! upstream API — `estimate_entropy_full` does it inline per-block.
 //!
-//! This module exposes the leaf cost primitives that the AC strategy
-//! search would compose:
+//! ## Layout: leaves + combiners + orchestrators
+//!
+//! **Leaf GPU primitives** (one launch each, batched across blocks):
 //!
 //! - [`entropy_coeffs_pixel_blocks_gpu`] — batched per-block entropy
 //!   estimation in the pixel-domain. Returns
@@ -36,6 +37,43 @@
 //! - [`pixel_loss_blocks_gpu`] — per-block 8th-power norm of masked
 //!   pixel errors, in f64 for numerical stability. The "real"
 //!   pixel-domain loss libjxl uses for its cost model.
+//!
+//! **Constants + scalars** (host-side, bit-for-bit ports of upstream):
+//!
+//! - [`COEFF_DOMAIN_CONSTANTS`] / [`compute_scaled_constants`] — the
+//!   `(info_loss_mul, cost_delta, zeros_mul)` triple used by the cost
+//!   formula; coefficient-domain (no distance scaling) vs pixel-domain
+//!   (distance-scaled) variants.
+//! - [`MASK_CHANNEL_OFFSET`] / [`CHANNEL_MUL`] — per-channel additive
+//!   offset and 8th-power multiplier for pixel-loss masking.
+//! - [`EntropyMulTable`] / [`entropy_mul_for_strategy`] /
+//!   [`afv_entropy_mul`] — per-strategy entropy multipliers
+//!   (`reference()` matches libjxl, `experimental()` matches PR #4506).
+//!
+//! **Per-block host combiners** (chain after the leaf GPU calls):
+//!
+//! - [`extract_per_block_entropy`] — column-0 (entropy_sum) of the
+//!   4-stat array.
+//! - [`sum_per_block_entropy_3channel`] — X+Y+B element-wise sum.
+//! - [`combine_pixel_loss_3channel`] — CHANNEL_MUL-weighted X+Y+B sum.
+//! - [`nzeros_bits_term`] / [`x_multiblock_weight`] /
+//!   [`apply_x_multiblock_weight_to_loss`] /
+//!   [`apply_x_multiblock_weight_to_entropy`] — upstream cost formula
+//!   sub-terms.
+//! - [`per_block_total_cost`] — simple combiner
+//!   `entropy_mul * sum(entropies) + total_loss`.
+//! - [`per_block_upstream_cost`] — full upstream-faithful combiner
+//!   with `k_zeros_mul * f(nzeros)` per channel + 8th-root pixel-loss
+//!   scaling. Generic over `block_pixel_count`.
+//!
+//! **Orchestrators** (compose all of the above into per-block cost):
+//!
+//! - [`estimate_entropy_full_dct8_batch_gpu`] — DCT8 fast path,
+//!   ~12 GPU launches per call.
+//! - [`estimate_entropy_full_strategy_batch_gpu`] — strategy-generic
+//!   (works for DCT8/16/32/64 family + IDENTITY/DCT2X2/DCT4-family).
+//!   AFV0-3 routed through `forks::afv` separately.
+//! - [`CostMode`] — enum selecting Simple vs Upstream cost formula.
 //!
 //! ## Reshape vs upstream
 //!
@@ -48,10 +86,17 @@
 //!
 //! ## Status
 //!
-//! The composing AC-strategy-search loop on GPU is `pipeline.rs` in
-//! this crate (`compute_cost_grid_dct8` etc.). This `forks::cost`
-//! module exposes the leaf primitives in a stable shape so callers
-//! can build their own cost models on top of them.
+//! All leaves + combiners + orchestrators are G5.1-compliant —
+//! every helper validated against upstream's `pub` symbols (or
+//! against the `__internals` cargo feature for the previously-
+//! private ones). 16 `*_matches_upstream` tests + 9 LLF
+//! restoration helpers transitively validated. See PORT_STATUS.md
+//! "Validation status" section for the full table.
+//!
+//! The legacy GPU-resident pipeline.rs cost grid functions
+//! (`compute_cost_grid_dct8` etc.) use the simpler `block_l2`-only
+//! cost; they pre-date this module and remain for the existing AC
+//! strategy search code that consumes `CostGrid` (Handle-typed).
 
 use alloc::vec::Vec;
 
@@ -769,7 +814,7 @@ pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
 ///
 /// `pixel_blocks_*.len()` MUST equal `n_blocks * tile_pixels` for
 /// the strategy. Caller has already gathered from image-plane
-/// (use [`apply_dct_batch_gpu`] from `forks::transform` if you
+/// (use [`crate::forks::transform::apply_dct_batch_gpu`] if you
 /// need the gather-and-DCT-in-one form).
 ///
 /// **Caveat for non-DCT8 strategies**: upstream's generic-path
