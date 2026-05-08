@@ -114,27 +114,38 @@ helpers were committed with weaker tests because the upstream
 symbols are private (`fn` / `pub(crate)` / `pub(super)`) and our
 parity test file would be an external caller.
 
-**Affected helpers (all in this codebase) and their actual test
-coverage today:**
+**Recovery so far** (2026-05-07/08, commits `c1ffd69e`, `2cf7eeec`,
+`6eb0faca`): added forward `dc_from_dct_*` host helpers to enable
+strong roundtrip parity tests for all 9 LLF restoration helpers.
+Both directions of the LLF restoration are still hand-rolled (the
+upstream `restore_llf_from_dc` is private), but the roundtrip
+identity `forward(restore(x)) == x` is a non-trivial invariant that
+catches sign / scale / transpose inversions even when both sides
+are hand-rolled. Single-position-on trials at multiple indices
+exercise every coefficient slot independently, which is much
+stronger than the prior constant-DC property tests.
+
+**Affected helpers and their actual test coverage today:**
 
 | Helper | Upstream symbol | Visibility | Current test |
 |---|---|---|---|
 | `examples/epf_step0_parity.rs` | `vardct::epf::epf_step0_strip` | `fn` (private) | inline copy-paste port of upstream — **G5.1 violation** |
-| `forks::reconstruct::restore_llf_dct*` (9 helpers) | `vardct::reconstruct::restore_llf_from_dc` arms | `fn` (private) | zero-passthrough + constant-DC property tests only |
+| `forks::reconstruct::restore_llf_dct*` (9 helpers) | `vardct::reconstruct::restore_llf_from_dc` arms | `fn` (private) | **roundtrip parity** via in-house `dc_from_dct_*` (≥ 4 trials each, single-position-on covers all coefficient slots) |
 | `forks::quantize::adjust_quant_block_ac_host` (+ 6 heuristics) | `VarDctEncoder::adjust_quant_block_ac` | `pub(crate) fn` (impl method) | hand-traced semantic tests only (skip-vs-fire, clamp arms) |
 | `forks::cost::compute_scaled_constants` | `vardct::ac_strategy::compute_scaled_constants` | `pub(super) fn` | property test (`ratio == 1.0` echoes bases) |
 | `forks::cost::EntropyMulTable` | `effort::EntropyMulTable` | `pub` (matches) | spot-check against literals |
 
-**To convert these to G5.1-compliant parity tests** we'd need
-`#[doc(hidden)] pub` (or a `__internals` feature) on the four
+**To convert the remaining helpers to G5.1-compliant parity tests**
+we'd need `#[doc(hidden)] pub` (or a `__internals` feature) on the
 private upstream symbols. That's a cross-repo change in
 `jxl-encoder` and is gated on user approval.
 
 **Currently safe** because each helper's algorithm is *literally a
 line-by-line port* of the upstream code with no GPU-related reshape,
-and constant tables match upstream literals exactly. But the
-hand-rolled inline reference in `epf_step0_parity.rs` could mask a
-shared bug between the GPU port and the CPU re-derivation.
+and constant tables match upstream literals exactly. The
+hand-rolled inline reference in `epf_step0_parity.rs` is the
+biggest remaining risk — a shared bug between the GPU port and the
+CPU re-derivation would still pass the parity check.
 
 
 
