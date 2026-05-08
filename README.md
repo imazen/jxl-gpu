@@ -50,6 +50,37 @@ aggregate vs 69 MP/s naive).
 - DC quant + entropy coding (DC restore is a passthrough).
 - Strategy-search dispatch above DCT8 in the high-level encoder.
 
+## Optional: GPU butteraugli quant-refinement loop
+
+Behind the `butteraugli-loop` cargo feature: a content-aware
+adaptive-quantization refinement loop driven by GPU butteraugli
+(`zenmetrics/butteraugli-gpu`). Mirrors
+`jxl_encoder::vardct::butteraugli_loop::butteraugli_refine_quant_field`
+with the per-iteration distance compute on GPU instead of CPU
+(~46 ms/iter at 1024² on RTX 5070).
+
+**Smart content-aware gate** (`refine_aq_field_gpu_smart`): always
+measures AQ vs uniform baselines first, then chooses one of three
+paths per image:
+- AQ regresses uniform by > 10% → fall back to a uniform qac field
+- High distance (> 1.5) → return initial AQ as-is
+- Else → run the full refinement loop
+
+Validated on a 16-image CLIC2025-1024 sweep across two metrics:
+
+| dist | uniform → smart (butteraugli) | uniform → smart (SSIMULACRA2) |
+|------|-------------------------------|--------------------------------|
+| 1.0  | 1.2386 → 1.1886 (-4.0%)       | 87.913 → 88.488 (+0.575)       |
+| 2.0  | 2.0245 → 2.0240 (-0.0%)       | 80.099 → 81.412 (+1.313)       |
+| 4.0  | 3.2582 → 3.2417 (-0.5%)       | 67.677 → 70.445 (+2.768)       |
+
+Smart gate **never regresses uniform** on either metric. The
+threshold is tunable via `refine_aq_field_gpu_smart_with_threshold`
+(default 1.10 for butteraugli optimum; 1.30 for SSIM2 optimum). See
+`examples/butteraugli_refinement_demo` for usage and
+`examples/butteraugli_refinement_corpus_sweep` for the validation
+harness.
+
 See [`PORT_STATUS.md`](PORT_STATUS.md) for the per-kernel grid +
 [`CONTEXT-HANDOFF.md`](CONTEXT-HANDOFF.md) for the perf breakthrough
 write-up.
