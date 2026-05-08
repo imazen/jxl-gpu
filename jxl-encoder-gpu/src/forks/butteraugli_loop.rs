@@ -692,6 +692,43 @@ pub enum SmartGatePath {
 /// where AQ is more often genuinely better, +infinity to never fall
 /// back, 0 to always fall back to uniform).
 ///
+/// ## Production usage
+///
+/// ```ignore
+/// use jxl_encoder_gpu::encoder::GpuEncoder;
+/// use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
+/// use jxl_encoder_gpu::forks::butteraugli_loop::{
+///     ButteraugliLoopGpu, refine_aq_field_gpu_smart, SmartGatePath,
+/// };
+///
+/// // One-time setup per (width, height) — instantiate the encoder
+/// // and the butteraugli compute state once, reuse across encodes.
+/// type Backend = cubecl::cuda::CudaRuntime;
+/// let enc: GpuEncoder<Backend> = GpuEncoder::new();
+/// let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, w, h);
+/// let mut bg = ButteraugliLoopGpu::new_multires(&enc, w, h);
+///
+/// // Per-image: derive initial AQ, run smart gate, encode with the
+/// // selected field. ref_srgb is the ORIGINAL sRGB bytes (not a
+/// // re-encoding of the linear planes — see CLAUDE.md note).
+/// let initial_aq = lossy.compute_aq_field(&enc, &r, &g, &b, distance);
+/// let outcome = refine_aq_field_gpu_smart(
+///     &enc, &lossy, &mut bg, &r, &g, &b, &original_srgb,
+///     &initial_aq, distance, /* iters = */ 2, |_| (),
+/// )?;
+///
+/// // Optional: log which path the gate chose for telemetry.
+/// match outcome.path {
+///     SmartGatePath::DistanceGated         => log::info!("d>1.5, kept AQ"),
+///     SmartGatePath::AqRegressedFallToUniform => log::info!("AQ regressed, used uniform"),
+///     SmartGatePath::Refined               => log::info!("refined AQ via butteraugli loop"),
+/// }
+///
+/// let (rec_r, rec_g, rec_b) = lossy.encode_one_adaptive(
+///     &enc, &r, &g, &b, &outcome.aq_field,
+/// );
+/// ```
+///
 /// Always measures AQ vs uniform baselines first, then chooses one
 /// of three paths:
 ///
