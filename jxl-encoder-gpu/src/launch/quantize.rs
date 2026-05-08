@@ -8,6 +8,7 @@ use cubecl::server::Handle;
 
 use crate::kernels::quantize::{
     quantize_dct8_kernel, quantize_dct8_kernel_broadcast_w, quantize_large_kernel,
+    quantize_large_kernel_broadcast_w,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -35,6 +36,46 @@ pub fn quantize_large<R: Runtime>(
             CubeDim::new_1d(1),
             ArrayArg::from_raw_parts(coeffs, n_coef),
             ArrayArg::from_raw_parts(weights, n_coef),
+            ArrayArg::from_raw_parts(qac_qm, nb),
+            ArrayArg::from_raw_parts(thresholds, 4),
+            ArrayArg::from_raw_parts(output, n_coef),
+            grid_width,
+            grid_height,
+            llf_x,
+            llf_y,
+        );
+    }
+}
+
+/// Broadcast-weights launcher for
+/// [`quantize_large_kernel_broadcast_w`]. `weights` is exactly
+/// `grid_width * grid_height` f32 (one quant matrix), broadcast
+/// across all blocks.
+#[allow(clippy::too_many_arguments)]
+pub fn quantize_large_broadcast_w<R: Runtime>(
+    client: &ComputeClient<R>,
+    coeffs: Handle,
+    weights: Handle, // grid_width * grid_height f32
+    qac_qm: Handle,
+    thresholds: Handle,
+    output: Handle,
+    num_blocks: u32,
+    grid_width: u32,
+    grid_height: u32,
+    llf_x: u32,
+    llf_y: u32,
+) {
+    let nb = num_blocks as usize;
+    let size = (grid_width as usize) * (grid_height as usize);
+    let n_coef = nb * size;
+    let cubes = num_blocks.max(1);
+    unsafe {
+        quantize_large_kernel_broadcast_w::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(cubes, 1, 1),
+            CubeDim::new_1d(1),
+            ArrayArg::from_raw_parts(coeffs, n_coef),
+            ArrayArg::from_raw_parts(weights, size),
             ArrayArg::from_raw_parts(qac_qm, nb),
             ArrayArg::from_raw_parts(thresholds, 4),
             ArrayArg::from_raw_parts(output, n_coef),

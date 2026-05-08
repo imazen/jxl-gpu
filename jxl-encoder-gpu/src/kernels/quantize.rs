@@ -120,6 +120,79 @@ pub fn quantize_large_kernel(
     }
 }
 
+/// Broadcast-weights variant of [`quantize_large_kernel`].
+/// `weights` is exactly `grid_width * grid_height` f32 (one quant
+/// matrix), broadcast across all blocks.
+///
+/// Saves `(num_blocks - 1) * grid_width * grid_height * 4` bytes of
+/// GPU memory + upload traffic when callers were previously
+/// replicating the same matrix per-block. For DCT16x16 (grid 16×16 =
+/// 256 coeffs) over 4096 candidate blocks at 2048², that's ~4 MB →
+/// 1024 bytes per channel. For DCT64x64 (4096 coeffs) the savings
+/// scale proportionally.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn quantize_large_kernel_broadcast_w(
+    coeffs: &Array<f32>,
+    weights: &Array<f32>,
+    qac_qm: &Array<f32>,
+    thresholds: &Array<f32>,
+    output: &mut Array<i32>,
+    grid_width: u32,
+    grid_height: u32,
+    llf_x: u32,
+    llf_y: u32,
+) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = qac_qm.len();
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let gw = grid_width as usize;
+    let gh = grid_height as usize;
+    let lx = llf_x as usize;
+    let ly = llf_y as usize;
+    let half_h = gh / 2usize;
+    let half_w = gw / 2usize;
+    let size = gw * gh;
+    let off = block_idx * size;
+    let qac = qac_qm[block_idx];
+
+    let t0 = thresholds[0usize];
+    let t1 = thresholds[1usize];
+    let t2 = thresholds[2usize];
+    let t3 = thresholds[3usize];
+
+    let mut idx: u32 = 0u32;
+    while (idx as usize) < size {
+        let iu = idx as usize;
+        let y = iu / gw;
+        let x = iu - y * gw;
+        if y < ly && x < lx {
+            output[off + iu] = i32::new(0);
+        } else {
+            let row_hi = y >= half_h;
+            let col_hi = x >= half_w;
+            let thr = if row_hi {
+                if col_hi { t3 } else { t2 }
+            } else if col_hi {
+                t1
+            } else {
+                t0
+            };
+            // Broadcast: weights[iu] not weights[off + iu].
+            let val = coeffs[off + iu] * (1.0f32 / weights[iu]) * qac;
+            let absv = f32::abs(val);
+            output[off + iu] = if absv < thr {
+                i32::new(0)
+            } else {
+                round_ties_even_to_i32(val)
+            };
+        }
+        idx += 1u32;
+    }
+}
+
 /// Per-block DCT8 quantize with dead-zone. One cube per block.
 ///
 /// Layout:

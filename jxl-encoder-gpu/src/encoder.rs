@@ -664,6 +664,66 @@ impl<R: Runtime> GpuEncoder<R> {
         i32::from_bytes(&bytes).to_vec()
     }
 
+    /// Broadcast-weights variant of [`Self::quantize_large_blocks`].
+    /// `weights_template` is exactly `grid_width * grid_height` f32
+    /// (one quant matrix); the kernel broadcasts it across all blocks.
+    /// Saves `(num_blocks - 1) * grid_width * grid_height * 4` bytes
+    /// of upload traffic when callers previously replicated the same
+    /// matrix per-block.
+    #[allow(clippy::too_many_arguments)]
+    pub fn quantize_large_blocks_broadcast_w(
+        &self,
+        coeffs: &[f32],
+        weights_template: &[f32],
+        qac_qm: &[f32],
+        thresholds: &[f32; 4],
+        grid_width: u32,
+        grid_height: u32,
+        llf_x: u32,
+        llf_y: u32,
+    ) -> Vec<i32> {
+        let block_size = (grid_width as usize) * (grid_height as usize);
+        let n = coeffs.len();
+        assert!(n.is_multiple_of(block_size));
+        assert_eq!(
+            weights_template.len(),
+            block_size,
+            "weights_template must be exactly grid_width*grid_height = {block_size} entries (got {})",
+            weights_template.len()
+        );
+        let num_blocks = (n / block_size) as u32;
+        assert_eq!(qac_qm.len(), num_blocks as usize);
+        let h_c = self.client.create_from_slice(f32::as_bytes(coeffs));
+        let h_w = self
+            .client
+            .create_from_slice(f32::as_bytes(weights_template));
+        let h_q = self.client.create_from_slice(f32::as_bytes(qac_qm));
+        let h_t = self
+            .client
+            .create_from_slice(f32::as_bytes(&thresholds[..]));
+        let h_o = self
+            .client
+            .create_from_slice(i32::as_bytes(&vec![0_i32; n]));
+        crate::launch::quantize::quantize_large_broadcast_w::<R>(
+            &self.client,
+            h_c,
+            h_w,
+            h_q,
+            h_t,
+            h_o.clone(),
+            num_blocks,
+            grid_width,
+            grid_height,
+            llf_x,
+            llf_y,
+        );
+        let bytes = self
+            .client
+            .read_one(h_o)
+            .expect("read quantize_large broadcast");
+        i32::from_bytes(&bytes).to_vec()
+    }
+
     /// Per-block entropy estimation in pixel-domain mode.
     ///
     /// Returns `(out_4xn, error_coeffs)` where `out_4xn` is `num_blocks * 4`
@@ -1493,6 +1553,69 @@ mod tests {
             m > 1e-3,
             "IDENTITY and DCT2X2 should produce different coeffs (max|Δ|={m:.3e})"
         );
+    }
+
+    /// Verify quantize_large_blocks_broadcast_w produces bit-identical
+    /// output to quantize_large_blocks when the latter is called with
+    /// replicated weights. Two grid sizes (8×8 = DCT8 layout, 16×16 =
+    /// DCT16x16 layout) cover small and large block cases. LLF region
+    /// 2×2 (matches DCT16x16) for the larger; 1×1 (DCT8) for the smaller.
+    #[test]
+    fn test_quantize_large_broadcast_matches_perblock() {
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let cases = [
+            (8u32, 8u32, 1u32, 1u32),    // DCT8 layout
+            (16u32, 16u32, 2u32, 2u32),  // DCT16x16 layout
+        ];
+        let qac_qm = alloc::vec![0.7_f32; 16];
+        let thresholds = [0.56_f32, 0.62, 0.62, 0.62];
+
+        for &(gw, gh, lx, ly) in &cases {
+            let bs = (gw as usize) * (gh as usize);
+            let n_blocks = qac_qm.len();
+            let mut coeffs = alloc::vec![0.0f32; n_blocks * bs];
+            for (i, c) in coeffs.iter_mut().enumerate() {
+                let v = ((i.wrapping_mul(31) % 251) as f32 / 251.0) - 0.5;
+                *c = 0.4 + 1.5 * v;
+            }
+            let mut weights_template = alloc::vec![0.0f32; bs];
+            for (i, w) in weights_template.iter_mut().enumerate() {
+                *w = 0.5 + 0.7 * ((i.wrapping_mul(17) % 251) as f32 / 251.0);
+            }
+            let mut weights_replicated = alloc::vec![0.0f32; n_blocks * bs];
+            for b in 0..n_blocks {
+                weights_replicated[b * bs..(b + 1) * bs].copy_from_slice(&weights_template);
+            }
+
+            let perblock = enc.quantize_large_blocks(
+                &coeffs,
+                &weights_replicated,
+                &qac_qm,
+                &thresholds,
+                gw,
+                gh,
+                lx,
+                ly,
+            );
+            let broadcast = enc.quantize_large_blocks_broadcast_w(
+                &coeffs,
+                &weights_template,
+                &qac_qm,
+                &thresholds,
+                gw,
+                gh,
+                lx,
+                ly,
+            );
+
+            assert_eq!(perblock.len(), broadcast.len());
+            for (i, (&a, &b)) in perblock.iter().zip(broadcast.iter()).enumerate() {
+                assert_eq!(
+                    a, b,
+                    "grid={gw}×{gh}, i={i}: perblock={a} vs broadcast={b}"
+                );
+            }
+        }
     }
 
     /// Verify dequant_simple_blocks_broadcast_w produces bit-identical
