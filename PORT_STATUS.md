@@ -105,47 +105,41 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
-### Known validation gaps (G5.1 from zenmetrics CUBECL_GOTCHAS)
+### Validation status (G5.1 from zenmetrics CUBECL_GOTCHAS)
 
 The G5.1 "validate against the published CPU crate, not a hand-rolled
 re-derivation" rule says parity tests must call the upstream
-function directly, not a hand-roll in the test file. Several recent
-helpers were committed with weaker tests because the upstream
-symbols are private (`fn` / `pub(crate)` / `pub(super)`) and our
-parity test file would be an external caller.
+function directly, not a hand-roll in the test file.
 
-**Recovery so far** (2026-05-07/08, commits `c1ffd69e`, `2cf7eeec`,
-`6eb0faca`): added forward `dc_from_dct_*` host helpers to enable
-strong roundtrip parity tests for all 9 LLF restoration helpers.
-Both directions of the LLF restoration are still hand-rolled (the
-upstream `restore_llf_from_dc` is private), but the roundtrip
-identity `forward(restore(x)) == x` is a non-trivial invariant that
-catches sign / scale / transpose inversions even when both sides
-are hand-rolled. Single-position-on trials at multiple indices
-exercise every coefficient slot independently, which is much
-stronger than the prior constant-DC property tests.
+**G5.1-compliant (validated against `pub` upstream symbols):**
 
-**Affected helpers and their actual test coverage today:**
+| Helper | Upstream symbol | Test |
+|---|---|---|
+| `forks::reconstruct::dc_from_dct_*` (8 helpers covering all DCT16+ strategies) | `jxl_encoder::vardct::dct::dc_from_dct_*` | `test_dc_from_dct_*_matches_upstream` (3-4 trials each, FP32 floor tolerance) |
+| `forks::reconstruct::restore_llf_dct_*` (9 helpers) | (private upstream) | **transitively validated** via roundtrip: `restore_llf(dc_from_dct(llf)) == llf`. Single-position-on trials at all coefficient slots catch sign/scale/transpose bugs |
+| `forks::cost::EntropyMulTable::{reference, experimental}` | `jxl_encoder::effort::EntropyMulTable` | `test_entropy_mul_table_*_matches_upstream` field-by-field |
+
+**In-tree validated only (upstream symbol is private — needs
+cross-repo work for G5.1 compliance):**
 
 | Helper | Upstream symbol | Visibility | Current test |
 |---|---|---|---|
-| `examples/epf_step0_parity.rs` | `vardct::epf::epf_step0_strip` | `fn` (private) | inline copy-paste port of upstream — **G5.1 violation** |
-| `forks::reconstruct::restore_llf_dct*` (9 helpers) | `vardct::reconstruct::restore_llf_from_dc` arms | `fn` (private) | **roundtrip parity** via in-house `dc_from_dct_*` (≥ 4 trials each, single-position-on covers all coefficient slots) |
-| `forks::quantize::adjust_quant_block_ac_host` (+ 6 heuristics) | `VarDctEncoder::adjust_quant_block_ac` | `pub(crate) fn` (impl method) | hand-traced semantic tests only (skip-vs-fire, clamp arms) |
+| `examples/epf_step0_parity.rs` | `vardct::epf::epf_step0_strip` | `fn` private | inline copy-paste — risk of shared bug between GPU and hand-rolled CPU references |
+| `forks::quantize::adjust_quant_block_ac_host` (+ 6 heuristics) | `VarDctEncoder::adjust_quant_block_ac` | `pub(crate)` impl method | property tests (skip-vs-fire, clamp arms) |
 | `forks::cost::compute_scaled_constants` | `vardct::ac_strategy::compute_scaled_constants` | `pub(super) fn` | property test (`ratio == 1.0` echoes bases) |
-| `forks::cost::EntropyMulTable` | `effort::EntropyMulTable` | `pub` (matches) | spot-check against literals |
+| `forks::cfl::ytox_ratio` / `ytob_ratio` | `vardct::chroma_from_luma::*` | `pub fn` in `pub(crate) mod` | property tests (linearity, 0/1 baseline) — *would* be parity-testable if `vardct::chroma_from_luma` were `pub mod` |
+| `forks::reconstruct::INV_DC_QUANT` | `vardct::quant::INV_DC_QUANT` | `pub const` in private mod | literal spot-check |
 
-**To convert the remaining helpers to G5.1-compliant parity tests**
-we'd need `#[doc(hidden)] pub` (or a `__internals` feature) on the
-private upstream symbols. That's a cross-repo change in
-`jxl-encoder` and is gated on user approval.
+**Constants ported from private modules with literal-spot-check
+tests** (acceptable because they're tiny `[f32; N]` arrays where
+each value matches the upstream literal exactly): `MASK_CHANNEL_OFFSET`,
+`CHANNEL_MUL`, `DCT_RESAMPLE_SCALE_*`, `K_INV_COLOR_FACTOR`.
 
-**Currently safe** because each helper's algorithm is *literally a
-line-by-line port* of the upstream code with no GPU-related reshape,
-and constant tables match upstream literals exactly. The
-hand-rolled inline reference in `epf_step0_parity.rs` is the
-biggest remaining risk — a shared bug between the GPU port and the
-CPU re-derivation would still pass the parity check.
+**To resolve the in-tree-only entries**: bump visibility on the 4
+private upstream symbols (`epf_step0_strip`, `adjust_quant_block_ac`,
+`compute_scaled_constants`) plus re-export the `chroma_from_luma`
+and `quant` modules at the upstream crate root. Cross-repo change
+in `jxl-encoder`; gated on user approval.
 
 
 
