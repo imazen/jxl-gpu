@@ -663,51 +663,44 @@ pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
     let dct_y = enc.dct_8x8_blocks(pixel_blocks_y);
     let dct_b = enc.dct_8x8_blocks(pixel_blocks_b);
 
-    // Replicate per-block weight + inv_weight tables.
-    let mut weights_x = Vec::with_capacity(n_blocks * 64);
-    let mut weights_y = Vec::with_capacity(n_blocks * 64);
-    let mut weights_b = Vec::with_capacity(n_blocks * 64);
-    let mut inv_weights_x = Vec::with_capacity(n_blocks * 64);
-    let mut inv_weights_y = Vec::with_capacity(n_blocks * 64);
-    let mut inv_weights_b = Vec::with_capacity(n_blocks * 64);
-    for _ in 0..n_blocks {
-        weights_x.extend_from_slice(weights_x_per_block);
-        weights_y.extend_from_slice(weights_y_per_block);
-        weights_b.extend_from_slice(weights_b_per_block);
-        inv_weights_x.extend_from_slice(inv_weights_x_per_block);
-        inv_weights_y.extend_from_slice(inv_weights_y_per_block);
-        inv_weights_b.extend_from_slice(inv_weights_b_per_block);
-    }
+    // Step 2: per-channel entropy + error-coef writeback. Use
+    // broadcast-weights variant — saves 6 × n_blocks × 64 × 4 bytes
+    // of host replication + GPU upload (24 MB at 1024×1024 → 1.5 KB).
+    let weights_x_t: &[f32] = weights_x_per_block.as_slice();
+    let weights_y_t: &[f32] = weights_y_per_block.as_slice();
+    let weights_b_t: &[f32] = weights_b_per_block.as_slice();
+    let inv_x_t: &[f32] = inv_weights_x_per_block.as_slice();
+    let inv_y_t: &[f32] = inv_weights_y_per_block.as_slice();
+    let inv_b_t: &[f32] = inv_weights_b_per_block.as_slice();
 
-    // Step 2: per-channel entropy + error-coef writeback.
-    let (y_stats, y_err) = entropy_coeffs_pixel_blocks_gpu(
+    let (y_stats, y_err) = entropy_coeffs_pixel_blocks_gpu_broadcast_w(
         enc,
         &dct_y,
         &dct_y,
-        &weights_y,
-        &inv_weights_y,
+        weights_y_t,
+        inv_y_t,
         64,
         0.0,
         quant_y,
         cost_delta,
     );
-    let (x_stats, x_err) = entropy_coeffs_pixel_blocks_gpu(
+    let (x_stats, x_err) = entropy_coeffs_pixel_blocks_gpu_broadcast_w(
         enc,
         &dct_x,
         &dct_y,
-        &weights_x,
-        &inv_weights_x,
+        weights_x_t,
+        inv_x_t,
         64,
         ytox_ratio(ytox),
         quant_x,
         cost_delta,
     );
-    let (b_stats, b_err) = entropy_coeffs_pixel_blocks_gpu(
+    let (b_stats, b_err) = entropy_coeffs_pixel_blocks_gpu_broadcast_w(
         enc,
         &dct_b,
         &dct_y,
-        &weights_b,
-        &inv_weights_b,
+        weights_b_t,
+        inv_b_t,
         64,
         ytob_ratio(ytob),
         quant_b,
@@ -881,51 +874,40 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
     let dct_y = dct_blocks_gpu(enc, pixel_blocks_y, raw_strategy);
     let dct_b = dct_blocks_gpu(enc, pixel_blocks_b, raw_strategy);
 
-    // Replicate per-block weight tables.
-    let mut weights_x = Vec::with_capacity(n_blocks * coeff_count);
-    let mut weights_y = Vec::with_capacity(n_blocks * coeff_count);
-    let mut weights_b = Vec::with_capacity(n_blocks * coeff_count);
-    let mut inv_weights_x = Vec::with_capacity(n_blocks * coeff_count);
-    let mut inv_weights_y = Vec::with_capacity(n_blocks * coeff_count);
-    let mut inv_weights_b = Vec::with_capacity(n_blocks * coeff_count);
-    for _ in 0..n_blocks {
-        weights_x.extend_from_slice(weights_x_per_block);
-        weights_y.extend_from_slice(weights_y_per_block);
-        weights_b.extend_from_slice(weights_b_per_block);
-        inv_weights_x.extend_from_slice(inv_weights_x_per_block);
-        inv_weights_y.extend_from_slice(inv_weights_y_per_block);
-        inv_weights_b.extend_from_slice(inv_weights_b_per_block);
-    }
-
-    // Step 2: per-channel entropy + error-coef writeback.
-    let (y_stats, y_err) = entropy_coeffs_pixel_blocks_gpu(
+    // Step 2: per-channel entropy + error-coef writeback. Use
+    // broadcast-weights variant — saves 6 × n_blocks × coeff_count × 4
+    // bytes of host replication + GPU upload. At DCT16x16 (256
+    // coeffs) over 4096 candidate blocks, that's 6 × 4 MB = 24 MB →
+    // 6 KB. At DCT64x64 (4096 coeffs) the savings scale
+    // proportionally (96 MB → 96 KB at the same block count).
+    let (y_stats, y_err) = entropy_coeffs_pixel_blocks_gpu_broadcast_w(
         enc,
         &dct_y,
         &dct_y,
-        &weights_y,
-        &inv_weights_y,
+        weights_y_per_block,
+        inv_weights_y_per_block,
         coeff_count as u32,
         0.0,
         quant_y,
         cost_delta,
     );
-    let (x_stats, x_err) = entropy_coeffs_pixel_blocks_gpu(
+    let (x_stats, x_err) = entropy_coeffs_pixel_blocks_gpu_broadcast_w(
         enc,
         &dct_x,
         &dct_y,
-        &weights_x,
-        &inv_weights_x,
+        weights_x_per_block,
+        inv_weights_x_per_block,
         coeff_count as u32,
         ytox_ratio(ytox),
         quant_x,
         cost_delta,
     );
-    let (b_stats, b_err) = entropy_coeffs_pixel_blocks_gpu(
+    let (b_stats, b_err) = entropy_coeffs_pixel_blocks_gpu_broadcast_w(
         enc,
         &dct_b,
         &dct_y,
-        &weights_b,
-        &inv_weights_b,
+        weights_b_per_block,
+        inv_weights_b_per_block,
         coeff_count as u32,
         ytob_ratio(ytob),
         quant_b,
@@ -1057,6 +1039,35 @@ pub fn entropy_coeffs_pixel_blocks_gpu<R: Runtime>(
         block_y,
         weights,
         inv_weights,
+        n_per_block,
+        cmap_factor,
+        quant,
+        k_cost_delta,
+    )
+}
+
+/// Broadcast-weights variant of [`entropy_coeffs_pixel_blocks_gpu`].
+/// Each weight array is exactly `n_per_block` f32 (one quant matrix
+/// or its inverse); the kernel broadcasts across all blocks. Saves
+/// `2 * (num_blocks - 1) * n_per_block * 4` bytes of upload traffic
+/// per call.
+#[allow(clippy::too_many_arguments)]
+pub fn entropy_coeffs_pixel_blocks_gpu_broadcast_w<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    block_c: &[f32],
+    block_y: &[f32],
+    weights_template: &[f32],
+    inv_weights_template: &[f32],
+    n_per_block: u32,
+    cmap_factor: f32,
+    quant: f32,
+    k_cost_delta: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    enc.entropy_coeffs_pixel_blocks_broadcast_w(
+        block_c,
+        block_y,
+        weights_template,
+        inv_weights_template,
         n_per_block,
         cmap_factor,
         quant,
