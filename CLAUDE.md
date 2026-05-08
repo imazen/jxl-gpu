@@ -168,6 +168,26 @@ NEVER hand-roll the CPU reference. ALWAYS call `jxl_encoder_simd::*_scalar` dire
 7. Comptime generics on `bool` not supported — split into separate kernels.
 8. `CubeCount` and `CubeDim` are not `Copy` — `.clone()` per launch.
 
+## DCT scale convention (CRITICAL — different from libjxl CPU)
+
+The GPU DCT kernels in this codebase use **mean-scale** convention, NOT the
+orthonormal `sum/sqrt(N²)` convention from libjxl's CPU code:
+
+- `forward_dct8(uniform_X)[0]   = X` (= mean), not `8*X` (= sum/8)
+- `forward_dct16x16(uniform_X)[0] = X`, not `16*X`
+- `dc_from_dct_16x16(forward_dct16x16(uniform_X)) = [X, X, X, X]`
+
+So the DC frame stores **mean values** (`sum/64` per 8x8 block), NOT `sum/8`.
+Verified by `test_dct_scale_convention_diag` in lossy_encoder.rs.
+
+This bit Phase A hard (commit `ac88dc1c`): `compute_dc_grid_per_8x8_block`
+returned `sum/8`, making `restore_llf_dct16x16` produce LLF[0] 8× too large
+and reconstruction blow up to ~165 butteraugli (vs target ~1.3). Fix was
+`out[i] = sum / 64` and a regression test `test_lossy_encoder_strat_search_vs_encode_one_diag`.
+
+**When porting CPU code to GPU, double-check the normalization convention
+before trusting any constant from libjxl reconstruct.cc / dct_scales.h.**
+
 ## Phase plan
 
 | Phase | Scope | Effort | Status |
