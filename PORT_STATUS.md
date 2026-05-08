@@ -162,11 +162,15 @@ itself only fills `entropy_sum + nzeros_sum` columns of the 4-stat
 output (matches upstream's pixel-domain mode behavior —
 `info_loss_sum` is intentionally 0 in pixel-domain mode); the
 `info_loss_mul` term is computed on the host from the combined
-pixel loss. Caveat: upstream's generic-path also weights X channel
-by `1 + min(num_blocks/8, 3)` for `num_blocks >= 2 && c == 0` —
-NOT applied here. Fine for relative-ranking; callers needing full
-upstream parity for X on multi-block strategies must apply the
-weight before/after. **Mixed-strategy
+pixel loss. In `CostMode::Upstream`, the
+orchestrator automatically applies upstream's generic-path X-channel
+multi-block weight (`1 + min(num_blocks/8, 3)` for `num_blocks >= 2`)
+to BOTH the X channel's per-block entropy AND its per-block pixel
+loss. `num_blocks` is derived from the strategy
+(`block_pixels / 64`) — DCT16x16 = 4 → w=1.5; DCT32x32 = 16 → w=3.0;
+DCT64x64 = 64 → w=4.0 capped. For DCT8 the weight is a no-op
+(covered_blocks=1). In `CostMode::Simple` the weight is NOT applied
+(uniform per-channel scaling doesn't affect relative ranking). **Mixed-strategy
 reconstruct on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_mixed_strategy_gpu` accepts a heterogeneous `&[BlockRecipe]` (each carrying `bx, by, raw_strategy, coeffs`), groups by strategy, emits ≤ 15 GPU launches per image (one per supported strategy that appears in the recipes). AFV0-3 still route through `forks::afv` separately. **`compute_epf_sharpness_dct8_gpu` fully composed as of 2026-05-07** — runs reconstruct → gaborish (opt) → per-candidate EPF + L2 → two-pass selection on GPU end-to-end for the DCT8-only path. **All per-strategy LLF restoration helpers ported as of 2026-05-07** — `forks::reconstruct::restore_llf_*` covers DCT16×8, DCT8×16, DCT16×16, DCT32×32, DCT32×16, DCT16×32, DCT64×64, DCT64×32, DCT32×64 (15 unit tests), each as a pure-scalar host helper. The 1×1-LLF strategies (IDENTITY/DCT2X2/DCT4×*/AFV0-3) reuse `restore_dct8_dc_override`'s simple DC formula. **AdjustQuantBlockAC fully ported as host helpers as of 2026-05-07** — pre-scan + all 6 heuristics A-F + orchestrator (`forks::quantize::adjust_quant_block_ac_host`) match upstream. A future `#[cube]` kernel can transcribe the now-standalone heuristics for per-block-parallel execution without further reverse-engineering. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **DCT8-only reconstruct path on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_xyb_dct8_only_gpu` composes dequant + DC override + IDCT + scatter into 4 GPU launches per image. Sufficient for the all-blocks-are-DCT8 case (common for straightforward distance values). **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
 
 ## Coverage summary

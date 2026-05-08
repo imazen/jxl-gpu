@@ -78,6 +78,38 @@ LLF helpers in place, the dispatcher just needs to: read DC grid →
 call the right LLF restorer → write LLF positions into the
 coefficient block → run per-strategy IDCT → scatter.
 
+### X-multiblock weight integrated into orchestrator (`c344bbd2`, `c4513137`)
+
+Closes the X-channel multi-block weight caveat from
+estimate_entropy_full_strategy_batch_gpu (3fea1e18). Upstream's
+generic-path estimate_entropy_full applies a weight `w = 1 +
+min(num_blocks/8, 3)` to BOTH the X channel's entropy AND its
+pixel loss when `num_blocks >= 2` (covered_blocks > 1).
+
+Three host helpers added (c344bbd2):
+
+- `x_multiblock_weight(num_blocks) -> f32` — formula evaluator,
+  capped at w=4.0 for num_blocks >= 24.
+- `apply_x_multiblock_weight_to_loss(&mut [f64], num_blocks)`
+  — in-place X loss scaling.
+- `apply_x_multiblock_weight_to_entropy(&mut [f32], num_blocks)`
+  — in-place X entropy scaling.
+
+Then wired into the strategy-generic orchestrator (c4513137):
+
+- `per_block_upstream_cost` applies the X weight INSIDE the
+  per-block loop to `(entropy_x[b] + nzeros_bits_term(nzeros_x[b]))`,
+  matching upstream's `entropy *= w` after both terms accumulated
+  in the running per-channel sum.
+- The orchestrator applies the X weight to `loss_x` before
+  `combine_pixel_loss_3channel` when in `CostMode::Upstream`.
+
+Validated: DCT16x16 zero-input + Upstream mode produces cost
+≈ 185.34 (= `7 × COEFF_DOMAIN_CONSTANTS.2 × (2 + 1.5)` where
+w=1.5 for covered_blocks=4 — i.e., Y + B contribute 2 unit-weights
+and X contributes 1.5 weighted unit). DCT8 (covered_blocks=1, w=1.0)
+remains unchanged.
+
 ### Strategy-generic `estimate_entropy_full` orchestrator (`5f75ea2e`, `3fea1e18`)
 
 Generalizes the DCT8-only entropy orchestrator (706b59fe) to all
