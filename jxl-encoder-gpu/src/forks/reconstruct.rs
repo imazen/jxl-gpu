@@ -401,6 +401,82 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     reconstruct_mixed_strategy_gpu(enc, &recipes, out_plane, padded_width);
 }
 
+/// 3-channel wrapper around [`encode_and_reconstruct_mixed_strategy_single_channel`].
+///
+/// All three channels share the same `assignments` and `dc_grid`
+/// shape (matches upstream JXL: AC strategy is picked per-Y-channel
+/// then applied to all 3 channels). Each channel has its own
+/// `weights_template_for_strategy` closure (per-channel quant
+/// matrix), qac field, thresholds, and DC grid.
+///
+/// Calls the single-channel helper 3 times serially. A future perf
+/// optimization could batch the per-channel forward DCT calls into
+/// a single launch per strategy (one DCT+quant+dequant per channel
+/// per strategy → one fused 3-channel kernel per strategy), but
+/// that's a separate kernel-level change deferred to perf phase.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_x: &[f32],
+    xyb_y: &[f32],
+    xyb_b: &[f32],
+    padded_width: usize,
+    padded_height: usize,
+    assignments: &[crate::pipeline::StrategyAssignment],
+    weights_x_for_strategy: &dyn Fn(u8) -> Vec<f32>,
+    weights_y_for_strategy: &dyn Fn(u8) -> Vec<f32>,
+    weights_b_for_strategy: &dyn Fn(u8) -> Vec<f32>,
+    qac_x_per_8x8_block: &[f32],
+    qac_y_per_8x8_block: &[f32],
+    qac_b_per_8x8_block: &[f32],
+    thresholds_x: &[f32; 4],
+    thresholds_y: &[f32; 4],
+    thresholds_b: &[f32; 4],
+    dc_grid_x_per_8x8_block: &[f32],
+    dc_grid_y_per_8x8_block: &[f32],
+    dc_grid_b_per_8x8_block: &[f32],
+    out_plane_x: &mut [f32],
+    out_plane_y: &mut [f32],
+    out_plane_b: &mut [f32],
+) {
+    encode_and_reconstruct_mixed_strategy_single_channel(
+        enc,
+        xyb_x,
+        padded_width,
+        padded_height,
+        assignments,
+        weights_x_for_strategy,
+        qac_x_per_8x8_block,
+        thresholds_x,
+        dc_grid_x_per_8x8_block,
+        out_plane_x,
+    );
+    encode_and_reconstruct_mixed_strategy_single_channel(
+        enc,
+        xyb_y,
+        padded_width,
+        padded_height,
+        assignments,
+        weights_y_for_strategy,
+        qac_y_per_8x8_block,
+        thresholds_y,
+        dc_grid_y_per_8x8_block,
+        out_plane_y,
+    );
+    encode_and_reconstruct_mixed_strategy_single_channel(
+        enc,
+        xyb_b,
+        padded_width,
+        padded_height,
+        assignments,
+        weights_b_for_strategy,
+        qac_b_per_8x8_block,
+        thresholds_b,
+        dc_grid_b_per_8x8_block,
+        out_plane_b,
+    );
+}
+
 pub fn reconstruct_mixed_strategy_gpu<R: Runtime>(
     enc: &GpuEncoder<R>,
     recipes: &[BlockRecipe<'_>],
