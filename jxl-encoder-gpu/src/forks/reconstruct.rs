@@ -2049,6 +2049,163 @@ mod tests {
     }
 
     #[test]
+    fn test_dc_from_dct_16x16_matches_upstream() {
+        let trials: [[f32; 4]; 5] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [3.14, -2.71, 1.41, 0.577],
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            // Build a 256-coef block with LLF at [0, 1, 16, 17] (stride 16).
+            let mut block = [0.0_f32; 256];
+            block[0] = trial[0];
+            block[1] = trial[1];
+            block[16] = trial[2];
+            block[17] = trial[3];
+            let mine = dc_from_dct_16x16(*trial);
+            let theirs = jxl_encoder::vardct::dct::dc_from_dct_16x16(&block);
+            for i in 0..4 {
+                assert!(
+                    (mine[i] - theirs[i]).abs() < 1e-5,
+                    "trial {ti} pos {i}: mine={} theirs={}",
+                    mine[i],
+                    theirs[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dc_from_dct_16x8_matches_upstream() {
+        // DCT16x8 LLF positions are [0] and [1] in the 8-stride layout.
+        for &(l0, l1) in &[
+            (1.0_f32, 0.0),
+            (0.0, 1.0),
+            (0.5, -0.3),
+            (3.14, -2.71),
+        ] {
+            let mut block = [0.0_f32; 128];
+            block[0] = l0;
+            block[1] = l1;
+            let (mine0, mine1) = dc_from_dct_16x8_or_8x16(l0, l1);
+            let theirs = jxl_encoder::vardct::dct::dc_from_dct_16x8(&block);
+            assert!((mine0 - theirs[0]).abs() < 1e-5, "(l0={l0}, l1={l1}) [0]: mine={mine0} theirs={}", theirs[0]);
+            assert!((mine1 - theirs[1]).abs() < 1e-5, "(l0={l0}, l1={l1}) [1]: mine={mine1} theirs={}", theirs[1]);
+        }
+    }
+
+    #[test]
+    fn test_dc_from_dct_16x32_matches_upstream() {
+        let trials: [[f32; 8]; 4] = [
+            {
+                let mut a = [0.0_f32; 8];
+                a[0] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 8];
+                a[3] = 1.0;
+                a
+            },
+            [0.5, -0.3, 0.7, -0.2, 1.1, -1.7, 0.9, -2.3],
+            [3.14, -2.71, 1.41, 0.577, -1.0, 2.0, -3.0, 4.0],
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            // 16×32 layout: stride 32, LLF at [iy*32+ix] for iy in 0..2, ix in 0..4.
+            let mut block = [0.0_f32; 512];
+            for iy in 0..2 {
+                for ix in 0..4 {
+                    block[iy * 32 + ix] = trial[iy * 4 + ix];
+                }
+            }
+            let mine = dc_from_dct_16x32(*trial);
+            let theirs = jxl_encoder::vardct::dct::dc_from_dct_16x32(&block);
+            for i in 0..8 {
+                assert!(
+                    (mine[i] - theirs[i]).abs() < 1e-4,
+                    "trial {ti} pos {i}: mine={} theirs={}",
+                    mine[i],
+                    theirs[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dc_from_dct_64x32_matches_upstream() {
+        let trials: [[f32; 32]; 3] = [
+            {
+                let mut a = [0.0_f32; 32];
+                a[0] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 32];
+                a[15] = 1.0;
+                a
+            },
+            core::array::from_fn(|i| (i as f32 * 0.21).cos() * 0.6),
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            // 64×32 layout: stride 64, LLF at [iy*64+ix] for iy in 0..4, ix in 0..8.
+            let mut block = alloc::vec![0.0_f32; 2048];
+            for iy in 0..4 {
+                for ix in 0..8 {
+                    block[iy * 64 + ix] = trial[iy * 8 + ix];
+                }
+            }
+            let mine = dc_from_dct_64x32(*trial);
+            let theirs = jxl_encoder::vardct::dct::dc_from_dct_64x32(&block);
+            for i in 0..32 {
+                assert!(
+                    (mine[i] - theirs[i]).abs() < 5e-3,
+                    "trial {ti} pos {i}: mine={} theirs={}",
+                    mine[i],
+                    theirs[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dc_from_dct_32x64_matches_upstream() {
+        let trials: [[f32; 32]; 3] = [
+            {
+                let mut a = [0.0_f32; 32];
+                a[0] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 32];
+                a[15] = 1.0;
+                a
+            },
+            core::array::from_fn(|i| (i as f32 * 0.17).sin() * 0.6),
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            // 32×64 layout: stride 64, LLF at [iy*64+ix] for iy in 0..4, ix in 0..8.
+            let mut block = alloc::vec![0.0_f32; 2048];
+            for iy in 0..4 {
+                for ix in 0..8 {
+                    block[iy * 64 + ix] = trial[iy * 8 + ix];
+                }
+            }
+            let mine = dc_from_dct_32x64(*trial);
+            let theirs = jxl_encoder::vardct::dct::dc_from_dct_32x64(&block);
+            for i in 0..32 {
+                assert!(
+                    (mine[i] - theirs[i]).abs() < 5e-3,
+                    "trial {ti} pos {i}: mine={} theirs={}",
+                    mine[i],
+                    theirs[i]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_dc_from_dct_64x64_matches_upstream() {
         let trials: [[f32; 64]; 3] = [
             {
