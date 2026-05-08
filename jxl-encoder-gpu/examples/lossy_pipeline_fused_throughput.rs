@@ -78,7 +78,10 @@ fn main() {
                 b_plane.push(0.3 + 0.5 * (((x + y) % 17) as f32 / 17.0));
             }
         }
-        let weights_g = enc.upload_blocks(&vec![1.0_f32; nb * 64], nb as u32, 64);
+        // Broadcast-weights variant: single 64-float template instead
+        // of nb-replicated copies. Saves nb-1 copies of weights buffer
+        // (3-4 MB at 1024², proportional to image size).
+        let weights_g = enc.upload_blocks(&vec![1.0_f32; 64], 1, 64);
         let qac = vec![4.0_f32; nb];
         let thr = [0.56_f32, 0.62, 0.62, 0.62];
 
@@ -142,10 +145,10 @@ fn main() {
             let coeffs_x = enc.dct_8x8_wide_persistent(&bx_g);
             let coeffs_y = enc.dct_8x8_wide_persistent(&by_g);
             let coeffs_b = enc.dct_8x8_wide_persistent(&bb_g);
-            let q_x = enc.quantize_dct8_persistent(&coeffs_x, &weights_g, &qac, &thr);
-            let q_y = enc.quantize_dct8_persistent(&coeffs_y, &weights_g, &qac, &thr);
-            let q_b = enc.quantize_dct8_persistent(&coeffs_b, &weights_g, &qac, &thr);
-            let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
+            let q_x = enc.quantize_dct8_persistent_broadcast_w(&coeffs_x, &weights_g, &qac, &thr);
+            let q_y = enc.quantize_dct8_persistent_broadcast_w(&coeffs_y, &weights_g, &qac, &thr);
+            let q_b = enc.quantize_dct8_persistent_broadcast_w(&coeffs_b, &weights_g, &qac, &thr);
+            let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent_broadcast_w(
                 &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g, &qac, &qac, &qac, &xf, &bf,
             );
             // No DC restore in split path either, for fair comparison

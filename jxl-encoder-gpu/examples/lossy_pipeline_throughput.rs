@@ -227,7 +227,12 @@ fn main() {
         let mut gpu_r_out = vec![0.0_f32; n];
         let mut gpu_g_out = vec![0.0_f32; n];
         let mut gpu_b_out = vec![0.0_f32; n];
-        let weights_g = enc.upload_blocks(&vec![1.0_f32; nb * 64], nb as u32, 64);
+        // Use the broadcast-weights variant: a single-block 64-float
+        // template instead of nb-replicated copies. Saves
+        // 3 × (nb-1) × 64 × 4 bytes of one-time GPU buffer allocation
+        // (12 MB at 1024², 192 MB at 4096²). Algorithmically identical
+        // to the per-block variant called with replicated weights.
+        let weights_g = enc.upload_blocks(&vec![1.0_f32; 64], 1, 64);
         let qac_vec = vec![qac_qm; nb];
         let xf = vec![0.0_f32; nb];
         let bf = vec![0.0_f32; nb];
@@ -248,7 +253,7 @@ fn main() {
             let bx_g = enc.gather_blocks_persistent(&xx_g, 8, 8);
             let by_g = enc.gather_blocks_persistent(&xy_g, 8, 8);
             let bb_g = enc.gather_blocks_persistent(&xb_g, 8, 8);
-            // DCT8 ×3 + quantize ×3
+            // DCT8 ×3 + quantize ×3 (broadcast-weights kernels)
             // (Cannot use fused DCT+quantize here because we need the
             //  forward DCT output separately for DC restore. Real
             //  encoders use dc_coding for DC and can use the fused
@@ -256,11 +261,17 @@ fn main() {
             let coeffs_x = enc.dct_8x8_wide_persistent(&bx_g);
             let coeffs_y = enc.dct_8x8_wide_persistent(&by_g);
             let coeffs_b = enc.dct_8x8_wide_persistent(&bb_g);
-            let q_x = enc.quantize_dct8_persistent(&coeffs_x, &weights_g, &qac_vec, &thr);
-            let q_y = enc.quantize_dct8_persistent(&coeffs_y, &weights_g, &qac_vec, &thr);
-            let q_b = enc.quantize_dct8_persistent(&coeffs_b, &weights_g, &qac_vec, &thr);
-            // Dequant
-            let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent(
+            let q_x = enc.quantize_dct8_persistent_broadcast_w(
+                &coeffs_x, &weights_g, &qac_vec, &thr,
+            );
+            let q_y = enc.quantize_dct8_persistent_broadcast_w(
+                &coeffs_y, &weights_g, &qac_vec, &thr,
+            );
+            let q_b = enc.quantize_dct8_persistent_broadcast_w(
+                &coeffs_b, &weights_g, &qac_vec, &thr,
+            );
+            // Dequant (broadcast-weights kernel)
+            let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent_broadcast_w(
                 &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g, &qac_vec, &qac_vec, &qac_vec,
                 &xf, &bf,
             );
