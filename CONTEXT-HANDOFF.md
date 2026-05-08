@@ -1,6 +1,23 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-08 (session 6.7 — mixed-strategy reconstruct + LLF family + G5.1 recovery + estimate_entropy_full DCT8)
+**Last updated:** 2026-05-08 (session 6.7 final — G5.1 fully closed via `__internals` feature + cross-repo wiring)
+
+## Session 6.7 G5.1 closure (final)
+
+User approved option B from the A/B/C menu (`__internals` cargo feature in jxl-encoder). Wired through:
+
+| Step | Repo / commit | Notes |
+|---|---|---|
+| Add `__internals` cargo feature in jxl-encoder | `jxl-encoder@c82e05c` | Off by default; gates `pub mod __internals` re-exports + 3 free-function wrappers (`compute_scaled_constants_free`, `epf_step0_strip_free`, `adjust_quant_block_ac_free`) + 2 module visibility bumps (`mod quant`/`quantize` → `pub(crate) mod`). Both default and `--features __internals` builds green. |
+| Wire feature into jxl-encoder-gpu dev-deps | `4e863c71` | `Cargo.toml`: `jxl-encoder = { ..., features = ["std", "__internals"] }` |
+| EPF Step 0 parity → upstream call | `4e863c71` | `examples/epf_step0_parity.rs` rewrites the inline CPU port as a direct `__internals::epf_step0_strip_free` call. Same FP32 numbers (X 4.7e-10 / Y 4.5e-8 / B 4.5e-8). |
+| 3 more *_matches_upstream tests | `e672e1fa` | `compute_scaled_constants` (15 trials), `ytox_ratio` (256 trials), `ytob_ratio` (256 trials), `INV_DC_QUANT` (3 channels) |
+| `adjust_quant_block_ac_host` parity | `b718957f` | 54 trials (6 strategies × 3 channels × 3 quant levels). All 4 outputs + thresholds + quant match exactly. |
+| Docs roll-up | `94ad5bb3` | PORT_STATUS + CHANGELOG |
+
+**G5.1 status: fully compliant.** Total `*_matches_upstream` tests: **16** + 9 LLF restoration helpers transitively validated via roundtrip.
+
+
 
 ## Session 6.7 — mixed-strategy reconstruct + LLF family + G5.1 recovery + estimate_entropy_full DCT8
 
@@ -102,11 +119,7 @@ DCT16x16 zero-input + Upstream mode validated to produce cost ≈ 185.34 (= 7 ×
 | `estimate_entropy_full` DCT8 orchestrator | DONE (host composes leaves) |
 | `estimate_entropy_full` strategy-generic orchestrator | DONE (DCT8/16/32/64 family + IDENTITY/DCT2X2/DCT4) |
 | Full upstream-faithful cost formula | DONE (`CostMode::Upstream` mode incl. X-multiblock weight) |
-| AdjustQuantBlockAC G5.1 parity | BLOCKED — needs cross-repo visibility bump on `pub(crate)` impl method |
-| EPF Step 0 G5.1 parity | BLOCKED — needs cross-repo visibility bump on private `epf_step0_strip` |
-| `compute_scaled_constants` G5.1 parity | BLOCKED — needs cross-repo visibility bump on `pub(super) fn` |
-| `ytox_ratio` / `ytob_ratio` G5.1 parity | BLOCKED — needs `pub mod chroma_from_luma` re-export |
-| `INV_DC_QUANT` G5.1 parity | BLOCKED — needs `pub mod quant` re-export |
+| All 5 former G5.1 BLOCKED entries | DONE — via jxl-encoder `__internals` cargo feature (c82e05c) wired through dev-deps. 16 *_matches_upstream tests. |
 | Per-block-parallel `#[cube]` AdjustQuantBlockAC kernel | OPTIONAL OPT — host helpers in `forks::quantize` are sufficient until profiled bottleneck |
 | Per-(w,h) instance pre-allocation cache | OPTIONAL OPT — TODO in `encoder.rs:70`; not justified without bench numbers (cubecl handles are ref-counted; backend may already pool) |
 
