@@ -18,8 +18,10 @@
 #[cfg(all(feature = "cuda", feature = "encoder", feature = "butteraugli-loop"))]
 fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
-    use jxl_encoder_gpu::forks::butteraugli_loop::{ButteraugliLoopGpu, refine_aq_field_gpu};
-    use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
+    use jxl_encoder_gpu::forks::butteraugli_loop::{
+        ButteraugliLoopGpu, linear_planar_to_srgb_u8_interleaved, refine_aq_field_gpu,
+    };
+    use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
     type Backend = cubecl::cuda::CudaRuntime;
     let enc: GpuEncoder<Backend> = GpuEncoder::new();
@@ -66,13 +68,50 @@ fn main() {
     println!("Distance:      {distance:.2}");
     println!("Iters:         {iters} (loop runs {} iterations total)\n", iters + 1);
 
-    // Initial aq_field from content-driven AQ.
+    // Helper: encode → linear sRGB U8 → butteraugli score against
+    // ORIGINAL pixel bytes. Returns (score, pnorm_3).
+    let measure_score = |bg: &mut ButteraugliLoopGpu<Backend>,
+                         rec_r: &[f32],
+                         rec_g: &[f32],
+                         rec_b: &[f32]|
+     -> (f32, f32) {
+        let recon_srgb = linear_planar_to_srgb_u8_interleaved(
+            rec_r,
+            rec_g,
+            rec_b,
+            w as usize,
+            h as usize,
+        );
+        let result = bg
+            .compute_with_reference(&recon_srgb)
+            .expect("compute_with_reference");
+        (result.score, result.pnorm_3)
+    };
+
+    // Need the reference uploaded ONCE for all baseline measurements.
+    bg.set_reference(&pixels)
+        .expect("set_reference for baselines");
+
+    // Baseline 1: encode with uniform qac (no AQ). This is what
+    // distance_to_qac(distance) maps to.
+    let qac_uniform = distance_to_qac(distance);
+    println!(
+        "Baseline measurements (qac_uniform = distance_to_qac({distance:.2}) = {qac_uniform:.3}):"
+    );
+    let (rec_r_un, rec_g_un, rec_b_un) = lossy.encode_one(&enc, &r, &g, &b, qac_uniform);
+    let (score_un, pn3_un) = measure_score(&mut bg, &rec_r_un, &rec_g_un, &rec_b_un);
+    println!("  uniform qac:    score={score_un:.4}  pnorm_3={pn3_un:.4}");
+
+    // Baseline 2: initial content-driven AQ field (no refinement).
     let initial_aq = lossy.compute_aq_field(&enc, &r, &g, &b, distance);
     let qac_min = initial_aq.iter().copied().fold(f32::INFINITY, f32::min);
     let qac_max = initial_aq.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let qac_mean = initial_aq.iter().copied().sum::<f32>() / nb as f32;
+    let (rec_r_aq, rec_g_aq, rec_b_aq) =
+        lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
+    let (score_aq, pn3_aq) = measure_score(&mut bg, &rec_r_aq, &rec_g_aq, &rec_b_aq);
     println!(
-        "Initial aq_field: min={qac_min:.3} max={qac_max:.3} mean={qac_mean:.3}\n"
+        "  initial AQ:     score={score_aq:.4}  pnorm_3={pn3_aq:.4}  (qac min={qac_min:.3} max={qac_max:.3} mean={qac_mean:.3})\n"
     );
 
     // Use the original sRGB U8 bytes directly as the butteraugli
@@ -136,6 +175,28 @@ fn main() {
         "\nTotal refine_aq_field_gpu time: {:.0} ms ({:.0} ms/iter avg)",
         dt.as_secs_f64() * 1000.0,
         dt.as_secs_f64() * 1000.0 / (iters + 1) as f64
+    );
+    // Final comparison: refined AQ score vs baselines.
+    let refined_score = traces.last().map(|t| t.score).unwrap_or(0.0);
+    let refined_pn3 = traces.last().map(|t| t.pnorm_3).unwrap_or(0.0);
+    println!("\n=== Quality summary (lower butteraugli = better) ===");
+    println!("  uniform qac:    score={score_un:.4}  pnorm_3={pn3_un:.4}");
+    println!("  initial AQ:     score={score_aq:.4}  pnorm_3={pn3_aq:.4}");
+    println!("  refined AQ:     score={refined_score:.4}  pnorm_3={refined_pn3:.4}");
+    println!(
+        "  AQ vs uniform:    {:+.4} ({:+.1}%)",
+        score_aq - score_un,
+        100.0 * (score_aq - score_un) / score_un
+    );
+    println!(
+        "  refined vs AQ:    {:+.4} ({:+.1}%)",
+        refined_score - score_aq,
+        100.0 * (refined_score - score_aq) / score_aq
+    );
+    println!(
+        "  refined vs uniform: {:+.4} ({:+.1}%)",
+        refined_score - score_un,
+        100.0 * (refined_score - score_un) / score_un
     );
     println!(
         "\nNote: this is the qac-domain adaptation — the integer-step\n\
