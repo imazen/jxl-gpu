@@ -47,6 +47,73 @@ use butteraugli_gpu::{Butteraugli, ButteraugliParams, GpuButteraugliResult};
 use cubecl::Runtime;
 
 use crate::encoder::GpuEncoder;
+use crate::lossy_encoder::LossyEncoder;
+
+/// Convert a linear-light f32 value (clamped to [0, 1]) to an sRGB U8
+/// byte using the IEC 61966-2-1 piecewise transfer function.
+///
+/// Matches the inverse of [`butteraugli_gpu::kernels::colors::
+/// srgb_byte_to_linear`] — round-tripping linear→u8→linear introduces
+/// only quantization error (no transfer-function mismatch).
+///
+/// **Use this helper, not the simplified gamma-2.4 form**, when feeding
+/// pixels to butteraugli-gpu. The CLAUDE.md note "PNG Color Metadata
+/// Causes Bogus Butteraugli Scores" is the same root cause class:
+/// transfer-function mismatch between input and what the metric assumes.
+#[inline]
+pub fn linear_f32_to_srgb_u8(v: f32) -> u8 {
+    let v = v.clamp(0.0, 1.0);
+    let s = if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round() as u8
+}
+
+/// Interleave three linear-light f32 planes into an interleaved sRGB U8
+/// buffer (`width * height * 3` bytes), suitable for feeding directly
+/// into [`ButteraugliLoopGpu::set_reference`] /
+/// [`ButteraugliLoopGpu::compute_with_reference`].
+///
+/// Caller-supplied `dst` must be exactly `width * height * 3` bytes.
+/// Use [`linear_planar_to_srgb_u8_interleaved`] for the allocating
+/// convenience wrapper.
+pub fn linear_planar_to_srgb_u8_interleaved_into(
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    width: usize,
+    height: usize,
+    dst: &mut [u8],
+) {
+    let n = width * height;
+    debug_assert_eq!(r.len(), n);
+    debug_assert_eq!(g.len(), n);
+    debug_assert_eq!(b.len(), n);
+    debug_assert_eq!(dst.len(), n * 3);
+    for i in 0..n {
+        let i3 = i * 3;
+        dst[i3] = linear_f32_to_srgb_u8(r[i]);
+        dst[i3 + 1] = linear_f32_to_srgb_u8(g[i]);
+        dst[i3 + 2] = linear_f32_to_srgb_u8(b[i]);
+    }
+}
+
+/// Allocating convenience wrapper around
+/// [`linear_planar_to_srgb_u8_interleaved_into`]. Returns a fresh
+/// `width * height * 3`-byte buffer.
+pub fn linear_planar_to_srgb_u8_interleaved(
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
+    let mut dst = alloc::vec![0u8; width * height * 3];
+    linear_planar_to_srgb_u8_interleaved_into(r, g, b, width, height, &mut dst);
+    dst
+}
 
 /// Persistent butteraugli compute state for the iterative quant
 /// refinement loop. Construct once per encode (with the original
@@ -127,6 +194,20 @@ impl<R: Runtime> ButteraugliLoopGpu<R> {
         params: &ButteraugliParams,
     ) -> butteraugli_gpu::Result<GpuButteraugliResult> {
         self.inner.compute_with_options(ref_srgb, dist_srgb, params)
+    }
+
+    /// Read the per-pixel diffmap (post-`compute*`) into a caller-supplied
+    /// buffer — no allocation. `dst.len()` must be ≥ `width × height`.
+    /// Use this in the iterative refinement loop to avoid per-iter Vec
+    /// allocation overhead.
+    pub fn copy_diffmap_to(&self, dst: &mut [f32]) -> butteraugli_gpu::Result<()> {
+        self.inner.copy_diffmap_to(dst)
+    }
+
+    /// Read the per-pixel diffmap (post-`compute*`) into a fresh Vec.
+    /// Allocating variant; prefer [`Self::copy_diffmap_to`] in hot loops.
+    pub fn copy_diffmap(&self) -> Vec<f32> {
+        self.inner.copy_diffmap()
     }
 }
 
@@ -496,6 +577,135 @@ pub fn refine_quant_field_one_iter(
     tile_dist
 }
 
+/// Per-iteration trace event from [`refine_aq_field_gpu`]. Caller may
+/// inspect (e.g., to log butteraugli score progression) or ignore.
+#[derive(Debug, Clone)]
+pub struct RefineIterTrace {
+    /// 0-based iteration index. Loop runs `iters + 1` iterations total
+    /// (final one is compare-only).
+    pub iter: usize,
+    /// Total iters scheduled (== `cfg.iters`).
+    pub iters: usize,
+    /// Butteraugli max-norm score for this iteration's reconstruction.
+    pub score: f32,
+    /// Butteraugli libjxl 3-norm score for this iteration's reconstruction.
+    pub pnorm_3: f32,
+    /// Per-block tile distances after the (8×8) reduction.
+    pub tile_dist: Vec<f32>,
+}
+
+/// End-to-end butteraugli refinement loop with GPU-substituted
+/// per-iteration distance compute.
+///
+/// **Qac-domain adaptation.** Operates on the per-block `aq_field` (qac
+/// multiplier) directly — diverges from upstream's `quant_field_float`
+/// + `global_scale` + integer rounding model. Specifically:
+/// - `inv_global_scale = 1.0`, `quantizer_scale = 0.0` are passed to
+///   the per-iter helper, neutering the upstream "integer-step minimum
+///   bump" check (lines 366-371, 392-397). Our pipeline uses float qac
+///   directly so there's no integer step to round-into.
+/// - Deviation bounds are still computed from the initial aq_field,
+///   keeping iteration adjustments bounded relative to the calibration.
+///
+/// The other three helpers (`compute_tile_distances`,
+/// `clamp_toward_initial`, `adjust_quant_field`) operate identically.
+///
+/// **Callers**: pass `r/g/b` as linear-light f32 planes (the same input
+/// you'd hand to [`LossyEncoder::encode_one_adaptive`]) plus an initial
+/// `aq_field` (e.g., from [`LossyEncoder::compute_aq_field`]). Returns
+/// the refined per-block `aq_field` after `iters + 1` iterations.
+///
+/// **`trace`**: optional per-iteration callback invoked with the
+/// reconstruction's butteraugli score + tile distances. Pass `|_| ()`
+/// to ignore.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_aq_field_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    lossy: &LossyEncoder<R>,
+    bg: &mut ButteraugliLoopGpu<R>,
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    initial_aq_field: &[f32],
+    target_distance: f32,
+    iters: usize,
+    mut trace: impl FnMut(RefineIterTrace),
+) -> butteraugli_gpu::Result<Vec<f32>> {
+    let (width, height) = lossy.dimensions();
+    let (xsize_blocks, ysize_blocks) = {
+        let (pw, ph) = lossy.padded_dimensions();
+        (pw as usize / 8, ph as usize / 8)
+    };
+    let n_pixels = (width as usize) * (height as usize);
+
+    // Upload reference (original) sRGB once. Cached internally.
+    let ref_srgb = linear_planar_to_srgb_u8_interleaved(r, g, b, width as usize, height as usize);
+    bg.set_reference(&ref_srgb)?;
+
+    // Per-encode invariants: deviation bounds + AC strategy info.
+    let bounds = DeviationBounds::compute(initial_aq_field);
+    let (is_first_storage, cx_storage, cy_storage) =
+        dct8_only_storage(xsize_blocks * ysize_blocks);
+    let cfg = RefineConfig {
+        width: width as usize,
+        height: height as usize,
+        xsize_blocks,
+        ysize_blocks,
+        info: dct8_only_info(&is_first_storage, &cx_storage, &cy_storage),
+        target_distance,
+        iters,
+        bounds,
+    };
+
+    // Mutable per-iteration state. `aq_field` is the working field;
+    // `initial_aq_field` is preserved for the kOriginalComparisonRound
+    // clamp.
+    let mut aq_field = initial_aq_field.to_vec();
+    let mut diffmap = alloc::vec![0.0_f32; n_pixels];
+    let mut recon_srgb = alloc::vec![0u8; n_pixels * 3];
+
+    for iter in 0..=iters {
+        // Step 1: encode at current aq_field, get reconstructed linear RGB.
+        let (rec_r, rec_g, rec_b) = lossy.encode_one_adaptive(enc, r, g, b, &aq_field);
+
+        // Step 2: convert recon → sRGB U8 → butteraugli compute.
+        linear_planar_to_srgb_u8_interleaved_into(
+            &rec_r,
+            &rec_g,
+            &rec_b,
+            width as usize,
+            height as usize,
+            &mut recon_srgb,
+        );
+        let result = bg.compute_with_reference(&recon_srgb)?;
+
+        // Step 3: pull diffmap to host (no-alloc into preallocated buf).
+        bg.copy_diffmap_to(&mut diffmap)?;
+
+        // Step 4: reduce diffmap → per-block tile distances → adjust qf.
+        let tile_dist = refine_quant_field_one_iter(
+            &mut aq_field,
+            initial_aq_field,
+            &diffmap,
+            iter,
+            // qac-domain: integer-step bump is neutered. See doc comment.
+            1.0,
+            0.0,
+            &cfg,
+        );
+
+        trace(RefineIterTrace {
+            iter,
+            iters,
+            score: result.score,
+            pnorm_3: result.pnorm_3,
+            tile_dist,
+        });
+    }
+
+    Ok(aq_field)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +1053,59 @@ mod tests {
         }
     }
 
+    // ===== sRGB conversion helpers =====
+
+    /// Round-trip the full IEC sRGB transfer: linear f32 → sRGB U8 →
+    /// linear f32 (via butteraugli-gpu's reference inverse). Should
+    /// match within quantization error (~1/255).
+    #[test]
+    fn test_linear_f32_to_srgb_u8_iec_roundtrip() {
+        let inverse = |b: u8| {
+            let f = b as f32 / 255.0;
+            if f <= 0.04045 {
+                f / 12.92
+            } else {
+                ((f + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        for &v in &[0.0_f32, 0.001, 0.01, 0.04045, 0.1, 0.5, 0.9, 1.0] {
+            let u = linear_f32_to_srgb_u8(v);
+            let v2 = inverse(u);
+            // Quantization error at most ~1/255 = 0.004 in linear.
+            // Be generous near black where 1 byte == many linear LSBs.
+            let tol = if v < 0.01 { 0.0005 } else { 0.005 };
+            assert!(
+                (v - v2).abs() < tol,
+                "v={v} u={u} v2={v2} diff={}",
+                (v - v2).abs()
+            );
+        }
+    }
+
+    /// Linear 0.0 → 0; linear 1.0 → 255. Endpoints exact.
+    #[test]
+    fn test_linear_f32_to_srgb_u8_endpoints() {
+        assert_eq!(linear_f32_to_srgb_u8(0.0), 0);
+        assert_eq!(linear_f32_to_srgb_u8(1.0), 255);
+        assert_eq!(linear_f32_to_srgb_u8(-0.5), 0);
+        assert_eq!(linear_f32_to_srgb_u8(1.5), 255);
+    }
+
+    #[test]
+    fn test_linear_planar_to_srgb_u8_interleaved_basic() {
+        let r = alloc::vec![1.0_f32; 4];
+        let g = alloc::vec![0.0_f32; 4];
+        let b = alloc::vec![0.5_f32; 4];
+        let out = linear_planar_to_srgb_u8_interleaved(&r, &g, &b, 2, 2);
+        assert_eq!(out.len(), 12);
+        for i in 0..4 {
+            assert_eq!(out[i * 3], 255);
+            assert_eq!(out[i * 3 + 1], 0);
+            // 0.5 linear → ~0.7354 sRGB → ~187
+            assert!((out[i * 3 + 2] as i32 - 188).abs() <= 1);
+        }
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     fn test_butteraugli_loop_gpu_constructs_smoke() {
@@ -854,5 +1117,48 @@ mod tests {
         assert_eq!(bg.dimensions(), (64, 64));
         let bg2 = ButteraugliLoopGpu::new_multires(&enc, 128, 128);
         assert_eq!(bg2.dimensions(), (128, 128));
+    }
+
+    /// End-to-end smoke test: refine_aq_field_gpu runs without panic on
+    /// a small synthetic gradient. No assertion on the refined field's
+    /// shape (calibration not yet validated against real images), only
+    /// on completion + the trace callback firing the expected number of
+    /// times.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_refine_aq_field_gpu_smoke() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, 64, 64);
+        let mut bg = ButteraugliLoopGpu::new(&enc, 64, 64);
+        let n = 64 * 64;
+        let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.5 * (i as f32 / n as f32)).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * (i as f32 / n as f32)).collect();
+        let initial = lossy.compute_aq_field(&enc, &r, &g, &b, 1.0);
+        let mut traces = alloc::vec![];
+        let refined = refine_aq_field_gpu(
+            &enc,
+            &lossy,
+            &mut bg,
+            &r,
+            &g,
+            &b,
+            &initial,
+            1.0,
+            2,
+            |t| traces.push(t),
+        )
+        .expect("refine_aq_field_gpu should not error");
+        // 2 iters → 3 trace events (iter 0, 1, 2).
+        assert_eq!(traces.len(), 3);
+        // Refined field same shape as initial.
+        assert_eq!(refined.len(), initial.len());
+        // Score progression: trace[0].score >= trace[2].score most of
+        // the time but synthetic gradient is unstable; just check finite.
+        for t in &traces {
+            assert!(t.score.is_finite());
+            assert!(t.pnorm_3.is_finite());
+        }
     }
 }
