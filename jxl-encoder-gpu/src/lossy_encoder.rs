@@ -756,14 +756,23 @@ impl<R: Runtime> LossyEncoder<R> {
         b: &[f32],
         distance: f32,
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-        use crate::forks::cost::{compute_scaled_constants, strategy_search_costs_dct8_16x16};
+        use crate::forks::cost::{
+            compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16,
+            strategy_search_costs_dct8_16x16,
+        };
         use crate::forks::reconstruct::{
             compute_dc_grid_per_8x8_block, encode_and_reconstruct_mixed_strategy_3channel,
             gab_weights,
         };
-        use crate::forks::transform::{RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16};
-        use crate::pipeline::{partitions_16x16_to_assignments, select_partitions_16x16};
-        use crate::quant_weights::{dct8_weights_per_channel, dct16x16_weights_per_channel};
+        use crate::forks::transform::{
+            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT8X16,
+        };
+        use crate::pipeline::{
+            partitions_16x16_to_assignments, select_partitions_16x16_full, CostGrids16x16,
+        };
+        use crate::quant_weights::{
+            dct16x16_weights_per_channel, dct16x8_weights_per_channel, dct8_weights_per_channel,
+        };
 
         let (w, h) = (self.width as usize, self.height as usize);
         let (pw, ph) = (self.padded_width as usize, self.padded_height as usize);
@@ -791,15 +800,19 @@ impl<R: Runtime> LossyEncoder<R> {
         // Stage 3: mask1x1 from Y channel
         let mask1x1 = enc.mask1x1_field(&xyb_y, self.padded_width, self.padded_height);
 
-        // Stage 4: cost grids (DCT8 + DCT16x16)
+        // Stage 4: cost grids — DCT8, DCT16x16, DCT16x8, DCT8x16
         let (dct8_x, dct8_y, dct8_b) = dct8_weights_per_channel();
         let (dct16_x, dct16_y, dct16_b) = dct16x16_weights_per_channel();
+        let (dct16x8_x, dct16x8_y, dct16x8_b) = dct16x8_weights_per_channel();
         let inv_8x: Vec<f32> = dct8_x.iter().map(|w| 1.0 / w).collect();
         let inv_8y: Vec<f32> = dct8_y.iter().map(|w| 1.0 / w).collect();
         let inv_8b: Vec<f32> = dct8_b.iter().map(|w| 1.0 / w).collect();
         let inv_16x: Vec<f32> = dct16_x.iter().map(|w| 1.0 / w).collect();
         let inv_16y: Vec<f32> = dct16_y.iter().map(|w| 1.0 / w).collect();
         let inv_16b: Vec<f32> = dct16_b.iter().map(|w| 1.0 / w).collect();
+        let inv_16x8_x: Vec<f32> = dct16x8_x.iter().map(|w| 1.0 / w).collect();
+        let inv_16x8_y: Vec<f32> = dct16x8_y.iter().map(|w| 1.0 / w).collect();
+        let inv_16x8_b: Vec<f32> = dct16x8_b.iter().map(|w| 1.0 / w).collect();
         let qac = distance_to_qac(distance);
         // libjxl effort 7+ default base constants for compute_scaled_constants
         let scaled_constants = compute_scaled_constants(distance, (1.2, 9.308_906, 10.833_273));
@@ -832,8 +845,59 @@ impl<R: Runtime> LossyEncoder<R> {
             scaled_constants,
         );
 
+        let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16(
+            enc,
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            pw,
+            ph,
+            &mask1x1,
+            RAW_STRATEGY_DCT16X8,
+            &dct16x8_x,
+            &dct16x8_y,
+            &dct16x8_b,
+            &inv_16x8_x,
+            &inv_16x8_y,
+            &inv_16x8_b,
+            qac,
+            qac,
+            qac,
+            0,
+            0,
+            scaled_constants,
+        );
+        let cost_dct8x16 = strategy_search_costs_dct16x8_or_8x16(
+            enc,
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            pw,
+            ph,
+            &mask1x1,
+            RAW_STRATEGY_DCT8X16,
+            &dct16x8_x,
+            &dct16x8_y,
+            &dct16x8_b,
+            &inv_16x8_x,
+            &inv_16x8_y,
+            &inv_16x8_b,
+            qac,
+            qac,
+            qac,
+            0,
+            0,
+            scaled_constants,
+        );
+
         // Stage 5: host-side selector + assignments
-        let partitions = select_partitions_16x16(&cost_dct8, &cost_dct16, xb8, yb8);
+        let extra = CostGrids16x16 {
+            dct_16x8: Some(&cost_dct16x8),
+            dct_8x16: Some(&cost_dct8x16),
+            sub_blocks: Default::default(),
+        };
+        let partitions =
+            select_partitions_16x16_full(&cost_dct8, &cost_dct16, extra, xb8, yb8);
         let assignments = partitions_16x16_to_assignments(&partitions, xb8, yb8);
 
         // Stage 6: per-channel DC grids
@@ -841,7 +905,8 @@ impl<R: Runtime> LossyEncoder<R> {
         let dc_grid_y = compute_dc_grid_per_8x8_block(&xyb_y, pw, ph);
         let dc_grid_b = compute_dc_grid_per_8x8_block(&xyb_b, pw, ph);
 
-        // Stage 7: encode + reconstruct via mixed-strategy IDCT
+        // Stage 7: encode + reconstruct via mixed-strategy IDCT.
+        // Strategies supported: DCT8, DCT16x16, DCT16x8, DCT8x16.
         let qac_vec = vec![qac; nb8];
         let dct8_x_clone = dct8_x;
         let dct8_y_clone = dct8_y;
@@ -849,25 +914,31 @@ impl<R: Runtime> LossyEncoder<R> {
         let dct16_x_clone = dct16_x.clone();
         let dct16_y_clone = dct16_y.clone();
         let dct16_b_clone = dct16_b.clone();
+        let dct16x8_x_clone = dct16x8_x.clone();
+        let dct16x8_y_clone = dct16x8_y.clone();
+        let dct16x8_b_clone = dct16x8_b.clone();
         let weights_x_for = move |strat: u8| -> Vec<f32> {
             match strat {
                 RAW_STRATEGY_DCT => dct8_x_clone.to_vec(),
                 RAW_STRATEGY_DCT16X16 => dct16_x_clone.clone(),
-                _ => panic!("Phase A MVP supports only DCT8 + DCT16x16"),
+                RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => dct16x8_x_clone.clone(),
+                _ => panic!("Phase B strategy {strat} not yet wired into encoder"),
             }
         };
         let weights_y_for = move |strat: u8| -> Vec<f32> {
             match strat {
                 RAW_STRATEGY_DCT => dct8_y_clone.to_vec(),
                 RAW_STRATEGY_DCT16X16 => dct16_y_clone.clone(),
-                _ => panic!("Phase A MVP supports only DCT8 + DCT16x16"),
+                RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => dct16x8_y_clone.clone(),
+                _ => panic!("Phase B strategy {strat} not yet wired into encoder"),
             }
         };
         let weights_b_for = move |strat: u8| -> Vec<f32> {
             match strat {
                 RAW_STRATEGY_DCT => dct8_b_clone.to_vec(),
                 RAW_STRATEGY_DCT16X16 => dct16_b_clone.clone(),
-                _ => panic!("Phase A MVP supports only DCT8 + DCT16x16"),
+                RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => dct16x8_b_clone.clone(),
+                _ => panic!("Phase B strategy {strat} not yet wired into encoder"),
             }
         };
         let mut plane_x = vec![0.0_f32; pw * ph];

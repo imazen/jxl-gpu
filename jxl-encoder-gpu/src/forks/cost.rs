@@ -1266,6 +1266,97 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
     (cost_dct8, cost_dct16x16)
 }
 
+/// Cost grid for one rectangular DCT16x8 or DCT8x16 strategy, sharing
+/// the inputs already prepared by [`strategy_search_costs_dct8_16x16`].
+///
+/// `tile_w`/`tile_h` give the strategy's pixel footprint:
+/// - DCT16x8: tile_w=8, tile_h=16  (block is 16 tall × 8 wide pixels →
+///   1-block-wide × 2-blocks-tall in the 8x8 grid)
+/// - DCT8x16: tile_w=16, tile_h=8  (block is 8 tall × 16 wide pixels →
+///   2-blocks-wide × 1-block-tall in the 8x8 grid)
+///
+/// Returns the per-block cost grid in row-major order at the strategy's
+/// natural alignment. Use the result as `extra.dct_16x8` or
+/// `extra.dct_8x16` in [`select_partitions_16x16_full`].
+///
+/// Phase A note: hard-codes the libjxl entropy_mul (1.21 for DCT16x8/
+/// DCT8x16). Per-strategy mul/bonus/penalty post-processing deferred
+/// to Phase C; same caveat as `strategy_search_costs_dct8_16x16`.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct16x8_or_8x16<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_x: &[f32],
+    xyb_y: &[f32],
+    xyb_b: &[f32],
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &[f32],
+    raw_strategy: u8,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> Vec<f32> {
+    use crate::forks::transform::{tile_dims_pixels, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT8X16};
+    debug_assert!(
+        raw_strategy == RAW_STRATEGY_DCT16X8 || raw_strategy == RAW_STRATEGY_DCT8X16,
+        "this helper is for DCT16x8/DCT8x16 only; got {raw_strategy}"
+    );
+    let (tile_w, tile_h) = tile_dims_pixels(raw_strategy);
+    let bx = padded_width / tile_w;
+    let by = padded_height / tile_h;
+    let n_blocks = bx * by;
+
+    let bx_p = repack_plane_to_blocks(xyb_x, padded_width, padded_height, tile_w, tile_h);
+    let by_p = repack_plane_to_blocks(xyb_y, padded_width, padded_height, tile_w, tile_h);
+    let bb_p = repack_plane_to_blocks(xyb_b, padded_width, padded_height, tile_w, tile_h);
+    let mask_row_base: Vec<u32> = (0..n_blocks)
+        .map(|i| {
+            let bx_i = i % bx;
+            let by_i = i / bx;
+            (by_i * tile_h * padded_width + bx_i * tile_w) as u32
+        })
+        .collect();
+
+    // libjxl entropy_mul: profile.entropy_mul_table[DCT16X8 / DCT8X16] = 1.21
+    let entropy_mul = 1.21_f32;
+
+    estimate_entropy_full_strategy_batch_gpu(
+        enc,
+        &bx_p,
+        &by_p,
+        &bb_p,
+        raw_strategy,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        &mask_row_base,
+        padded_width as u32,
+        scaled_constants,
+        entropy_mul,
+        CostMode::Upstream {
+            quant_for_coeffs: quant_y,
+        },
+    )
+}
+
 /// Useful as a quick proxy cost — cheaper than full pixel-loss but
 /// still mask-aware.
 #[allow(clippy::too_many_arguments)]
