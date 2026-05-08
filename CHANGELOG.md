@@ -78,6 +78,51 @@ LLF helpers in place, the dispatcher just needs to: read DC grid →
 call the right LLF restorer → write LLF positions into the
 coefficient block → run per-strategy IDCT → scatter.
 
+### G5.1 fully compliant via `__internals` feature (jxl-encoder `c82e05c`, jxl-encoder-gpu `4e863c71`, `e672e1fa`, `b718957f`)
+
+Closes the validation gap for all 5 former in-tree-only entries by
+adding an off-by-default `__internals` cargo feature in jxl-encoder
+that re-exports the 5 private symbols downstream parity tests need:
+
+- `epf_step0_strip` (was bare `fn`; bumped to `pub(crate)` + free
+  wrapper `epf_step0_strip_free`)
+- `adjust_quant_block_ac` (was `pub(crate)` impl method; free
+  wrapper `adjust_quant_block_ac_free` calls it)
+- `compute_scaled_constants` (was `pub(super)`; bumped to `pub(crate)`
+  + free wrapper `compute_scaled_constants_free`)
+- `ytox_ratio` + `ytob_ratio` (already `pub fn`; just needed
+  `pub(crate) mod chroma_from_luma` to re-export from `__internals`)
+- `INV_DC_QUANT` (already `pub const`; needed `pub(crate) mod quant`)
+
+jxl-encoder side (`c82e05c`):
+- New `__internals = []` cargo feature with descriptive doc.
+- New `pub mod __internals` in `lib.rs` gated by the feature, with
+  `pub use` re-exports of the 5 above.
+- Visibility bumps on `mod quant` and `mod quantize` (private →
+  `pub(crate)`) + the 3 wrappers.
+- Default build unchanged. Both `cargo build -p jxl-encoder` and
+  `cargo build -p jxl-encoder --features __internals` succeed.
+
+jxl-encoder-gpu side (`4e863c71`, `e672e1fa`, `b718957f`):
+- `Cargo.toml` dev-dep updated: `jxl-encoder = { ..., features =
+  ["std", "__internals"] }`.
+- `examples/epf_step0_parity.rs` rewrites the inline CPU port as
+  a direct call to `jxl_encoder::__internals::epf_step0_strip_free`.
+  Same FP32 numbers (X: 4.66e-10, Y: 4.47e-8, B: 4.47e-8) — confirms
+  both the prior hand-roll AND the GPU port matched upstream all
+  along, but now the test can't share a bug with itself.
+- 4 new `*_matches_upstream` tests:
+  - `compute_scaled_constants` (15 trials × 3 outputs each)
+  - `ytox_ratio` (256 trials, exact equality)
+  - `ytob_ratio` (256 trials, exact equality)
+  - `INV_DC_QUANT` (3 channels, exact equality)
+  - `adjust_quant_block_ac_host` (54 trials = 6 strategies × 3
+    channels × 3 quant levels — all 4 outputs + thresholds + quant
+    match exactly)
+
+**Total G5.1-compliant `*_matches_upstream` tests: 16** (was 11)
++ 9 LLF restoration helpers transitively validated via roundtrip.
+
 ### X-multiblock weight integrated into orchestrator (`c344bbd2`, `c4513137`)
 
 Closes the X-channel multi-block weight caveat from
