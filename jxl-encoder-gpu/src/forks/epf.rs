@@ -245,7 +245,7 @@ pub fn apply_epf_step2_gpu<R: Runtime>(
 ///        - apply_epf_chain_gpu(&recon, inv_sigma, ...)
 ///        - error_maps[ci] = block_l2_errors(original, recon, mask)
 ///   4. sharpness_map = select_sharpness_two_pass(error_maps,
-///                          candidates, distance.clamp(0.5, 10.0))
+///      candidates, distance.clamp(0.5, 10.0))
 ///
 /// **DCT8-only constraint**: this caller assumes every block in the
 /// image uses the DCT8 strategy (which is the common case for

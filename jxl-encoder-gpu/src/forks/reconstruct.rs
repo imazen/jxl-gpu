@@ -73,6 +73,7 @@ pub const DCT_RESAMPLE_SCALE_32_TO_4: [f32; 4] =
 
 /// In-place 4-point DCT (libjxl `dct1d_4`). Pure scalar, used by the
 /// DCT32 LLF restoration.
+#[allow(clippy::approx_constant)] // upstream literal SQRT2 = 1.41421356237
 fn dct1d_4(mem: &mut [f32]) {
     const SQRT2: f32 = 1.414_213_5;
     const WC4: [f32; 2] = [0.541_196_1, 1.306_563_0];
@@ -107,6 +108,7 @@ fn dct1d_2(mem: &mut [f32]) {
 /// In-place 8-point DCT (libjxl `dct1d_8`). Pure scalar — bit-for-bit
 /// port of upstream's `dct1d_8_val` butterfly. Used by the DCT64×64 /
 /// DCT64×32 / DCT32×64 LLF restoration.
+#[allow(clippy::approx_constant)] // upstream literal SQRT2 = 1.41421356237
 fn dct1d_8(mem: &mut [f32]) {
     const SQRT2: f32 = 1.414_213_5;
     const WC4: [f32; 2] = [0.541_196_1, 1.306_563_0];
@@ -381,6 +383,7 @@ pub fn scatter_block_to_plane(
 ///
 /// Includes the `*= 8` scaling to compensate for the `1/8` scaling
 /// applied by upstream's `dct_8x8` wrapper.
+#[allow(clippy::approx_constant)] // upstream literal SQRT2 = 1.41421356237
 fn idct1d_8(mem: &mut [f32]) {
     const INV_SQRT2: f32 = 1.0 / 1.414_213_5;
     const INV_WC4: [f32; 2] = [1.0 / 0.541_196_1, 1.0 / 1.306_563_0];
@@ -557,6 +560,7 @@ pub fn dc_from_dct_32x64(llf_grid: [f32; 32]) -> [f32; 32] {
 /// Fast 1D IDCT for N=4 — bit-for-bit port of upstream
 /// `vardct::dct::inverse::idct1d_4`. Pure scalar; matched inverse of
 /// our private `dct1d_4` (i.e., `idct1d_4(dct1d_4(x)) == x`).
+#[allow(clippy::approx_constant)] // upstream literal INV_SQRT2 = 1/1.41421356237
 fn idct1d_4(mem: &mut [f32]) {
     const INV_SQRT2: f32 = 1.0 / 1.414_213_5;
     const INV_WC4: [f32; 2] = [1.0 / 0.541_196_1, 1.0 / 1.306_563_0];
