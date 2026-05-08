@@ -434,6 +434,45 @@ mod tests {
     }
 
     #[test]
+    fn test_entropy_mul_table_reference_matches_upstream() {
+        // G5.1 parity: every field of our EntropyMulTable::reference()
+        // must match jxl_encoder::effort::EntropyMulTable::reference()
+        // exactly. Catches any drift if upstream tunes the table.
+        let mine = EntropyMulTable::reference();
+        let theirs = jxl_encoder::effort::EntropyMulTable::reference();
+        assert_eq!(mine.dct8, theirs.dct8);
+        assert_eq!(mine.dct4x4, theirs.dct4x4);
+        assert_eq!(mine.dct4x8, theirs.dct4x8);
+        assert_eq!(mine.identity, theirs.identity);
+        assert_eq!(mine.dct2x2, theirs.dct2x2);
+        assert_eq!(mine.afv, theirs.afv);
+        assert_eq!(mine.dct16x8, theirs.dct16x8);
+        assert_eq!(mine.dct16x16, theirs.dct16x16);
+        assert_eq!(mine.dct16x32, theirs.dct16x32);
+        assert_eq!(mine.dct32x32, theirs.dct32x32);
+        assert_eq!(mine.dct64x32, theirs.dct64x32);
+        assert_eq!(mine.dct64x64, theirs.dct64x64);
+    }
+
+    #[test]
+    fn test_entropy_mul_table_experimental_matches_upstream() {
+        let mine = EntropyMulTable::experimental();
+        let theirs = jxl_encoder::effort::EntropyMulTable::experimental();
+        assert_eq!(mine.dct8, theirs.dct8);
+        assert_eq!(mine.dct4x4, theirs.dct4x4);
+        assert_eq!(mine.dct4x8, theirs.dct4x8);
+        assert_eq!(mine.identity, theirs.identity);
+        assert_eq!(mine.dct2x2, theirs.dct2x2);
+        assert_eq!(mine.afv, theirs.afv);
+        assert_eq!(mine.dct16x8, theirs.dct16x8);
+        assert_eq!(mine.dct16x16, theirs.dct16x16);
+        assert_eq!(mine.dct16x32, theirs.dct16x32);
+        assert_eq!(mine.dct32x32, theirs.dct32x32);
+        assert_eq!(mine.dct64x32, theirs.dct64x32);
+        assert_eq!(mine.dct64x64, theirs.dct64x64);
+    }
+
+    #[test]
     fn test_entropy_mul_table_reference() {
         let t = EntropyMulTable::reference();
         assert_eq!(t.dct8, 0.8);
