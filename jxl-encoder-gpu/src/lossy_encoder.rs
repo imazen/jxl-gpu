@@ -899,7 +899,9 @@ impl<R: Runtime> LossyEncoder<R> {
         );
 
 
-        // Stage 8: postpass (gab_smooth + xyb_to_linear; EPF deferred)
+        // Stage 8: postpass (gab_smooth + EPF + xyb_to_linear), matching
+        // run_pipeline_with_qac. EPF closes most of the perceptual gap
+        // vs the uniform-qac DCT8 baseline.
         let recon_x_p =
             enc.upload_plane(&plane_x, self.padded_width, self.padded_height);
         let recon_y_p =
@@ -910,8 +912,64 @@ impl<R: Runtime> LossyEncoder<R> {
         let recon_x_p = enc.gab_smooth_persistent(&recon_x_p, gw_c, gw1, gw2);
         let recon_y_p = enc.gab_smooth_persistent(&recon_y_p, gw_c, gw1, gw2);
         let recon_b_p = enc.gab_smooth_persistent(&recon_b_p, gw_c, gw1, gw2);
+
+        // EPF step 1+2 (matches run_pipeline_with_qac). Per-block qac maps
+        // to u8 quant_field via `clamp(qac * 50, 1, 255)`; sharpness is
+        // uniform 4 (libjxl default).
+        let qf_u8: Vec<u8> = qac_vec
+            .iter()
+            .map(|&q| (q * 50.0).round().clamp(1.0, 255.0) as u8)
+            .collect();
+        let sharpness = vec![4_u8; nb8];
+        let inv_sigma_vec = crate::forks::epf::compute_inv_sigma_map(
+            &qf_u8,
+            &sharpness,
+            0.01,
+            xb8,
+            yb8,
+        );
+        let inv_sigma_h = enc.upload_inv_sigma(&inv_sigma_vec);
+        let xsize_blocks = self.padded_width / 8;
+        let ysize_blocks = self.padded_height / 8;
+
+        let pad1 = 2_u32;
+        let p1_x = enc.pad_plane_persistent(&recon_x_p, pad1);
+        let p1_y = enc.pad_plane_persistent(&recon_y_p, pad1);
+        let p1_b = enc.pad_plane_persistent(&recon_b_p, pad1);
+        let (s1_x, s1_y, s1_b) = enc.epf_step1_persistent(
+            &p1_x,
+            &p1_y,
+            &p1_b,
+            &inv_sigma_h,
+            self.padded_width,
+            self.padded_height,
+            xsize_blocks,
+            ysize_blocks,
+            pad1,
+            1.65,
+            crate::forks::epf::EPF_BORDER_SAD_MUL,
+        );
+
+        let pad2 = 1_u32;
+        let p2_x = enc.pad_plane_persistent(&s1_x, pad2);
+        let p2_y = enc.pad_plane_persistent(&s1_y, pad2);
+        let p2_b = enc.pad_plane_persistent(&s1_b, pad2);
+        let (s2_x, s2_y, s2_b) = enc.epf_step2_persistent(
+            &p2_x,
+            &p2_y,
+            &p2_b,
+            &inv_sigma_h,
+            self.padded_width,
+            self.padded_height,
+            xsize_blocks,
+            ysize_blocks,
+            pad2,
+            crate::forks::epf::EPF_PASS2_SIGMA_SCALE * 1.65,
+            crate::forks::epf::EPF_BORDER_SAD_MUL,
+        );
+
         let (rgb_r, rgb_g, rgb_b) =
-            enc.xyb_to_linear_rgb_planar_persistent(&recon_x_p, &recon_y_p, &recon_b_p);
+            enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
         let r_out = enc.download_plane(&rgb_r);
         let g_out = enc.download_plane(&rgb_g);
         let b_out = enc.download_plane(&rgb_b);
