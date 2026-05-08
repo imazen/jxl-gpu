@@ -189,6 +189,56 @@ pub fn quantize_blocks_gpu<R: Runtime>(
     }
 }
 
+/// Broadcast-weights variant of [`quantize_blocks_gpu`].
+/// `weights_template` is exactly `grid_width * grid_height` f32 (one
+/// quant matrix); the kernel broadcasts across all blocks. Saves
+/// `(num_blocks - 1) * grid_width * grid_height * 4` bytes of upload
+/// traffic when callers were previously replicating the matrix
+/// per-block (e.g., AFV cost-grid wrappers, large-strategy
+/// strategy search trials).
+#[allow(clippy::too_many_arguments)]
+pub fn quantize_blocks_gpu_broadcast_w<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    coeffs: &[f32],
+    weights_template: &[f32],
+    qac_qm: &[f32],
+    thresholds: &[f32; 4],
+    grid_width: u32,
+    grid_height: u32,
+    llf_x: u32,
+    llf_y: u32,
+) -> Vec<i32> {
+    if grid_width == 8 && grid_height == 8 && llf_x == 1 && llf_y == 1 {
+        // DCT8 fast path. The DCT8 broadcast variant is in the
+        // persistent module (quantize_dct8_persistent_broadcast_w);
+        // there's no Vec-based DCT8-broadcast helper today, but
+        // quantize_large_blocks_broadcast_w with grid 8×8 and llf 1×1
+        // is algebraically identical for our purposes (same dead-zone
+        // math, same broadcast).
+        enc.quantize_large_blocks_broadcast_w(
+            coeffs,
+            weights_template,
+            qac_qm,
+            thresholds,
+            8,
+            8,
+            1,
+            1,
+        )
+    } else {
+        enc.quantize_large_blocks_broadcast_w(
+            coeffs,
+            weights_template,
+            qac_qm,
+            thresholds,
+            grid_width,
+            grid_height,
+            llf_x,
+            llf_y,
+        )
+    }
+}
+
 /// Per-block coefficient statistics consumed by the AdjustQuantBlockAC
 /// heuristics. Mirrors the locals computed in upstream's pre-scan loop
 /// at `jxl_encoder::vardct::quantize.rs:178-220`.

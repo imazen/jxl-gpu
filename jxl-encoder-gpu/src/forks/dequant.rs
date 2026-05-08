@@ -140,6 +140,20 @@ pub fn dequant_blocks_gpu<R: Runtime>(
     enc.dequant_simple_blocks(quant, weights, block_size)
 }
 
+/// Broadcast-weights variant of [`dequant_blocks_gpu`].
+/// `weights_template` is exactly `block_size` f32 (one quant matrix);
+/// the kernel broadcasts across all blocks. Saves
+/// `(num_blocks - 1) * block_size * 4` bytes of upload traffic when
+/// callers were previously replicating the matrix per-block.
+pub fn dequant_blocks_gpu_broadcast_w<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    quant: &[i32],
+    weights_template: &[f32],
+    block_size: u32,
+) -> Vec<f32> {
+    enc.dequant_simple_blocks_broadcast_w(quant, weights_template, block_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -529,27 +529,37 @@ pub fn afv_cost_grid_single_channel<R: Runtime>(
     qac_qm: &[f32],
     thresholds: &[f32; 4],
 ) -> Vec<f32> {
-    use crate::forks::dequant::dequant_blocks_gpu;
-    use crate::forks::quantize::quantize_blocks_gpu;
+    use crate::forks::dequant::dequant_blocks_gpu_broadcast_w;
+    use crate::forks::quantize::quantize_blocks_gpu_broadcast_w;
 
     assert!(pixel_blocks.len().is_multiple_of(64));
     let n_blocks = pixel_blocks.len() / 64;
     assert_eq!(qac_qm.len(), n_blocks);
 
-    // Replicate per-block weights for every block.
-    let mut weights = Vec::with_capacity(n_blocks * 64);
-    for _ in 0..n_blocks {
-        weights.extend_from_slice(weights_per_block);
-    }
+    // Per-block weights are constant across all candidate blocks
+    // (same DCT8 quant matrix), so use the broadcast-weights variants.
+    // Saves `(n_blocks - 1) * 64 * 4` bytes of upload traffic per call
+    // (e.g., 4 MB at 16384 candidate blocks → 256 bytes).
+    let weights_template: &[f32] = weights_per_block.as_slice();
 
     let mut all_costs = Vec::with_capacity(4 * n_blocks);
     for kind in 0_usize..4 {
         // Forward AFV.
         let coeffs = afv_transform_batch_gpu(enc, basis_t, pixel_blocks, kind);
         // Quantize using DCT8-shaped path (AFV produces 64 coeffs in 8x8 layout).
-        let quant = quantize_blocks_gpu(enc, &coeffs, &weights, qac_qm, thresholds, 8, 8, 1, 1);
+        let quant = quantize_blocks_gpu_broadcast_w(
+            enc,
+            &coeffs,
+            weights_template,
+            qac_qm,
+            thresholds,
+            8,
+            8,
+            1,
+            1,
+        );
         // Dequant via the generic per-coefficient kernel.
-        let dequant = dequant_blocks_gpu(enc, &quant, &weights, 64);
+        let dequant = dequant_blocks_gpu_broadcast_w(enc, &quant, weights_template, 64);
         // Inverse AFV → recon pixels.
         let recon = inverse_afv_transform_batch_gpu(enc, basis_t, &dequant, kind);
 
@@ -607,8 +617,8 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
     thresholds_b: &[f32; 4],
     mask_block_major: &[f32],
 ) -> Vec<f32> {
-    use crate::forks::dequant::dequant_blocks_gpu;
-    use crate::forks::quantize::quantize_blocks_gpu;
+    use crate::forks::dequant::dequant_blocks_gpu_broadcast_w;
+    use crate::forks::quantize::quantize_blocks_gpu_broadcast_w;
 
     assert!(pixel_blocks_x.len().is_multiple_of(64));
     assert_eq!(pixel_blocks_x.len(), pixel_blocks_y.len());
@@ -619,14 +629,12 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
     assert_eq!(qac_qm_y.len(), n_blocks);
     assert_eq!(qac_qm_b.len(), n_blocks);
 
-    let mut weights_x = Vec::with_capacity(n_blocks * 64);
-    let mut weights_y = Vec::with_capacity(n_blocks * 64);
-    let mut weights_b = Vec::with_capacity(n_blocks * 64);
-    for _ in 0..n_blocks {
-        weights_x.extend_from_slice(weights_x_per_block);
-        weights_y.extend_from_slice(weights_y_per_block);
-        weights_b.extend_from_slice(weights_b_per_block);
-    }
+    // Per-block weights are constant across all candidate blocks per
+    // channel — use broadcast variants to skip the host replication
+    // and the 3 × n_blocks × 64 × 4 byte upload it generated.
+    let weights_x_template: &[f32] = weights_x_per_block.as_slice();
+    let weights_y_template: &[f32] = weights_y_per_block.as_slice();
+    let weights_b_template: &[f32] = weights_b_per_block.as_slice();
 
     let mut all_costs = Vec::with_capacity(4 * n_blocks);
     for kind in 0_usize..4 {
@@ -634,10 +642,10 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
         let coeffs_y = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_y, kind);
         let coeffs_b = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_b, kind);
 
-        let q_x = quantize_blocks_gpu(
+        let q_x = quantize_blocks_gpu_broadcast_w(
             enc,
             &coeffs_x,
-            &weights_x,
+            weights_x_template,
             qac_qm_x,
             thresholds_x,
             8,
@@ -645,10 +653,10 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
             1,
             1,
         );
-        let q_y = quantize_blocks_gpu(
+        let q_y = quantize_blocks_gpu_broadcast_w(
             enc,
             &coeffs_y,
-            &weights_y,
+            weights_y_template,
             qac_qm_y,
             thresholds_y,
             8,
@@ -656,10 +664,10 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
             1,
             1,
         );
-        let q_b = quantize_blocks_gpu(
+        let q_b = quantize_blocks_gpu_broadcast_w(
             enc,
             &coeffs_b,
-            &weights_b,
+            weights_b_template,
             qac_qm_b,
             thresholds_b,
             8,
@@ -668,9 +676,9 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
             1,
         );
 
-        let dq_x = dequant_blocks_gpu(enc, &q_x, &weights_x, 64);
-        let dq_y = dequant_blocks_gpu(enc, &q_y, &weights_y, 64);
-        let dq_b = dequant_blocks_gpu(enc, &q_b, &weights_b, 64);
+        let dq_x = dequant_blocks_gpu_broadcast_w(enc, &q_x, weights_x_template, 64);
+        let dq_y = dequant_blocks_gpu_broadcast_w(enc, &q_y, weights_y_template, 64);
+        let dq_b = dequant_blocks_gpu_broadcast_w(enc, &q_b, weights_b_template, 64);
 
         let recon_x = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_x, kind);
         let recon_y = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_y, kind);
