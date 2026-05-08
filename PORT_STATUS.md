@@ -105,6 +105,39 @@ for GPU-friendly batching.
 
 **Test coverage:** 31 unit tests pass on RTX 5070 + CUDA 13.2 (5 scalar + 26 GPU).
 
+### Known validation gaps (G5.1 from zenmetrics CUBECL_GOTCHAS)
+
+The G5.1 "validate against the published CPU crate, not a hand-rolled
+re-derivation" rule says parity tests must call the upstream
+function directly, not a hand-roll in the test file. Several recent
+helpers were committed with weaker tests because the upstream
+symbols are private (`fn` / `pub(crate)` / `pub(super)`) and our
+parity test file would be an external caller.
+
+**Affected helpers (all in this codebase) and their actual test
+coverage today:**
+
+| Helper | Upstream symbol | Visibility | Current test |
+|---|---|---|---|
+| `examples/epf_step0_parity.rs` | `vardct::epf::epf_step0_strip` | `fn` (private) | inline copy-paste port of upstream — **G5.1 violation** |
+| `forks::reconstruct::restore_llf_dct*` (9 helpers) | `vardct::reconstruct::restore_llf_from_dc` arms | `fn` (private) | zero-passthrough + constant-DC property tests only |
+| `forks::quantize::adjust_quant_block_ac_host` (+ 6 heuristics) | `VarDctEncoder::adjust_quant_block_ac` | `pub(crate) fn` (impl method) | hand-traced semantic tests only (skip-vs-fire, clamp arms) |
+| `forks::cost::compute_scaled_constants` | `vardct::ac_strategy::compute_scaled_constants` | `pub(super) fn` | property test (`ratio == 1.0` echoes bases) |
+| `forks::cost::EntropyMulTable` | `effort::EntropyMulTable` | `pub` (matches) | spot-check against literals |
+
+**To convert these to G5.1-compliant parity tests** we'd need
+`#[doc(hidden)] pub` (or a `__internals` feature) on the four
+private upstream symbols. That's a cross-repo change in
+`jxl-encoder` and is gated on user approval.
+
+**Currently safe** because each helper's algorithm is *literally a
+line-by-line port* of the upstream code with no GPU-related reshape,
+and constant tables match upstream literals exactly. But the
+hand-rolled inline reference in `epf_step0_parity.rs` could mask a
+shared bug between the GPU port and the CPU re-derivation.
+
+
+
 **Not yet covered (CPU path stays):** `estimate_entropy_full` orchestration. **Mixed-strategy reconstruct on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_mixed_strategy_gpu` accepts a heterogeneous `&[BlockRecipe]` (each carrying `bx, by, raw_strategy, coeffs`), groups by strategy, emits ≤ 15 GPU launches per image (one per supported strategy that appears in the recipes). AFV0-3 still route through `forks::afv` separately. **`compute_epf_sharpness_dct8_gpu` fully composed as of 2026-05-07** — runs reconstruct → gaborish (opt) → per-candidate EPF + L2 → two-pass selection on GPU end-to-end for the DCT8-only path. **All per-strategy LLF restoration helpers ported as of 2026-05-07** — `forks::reconstruct::restore_llf_*` covers DCT16×8, DCT8×16, DCT16×16, DCT32×32, DCT32×16, DCT16×32, DCT64×64, DCT64×32, DCT32×64 (15 unit tests), each as a pure-scalar host helper. The 1×1-LLF strategies (IDENTITY/DCT2X2/DCT4×*/AFV0-3) reuse `restore_dct8_dc_override`'s simple DC formula. **AdjustQuantBlockAC fully ported as host helpers as of 2026-05-07** — pre-scan + all 6 heuristics A-F + orchestrator (`forks::quantize::adjust_quant_block_ac_host`) match upstream. A future `#[cube]` kernel can transcribe the now-standalone heuristics for per-block-parallel execution without further reverse-engineering. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **DCT8-only reconstruct path on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_xyb_dct8_only_gpu` composes dequant + DC override + IDCT + scatter into 4 GPU launches per image. Sufficient for the all-blocks-are-DCT8 case (common for straightforward distance values). **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
 
 ## Coverage summary
