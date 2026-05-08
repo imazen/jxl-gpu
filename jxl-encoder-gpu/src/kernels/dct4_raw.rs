@@ -120,6 +120,11 @@ fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
 }
 
 /// Forward raw 4×4 DCT. Input/output: `num_blocks * 16` floats.
+// Cube macro expands the unrolled inner loops with literal `0 * COLS + row`
+// offsets that the lints flag as no-effect / erasing-op. Suppressed at the
+// kernel function level since the structure (i*COLS + j) is intentional —
+// preserving it makes the per-row indexing pattern obvious to readers.
+#[allow(clippy::erasing_op, clippy::no_effect_underscore_binding, clippy::identity_op)]
 #[cube(launch_unchecked)]
 pub fn dct_4x4_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     let block_idx = ABSOLUTE_POS;
@@ -181,6 +186,9 @@ pub fn dct_4x4_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
 ///
 /// Uses ONE 64-element SharedMemory split into a tile region [0..32]
 /// + temp region [32..64].
+// Cube macro expands the unrolled loops with literal `0 * COLS + row`
+// offsets — see kernel-level note on dct_4x4_raw_kernel above.
+#[allow(clippy::erasing_op, clippy::no_effect_underscore_binding, clippy::identity_op)]
 #[cube(launch_unchecked)]
 pub fn dct_4x8_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     let block_idx = ABSOLUTE_POS;

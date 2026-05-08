@@ -474,9 +474,8 @@ impl<R: Runtime> LossyEncoder<R> {
     ///
     /// Takes interleaved RGB U8 (`width * height * 3` bytes), converts
     /// to linear f32 internally, runs the lossy roundtrip, returns
-    /// reconstructed RGB U8 (linearized output clamped + sRGB-encoded
-    /// + rounded). Saves the caller the per-channel sRGB↔linear
-    /// boilerplate.
+    /// reconstructed RGB U8 (linearized output clamped + sRGB-encoded +
+    /// rounded). Saves the caller the per-channel sRGB↔linear boilerplate.
     ///
     /// sRGB transfer function: gamma 2.4 (matches the simple model
     /// used elsewhere in the repo). For the IEC 61966-2-1 piecewise

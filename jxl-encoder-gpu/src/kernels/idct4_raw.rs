@@ -117,6 +117,9 @@ fn idct1d_8_core(mem: &mut SharedMemory<f32>, base: u32) {
 }
 
 /// Inverse raw 4×4 DCT. Input/output: `num_blocks * 16` floats.
+// Cube macro expands the unrolled inner loops with literal `0 * COLS + row`
+// offsets that the lints flag as no-effect / erasing-op.
+#[allow(clippy::erasing_op, clippy::no_effect_underscore_binding, clippy::identity_op)]
 #[cube(launch_unchecked)]
 pub fn idct_4x4_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     let block_idx = ABSOLUTE_POS;
@@ -170,6 +173,9 @@ pub fn idct_4x4_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
 /// Inverse raw 4×8 DCT. Input layout: 4 cols × 8 rows (transposed,
 /// matching the forward kernel's output). Output: 4 rows × 8 cols
 /// row-major (`num_blocks * 32` floats).
+// Cube macro expands the unrolled inner loops with literal `0 * COLS + row`
+// offsets — see kernel-level note on idct_4x4_raw_kernel above.
+#[allow(clippy::erasing_op, clippy::no_effect_underscore_binding, clippy::identity_op)]
 #[cube(launch_unchecked)]
 pub fn idct_4x8_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     let block_idx = ABSOLUTE_POS;
