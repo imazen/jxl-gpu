@@ -78,6 +78,38 @@ LLF helpers in place, the dispatcher just needs to: read DC grid →
 call the right LLF restorer → write LLF positions into the
 coefficient block → run per-strategy IDCT → scatter.
 
+### `per_block_upstream_cost` + `CostMode` orchestrator switch (`5787eec8`, `e5ca5e27`)
+
+Closes the caveat from 706b59fe — the orchestrator now offers
+two cost formulas via `CostMode`:
+
+- `CostMode::Simple` — `entropy_mul * sum(entropies) + total_loss`.
+  Fast relative-ranking form (the original).
+- `CostMode::Upstream { quant_for_coeffs }` — bit-faithful match for
+  upstream's `estimate_entropy_full` DCT8 fast path
+  (vardct/ac_strategy.rs:737-771). Includes:
+  - Per-channel `k_zeros_mul * f(num_nzeros)` bits-cost term where
+    `f(n) = ceil_log2_nonzero(nbits + 17) + nbits` and
+    `nbits = ceil_log2_nonzero(n + 1) + 1`.
+  - 8th-root pixel-loss scaling:
+    `loss_scalar = (loss/64)^(1/8) * 64 / quant`.
+  - `entropy *= entropy_mul`, then `entropy += info_loss_mul * loss_scalar`.
+
+`per_block_upstream_cost` (5787eec8) is the new combiner; the
+CostMode selector in 706b59fe orchestrator (e5ca5e27) extracts
+column-1 (nzeros_sum) from each channel's 4-stat array when
+Upstream mode is selected and threads the constants through.
+
+The upstream entropy kernel intentionally skips `info_loss_sum`
+in pixel-domain mode (matches upstream `entropy_coeffs_scalar`
+exactly); the `info_loss_mul` term is computed on the host from
+the combined pixel loss instead — same algebra, different
+factoring.
+
+GPU smoke test (zero pixel input + Upstream mode) → cost ≈ 158.87,
+which is 3 channels × 7 × `COEFF_DOMAIN_CONSTANTS.2` — the
+per-channel nzeros bits-cost when `nzeros = 0` and pixel loss is 0.
+
 ### estimate_entropy_full DCT8 orchestrator (`d4b77cd1`, `639a2d15`, `fe4cdc32`, `382d4717`, `aaf45d74`, `07658a0e`, `706b59fe`)
 
 The DCT8 fast path of upstream's per-block entropy + pixel-loss
