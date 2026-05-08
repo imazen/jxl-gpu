@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+### LossyEncoder pipeline gap closure: gab_smooth + EPF + IEC sRGB linearization (`691c0aab`, `d9a201ca`, `d1738660`)
+
+Three commits that drop the `butteraugli_refinement_demo` baseline at
+distance=1.0 from **8.76 to 1.35** (-85%) on a 1024×1024 CLIC photo,
+revealing the dominant pipeline gaps that were masking real refinement
+loop value.
+
+1. **Decoder-side `gab_smooth` after IDCT/scatter** (`691c0aab`,
+   -17.3% baseline). `run_pipeline_with_qac` was missing the
+   `gab_smooth` (3×3 plus, inverse of forward `gaborish_5x5`) call
+   that libjxl's decoder runs on reconstructed XYB before
+   xyb_to_linear. Without it the gaborish pre-sharpening from the
+   encoder side persisted in the output and reconstructions were
+   over-sharp/blocky. Three persistent calls (one per XYB plane);
+   exposes `forks::reconstruct::gab_weights` as `pub`.
+
+2. **EPF chain after `gab_smooth`** (`d9a201ca`, small additional
+   gain). 2-iter EPF (step 1 + step 2) on the reconstructed XYB
+   planes, mapping our per-block float qac to libjxl's u8
+   `quant_field` + `quant_scale` representation via
+   `qac * 50` / 0.01 scale (giving `quant_scale * raw_quant ≈
+   qac/2 ≈ qf_float_equivalent`, accounting for our pipeline's
+   `K_AC_QUANT=0.765` vs upstream `q=0.39/d`). Sharpness uniform
+   4 (libjxl default). Cost: ~65ms per encode at 1024² (download +
+   EPF launches + Vec-based xyb_to_linear); a future port can add
+   persistent `apply_epf_step{1,2}_persistent` to reclaim it.
+
+3. **IEC sRGB linearization in butteraugli_refinement_demo**
+   (`d9a201ca`, **-81% baseline — the biggest single win**). The
+   demo was using simplified `powf(2.4)` to convert input sRGB U8 →
+   linear, but butteraugli-gpu internally linearizes the original
+   bytes via the IEC 61966-2-1 piecewise transfer function. The
+   resulting transfer-function asymmetry inflated every pixel's
+   perceptual delta even on bit-perfect reconstructions — same root
+   cause class as CLAUDE.md's "PNG Color Metadata Causes Bogus
+   Butteraugli Scores" note. Fixed by using IEC piecewise in the
+   demo's input linearization.
+
+**Final empirical results** (1024×1024 CLIC photo, d=1.0, iters=2):
+- uniform qac:  score=1.3456  pnorm_3=0.4830
+- initial AQ:   score=1.5400  pnorm_3=0.4812  (+14.4% vs uniform)
+- refined AQ:   score=1.5012  pnorm_3=0.5074  (-2.5% vs initial AQ)
+
+**Refinement now provides a real -2.5% gain** vs initial AQ
+(previously no movement). The remaining AQ-vs-uniform regression
+(+14.4%) reflects the next pipeline gap: AC strategy selection.
+With only DCT8 available, AQ's heavy-quant assignment to smooth
+blocks creates visible blocking that EPF can't fully mask. Adding
+DCT16/32 strategy selection for smooth regions would close it.
+
+234 tests pass through all three changes; the
+`butteraugli_refinement_demo` example provides a single-command
+benchmark of pipeline quality progress.
+
 ### Butteraugli quant-refinement loop scaffold + helpers + integration (`11f33133`, `4d6ab397`, `9746a25f`, `2b33d6d0`, `87d1654a`)
 
 End-to-end GPU-substituted butteraugli refinement loop, mirroring
