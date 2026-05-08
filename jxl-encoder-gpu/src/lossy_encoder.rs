@@ -724,6 +724,204 @@ impl<R: Runtime> LossyEncoder<R> {
         )
     }
 
+    /// Phase A MVP for AC strategy search.
+    ///
+    /// Selects per-region between DCT8 and DCT16×16 based on
+    /// upstream-faithful `estimate_entropy_full` cost grids, then
+    /// encodes each region with its winning strategy via
+    /// `encode_and_reconstruct_mixed_strategy_3channel`.
+    ///
+    /// **Phase A scope** (this method):
+    /// - 2 strategies only: DCT8 vs DCT16×16
+    /// - No CfL (ytox/ytob = 0)
+    /// - No AdjustQuantBlockAC (per-block quant tuning skipped)
+    /// - No EPF in postpass (kept simple; gab_smooth still applied)
+    /// - Per-strategy entropy_mul fixed (0.8 / 1.34 from libjxl
+    ///   profile.entropy_mul_table)
+    /// - Per-strategy mul/bonus/penalty post-processing deferred to
+    ///   Phase C (the simplification preserves relative ranking
+    ///   between DCT8 and DCT16×16 at any single distance)
+    ///
+    /// Future phases:
+    /// - Phase B: full strategy palette (DCT32, DCT64, rectangular)
+    /// - Phase C: full upstream cost-formula parity (per-strategy
+    ///   mul + kFavor2X2 + kAvoidEntropyOfTransforms)
+    /// - Phase D: AFV path + sub-block strategies
+    /// - Phase E: perf — shared DCT cache between cost-grid + final encode
+    pub fn encode_one_with_strategy_search_dct8_16(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        distance: f32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        use crate::forks::cost::{compute_scaled_constants, strategy_search_costs_dct8_16x16};
+        use crate::forks::reconstruct::{
+            compute_dc_grid_per_8x8_block, encode_and_reconstruct_mixed_strategy_3channel,
+            gab_weights,
+        };
+        use crate::forks::transform::{RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16};
+        use crate::pipeline::{partitions_16x16_to_assignments, select_partitions_16x16};
+        use crate::quant_weights::{dct8_weights_per_channel, dct16x16_weights_per_channel};
+
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (pw, ph) = (self.padded_width as usize, self.padded_height as usize);
+        let xb8 = pw / 8;
+        let yb8 = ph / 8;
+        let nb8 = xb8 * yb8;
+
+        // Stage 1: pad + upload
+        let r_pad = pad_to_alignment(r, w, h, pw, ph);
+        let g_pad = pad_to_alignment(g, w, h, pw, ph);
+        let b_pad = pad_to_alignment(b, w, h, pw, ph);
+        let g_r = enc.upload_plane(&r_pad, self.padded_width, self.padded_height);
+        let g_g = enc.upload_plane(&g_pad, self.padded_width, self.padded_height);
+        let g_b = enc.upload_plane(&b_pad, self.padded_width, self.padded_height);
+
+        // Stage 2: XYB + gaborish (GPU) → download to host
+        let (xx, xy, xb) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
+        let xx_g = enc.gaborish_5x5_persistent(&xx, &self.weights);
+        let xy_g = enc.gaborish_5x5_persistent(&xy, &self.weights);
+        let xb_g = enc.gaborish_5x5_persistent(&xb, &self.weights);
+        let xyb_x: Vec<f32> = enc.download_plane(&xx_g);
+        let xyb_y: Vec<f32> = enc.download_plane(&xy_g);
+        let xyb_b: Vec<f32> = enc.download_plane(&xb_g);
+
+        // Stage 3: mask1x1 from Y channel
+        let mask1x1 = enc.mask1x1_field(&xyb_y, self.padded_width, self.padded_height);
+
+        // Stage 4: cost grids (DCT8 + DCT16x16)
+        let (dct8_x, dct8_y, dct8_b) = dct8_weights_per_channel();
+        let (dct16_x, dct16_y, dct16_b) = dct16x16_weights_per_channel();
+        let inv_8x: Vec<f32> = dct8_x.iter().map(|w| 1.0 / w).collect();
+        let inv_8y: Vec<f32> = dct8_y.iter().map(|w| 1.0 / w).collect();
+        let inv_8b: Vec<f32> = dct8_b.iter().map(|w| 1.0 / w).collect();
+        let inv_16x: Vec<f32> = dct16_x.iter().map(|w| 1.0 / w).collect();
+        let inv_16y: Vec<f32> = dct16_y.iter().map(|w| 1.0 / w).collect();
+        let inv_16b: Vec<f32> = dct16_b.iter().map(|w| 1.0 / w).collect();
+        let qac = distance_to_qac(distance);
+        // libjxl effort 7+ default base constants for compute_scaled_constants
+        let scaled_constants = compute_scaled_constants(distance, (1.2, 9.308_906, 10.833_273));
+
+        let (cost_dct8, cost_dct16) = strategy_search_costs_dct8_16x16(
+            enc,
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            pw,
+            ph,
+            &mask1x1,
+            &dct8_x,
+            &dct8_y,
+            &dct8_b,
+            &inv_8x,
+            &inv_8y,
+            &inv_8b,
+            &dct16_x,
+            &dct16_y,
+            &dct16_b,
+            &inv_16x,
+            &inv_16y,
+            &inv_16b,
+            qac,
+            qac,
+            qac,
+            0,
+            0,
+            scaled_constants,
+        );
+
+        // Stage 5: host-side selector + assignments
+        let partitions = select_partitions_16x16(&cost_dct8, &cost_dct16, xb8, yb8);
+        let assignments = partitions_16x16_to_assignments(&partitions, xb8, yb8);
+
+        // Stage 6: per-channel DC grids
+        let dc_grid_x = compute_dc_grid_per_8x8_block(&xyb_x, pw, ph);
+        let dc_grid_y = compute_dc_grid_per_8x8_block(&xyb_y, pw, ph);
+        let dc_grid_b = compute_dc_grid_per_8x8_block(&xyb_b, pw, ph);
+
+        // Stage 7: encode + reconstruct via mixed-strategy IDCT
+        let qac_vec = vec![qac; nb8];
+        let dct8_x_clone = dct8_x;
+        let dct8_y_clone = dct8_y;
+        let dct8_b_clone = dct8_b;
+        let dct16_x_clone = dct16_x.clone();
+        let dct16_y_clone = dct16_y.clone();
+        let dct16_b_clone = dct16_b.clone();
+        let weights_x_for = move |strat: u8| -> Vec<f32> {
+            match strat {
+                RAW_STRATEGY_DCT => dct8_x_clone.to_vec(),
+                RAW_STRATEGY_DCT16X16 => dct16_x_clone.clone(),
+                _ => panic!("Phase A MVP supports only DCT8 + DCT16x16"),
+            }
+        };
+        let weights_y_for = move |strat: u8| -> Vec<f32> {
+            match strat {
+                RAW_STRATEGY_DCT => dct8_y_clone.to_vec(),
+                RAW_STRATEGY_DCT16X16 => dct16_y_clone.clone(),
+                _ => panic!("Phase A MVP supports only DCT8 + DCT16x16"),
+            }
+        };
+        let weights_b_for = move |strat: u8| -> Vec<f32> {
+            match strat {
+                RAW_STRATEGY_DCT => dct8_b_clone.to_vec(),
+                RAW_STRATEGY_DCT16X16 => dct16_b_clone.clone(),
+                _ => panic!("Phase A MVP supports only DCT8 + DCT16x16"),
+            }
+        };
+        let mut plane_x = vec![0.0_f32; pw * ph];
+        let mut plane_y = vec![0.0_f32; pw * ph];
+        let mut plane_b = vec![0.0_f32; pw * ph];
+        encode_and_reconstruct_mixed_strategy_3channel(
+            enc,
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            pw,
+            ph,
+            &assignments,
+            &weights_x_for,
+            &weights_y_for,
+            &weights_b_for,
+            &qac_vec,
+            &qac_vec,
+            &qac_vec,
+            &self.thresholds_x,
+            &self.thresholds_y,
+            &self.thresholds_b,
+            &dc_grid_x,
+            &dc_grid_y,
+            &dc_grid_b,
+            &mut plane_x,
+            &mut plane_y,
+            &mut plane_b,
+        );
+
+        // Stage 8: postpass (gab_smooth + xyb_to_linear; EPF deferred)
+        let recon_x_p =
+            enc.upload_plane(&plane_x, self.padded_width, self.padded_height);
+        let recon_y_p =
+            enc.upload_plane(&plane_y, self.padded_width, self.padded_height);
+        let recon_b_p =
+            enc.upload_plane(&plane_b, self.padded_width, self.padded_height);
+        let (gw_c, gw1, gw2) = gab_weights();
+        let recon_x_p = enc.gab_smooth_persistent(&recon_x_p, gw_c, gw1, gw2);
+        let recon_y_p = enc.gab_smooth_persistent(&recon_y_p, gw_c, gw1, gw2);
+        let recon_b_p = enc.gab_smooth_persistent(&recon_b_p, gw_c, gw1, gw2);
+        let (rgb_r, rgb_g, rgb_b) =
+            enc.xyb_to_linear_rgb_planar_persistent(&recon_x_p, &recon_y_p, &recon_b_p);
+        let r_out = enc.download_plane(&rgb_r);
+        let g_out = enc.download_plane(&rgb_g);
+        let b_out = enc.download_plane(&rgb_b);
+
+        (
+            crop_to_original(&r_out, pw, w, h),
+            crop_to_original(&g_out, pw, w, h),
+            crop_to_original(&b_out, pw, w, h),
+        )
+    }
+
     /// Turnkey content-driven adaptive quantization.
     ///
     /// Computes a per-block qac field from the image's mask1x1 (per-
@@ -1261,6 +1459,31 @@ mod tests {
         assert_eq!(bb.len(), n);
         for v in rr.iter().chain(&gg).chain(&bb) {
             assert!(v.is_finite());
+        }
+    }
+
+    /// Phase A MVP smoke test: encode_one_with_strategy_search_dct8_16
+    /// runs end-to-end on a 64×64 gradient, produces finite output of
+    /// correct size. Quality validation deferred to demo + corpus
+    /// sweep integration.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_lossy_encoder_strategy_search_dct8_16_smoke() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let w = 64_u32;
+        let h = 64_u32;
+        let lossy = LossyEncoder::new(&enc, w, h);
+        let n = (w * h) as usize;
+        let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.5 * (i as f32 / n as f32)).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.3 + 0.4 * (i as f32 / n as f32)).collect();
+        let (rr, gg, bb) = lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, 1.0);
+        assert_eq!(rr.len(), n);
+        assert_eq!(gg.len(), n);
+        assert_eq!(bb.len(), n);
+        for v in rr.iter().chain(&gg).chain(&bb) {
+            assert!(v.is_finite(), "non-finite output");
         }
     }
 
