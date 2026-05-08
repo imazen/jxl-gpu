@@ -72,8 +72,7 @@ fn main() {
     let mut cpu_fwd = vec![0.0_f32; N];
     for b in 0..N_BLOCKS {
         let pixels: &[f32; 16] = (&input[b * 16..b * 16 + 16]).try_into().unwrap();
-        let coeffs: &mut [f32; 16] =
-            (&mut cpu_fwd[b * 16..b * 16 + 16]).try_into().unwrap();
+        let coeffs: &mut [f32; 16] = (&mut cpu_fwd[b * 16..b * 16 + 16]).try_into().unwrap();
         cpu_afv_dct_4x4(pixels, &AFV4X4_BASIS_TRANSPOSE, coeffs);
     }
 
@@ -101,8 +100,7 @@ fn main() {
     let mut cpu_round = vec![0.0_f32; N];
     for b in 0..N_BLOCKS {
         let coeffs: &[f32; 16] = (&cpu_fwd[b * 16..b * 16 + 16]).try_into().unwrap();
-        let pixels: &mut [f32; 16] =
-            (&mut cpu_round[b * 16..b * 16 + 16]).try_into().unwrap();
+        let pixels: &mut [f32; 16] = (&mut cpu_round[b * 16..b * 16 + 16]).try_into().unwrap();
         cpu_afv_idct_4x4(coeffs, &AFV4X4_BASIS_TRANSPOSE, pixels);
     }
 

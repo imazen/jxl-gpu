@@ -149,8 +149,22 @@ fn main() {
 
     // Proper 3-channel cost.
     let cg = compute_cost_grid_dct8_xyb::<Backend>(
-        &client, h_bx, h_by, h_bb, h_wx, h_wy, h_wb, h_qac_x, h_qac_y, h_qac_b, h_thr_xb_a,
-        h_thr_y, h_thr_xb_b, h_mask, xb_blocks as u32, yb_blocks as u32,
+        &client,
+        h_bx,
+        h_by,
+        h_bb,
+        h_wx,
+        h_wy,
+        h_wb,
+        h_qac_x,
+        h_qac_y,
+        h_qac_b,
+        h_thr_xb_a,
+        h_thr_y,
+        h_thr_xb_b,
+        h_mask,
+        xb_blocks as u32,
+        yb_blocks as u32,
     );
     let costs_xyb: Vec<f32> = {
         let bytes = client.read_one(cg.costs).expect("xyb");

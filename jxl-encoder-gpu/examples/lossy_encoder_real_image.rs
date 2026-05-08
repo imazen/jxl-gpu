@@ -65,7 +65,10 @@ fn main() {
     let t0 = std::time::Instant::now();
     let _rgb_out_cold = lossy.encode_one_srgb_u8(&enc, &rgb_in, qac);
     let dt0 = t0.elapsed();
-    println!("encode_one_srgb_u8 (cold): {:.2} ms", dt0.as_secs_f64() * 1000.0);
+    println!(
+        "encode_one_srgb_u8 (cold): {:.2} ms",
+        dt0.as_secs_f64() * 1000.0
+    );
 
     let t1 = std::time::Instant::now();
     let rgb_out = lossy.encode_one_srgb_u8(&enc, &rgb_in, qac);
@@ -107,8 +110,7 @@ fn main() {
     );
 
     if let Some(path) = out_path {
-        let img_buf =
-            image::RgbImage::from_raw(w, h, rgb_out).expect("buf size matches");
+        let img_buf = image::RgbImage::from_raw(w, h, rgb_out).expect("buf size matches");
         img_buf.save(&path).expect("save output PNG");
         println!("\n✓ Wrote reconstructed PNG to {path}");
     } else {

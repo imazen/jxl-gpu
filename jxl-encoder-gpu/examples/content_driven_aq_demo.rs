@@ -61,15 +61,13 @@ fn main() {
 
     // Turnkey content-driven AQ.
     let t0 = std::time::Instant::now();
-    let (rec_r_aq, rec_g_aq, rec_b_aq) =
-        lossy.encode_one_with_aq(&enc, &r, &g, &b, distance);
+    let (rec_r_aq, rec_g_aq, rec_b_aq) = lossy.encode_one_with_aq(&enc, &r, &g, &b, distance);
     let dt_aq = t0.elapsed();
 
     // Uniform baseline at the same central distance.
     let qac_uniform = distance_to_qac(distance);
     let t1 = std::time::Instant::now();
-    let (rec_r_un, rec_g_un, rec_b_un) =
-        lossy.encode_one(&enc, &r, &g, &b, qac_uniform);
+    let (rec_r_un, rec_g_un, rec_b_un) = lossy.encode_one(&enc, &r, &g, &b, qac_uniform);
     let dt_un = t1.elapsed();
 
     let mut mae_aq = [0.0_f64; 3];

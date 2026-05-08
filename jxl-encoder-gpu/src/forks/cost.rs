@@ -447,10 +447,10 @@ impl EntropyMulTable {
 /// upstream's defensive `_ => 1.0` fallback).
 pub fn entropy_mul_for_strategy(raw_strategy: u8, table: &EntropyMulTable) -> f32 {
     use crate::forks::transform::{
-        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
-        RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
-        RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
-        RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
+        RAW_STRATEGY_DCT8X4, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
+        RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+        RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_IDENTITY,
     };
     match raw_strategy {
         RAW_STRATEGY_DCT => 1.0,
@@ -558,10 +558,7 @@ const K_POW_COST_DELTA: f32 = 0.367_029_4;
 /// assert!((cost - 3.0).abs() < 1e-6);
 /// assert!((zeros - 2.0).abs() < 1e-6);
 /// ```
-pub fn compute_scaled_constants(
-    distance: f32,
-    bases: (f32, f32, f32),
-) -> (f32, f32, f32) {
+pub fn compute_scaled_constants(distance: f32, bases: (f32, f32, f32)) -> (f32, f32, f32) {
     let (info_loss_base, zeros_base, cost_delta_base) = bases;
     let ratio = (distance + K_BIAS) / (1.0 + K_BIAS);
     let info_loss_mul = info_loss_base * ratio.powf(K_POW_INFO_LOSS);
@@ -766,14 +763,19 @@ pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
     // Step 7: final cost — formula selector.
     match mode {
         CostMode::Simple => {
-            let entropy_total =
-                sum_per_block_entropy_3channel(&entropy_x, &entropy_y, &entropy_b);
+            let entropy_total = sum_per_block_entropy_3channel(&entropy_x, &entropy_y, &entropy_b);
             per_block_total_cost(&entropy_total, &pixel_loss_total, entropy_mul)
         }
         CostMode::Upstream { quant_for_coeffs } => {
-            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_x = (0..n_blocks)
+                .map(|b| x_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks)
+                .map(|b| y_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks)
+                .map(|b| b_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
             per_block_upstream_cost(
                 &entropy_x,
                 &entropy_y,
@@ -854,7 +856,7 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
 ) -> Vec<f32> {
     use crate::forks::cfl::{ytob_ratio, ytox_ratio};
     use crate::forks::transform::{
-        coeff_count_per_strategy, dct_blocks_gpu, apply_idct_batch_gpu, tile_dims_pixels,
+        apply_idct_batch_gpu, coeff_count_per_strategy, dct_blocks_gpu, tile_dims_pixels,
     };
 
     let coeff_count = coeff_count_per_strategy(raw_strategy);
@@ -897,15 +899,37 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
 
     // Step 2: per-channel entropy + error-coef writeback.
     let (y_stats, y_err) = entropy_coeffs_pixel_blocks_gpu(
-        enc, &dct_y, &dct_y, &weights_y, &inv_weights_y, coeff_count as u32, 0.0, quant_y, cost_delta,
+        enc,
+        &dct_y,
+        &dct_y,
+        &weights_y,
+        &inv_weights_y,
+        coeff_count as u32,
+        0.0,
+        quant_y,
+        cost_delta,
     );
     let (x_stats, x_err) = entropy_coeffs_pixel_blocks_gpu(
-        enc, &dct_x, &dct_y, &weights_x, &inv_weights_x, coeff_count as u32, ytox_ratio(ytox),
-        quant_x, cost_delta,
+        enc,
+        &dct_x,
+        &dct_y,
+        &weights_x,
+        &inv_weights_x,
+        coeff_count as u32,
+        ytox_ratio(ytox),
+        quant_x,
+        cost_delta,
     );
     let (b_stats, b_err) = entropy_coeffs_pixel_blocks_gpu(
-        enc, &dct_b, &dct_y, &weights_b, &inv_weights_b, coeff_count as u32, ytob_ratio(ytob),
-        quant_b, cost_delta,
+        enc,
+        &dct_b,
+        &dct_y,
+        &weights_b,
+        &inv_weights_b,
+        coeff_count as u32,
+        ytob_ratio(ytob),
+        quant_b,
+        cost_delta,
     );
 
     // Step 3: per-strategy IDCT of error coefficients.
@@ -915,16 +939,34 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
 
     // Step 4: per-channel masked 8th-power pixel loss.
     let mut loss_x = pixel_loss_blocks_gpu(
-        enc, &pix_err_x, mask_image_plane, mask_row_base, mask_stride,
-        MASK_CHANNEL_OFFSET[0], block_w as u32, block_h as u32,
+        enc,
+        &pix_err_x,
+        mask_image_plane,
+        mask_row_base,
+        mask_stride,
+        MASK_CHANNEL_OFFSET[0],
+        block_w as u32,
+        block_h as u32,
     );
     let loss_y = pixel_loss_blocks_gpu(
-        enc, &pix_err_y, mask_image_plane, mask_row_base, mask_stride,
-        MASK_CHANNEL_OFFSET[1], block_w as u32, block_h as u32,
+        enc,
+        &pix_err_y,
+        mask_image_plane,
+        mask_row_base,
+        mask_stride,
+        MASK_CHANNEL_OFFSET[1],
+        block_w as u32,
+        block_h as u32,
     );
     let loss_b = pixel_loss_blocks_gpu(
-        enc, &pix_err_b, mask_image_plane, mask_row_base, mask_stride,
-        MASK_CHANNEL_OFFSET[2], block_w as u32, block_h as u32,
+        enc,
+        &pix_err_b,
+        mask_image_plane,
+        mask_row_base,
+        mask_stride,
+        MASK_CHANNEL_OFFSET[2],
+        block_w as u32,
+        block_h as u32,
     );
 
     // Step 5a: extract per-block entropy from each channel.
@@ -951,17 +993,26 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
     // Step 7: final cost.
     match mode {
         CostMode::Simple => {
-            let entropy_total =
-                sum_per_block_entropy_3channel(&entropy_x, &entropy_y, &entropy_b);
+            let entropy_total = sum_per_block_entropy_3channel(&entropy_x, &entropy_y, &entropy_b);
             per_block_total_cost(&entropy_total, &pixel_loss_total, entropy_mul)
         }
         CostMode::Upstream { quant_for_coeffs } => {
-            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_x = (0..n_blocks)
+                .map(|b| x_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks)
+                .map(|b| y_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks)
+                .map(|b| b_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
             per_block_upstream_cost(
-                &entropy_x, &entropy_y, &entropy_b,
-                &nzeros_x, &nzeros_y, &nzeros_b,
+                &entropy_x,
+                &entropy_y,
+                &entropy_b,
+                &nzeros_x,
+                &nzeros_y,
+                &nzeros_b,
                 &pixel_loss_total,
                 entropy_mul,
                 scaled_constants,
@@ -1101,16 +1152,29 @@ mod tests {
 
         let costs = estimate_entropy_full_strategy_batch_gpu(
             &enc,
-            &zeros, &zeros, &zeros,
+            &zeros,
+            &zeros,
+            &zeros,
             RAW_STRATEGY_DCT16X16,
-            &weights_one, &weights_one, &weights_one,
-            &weights_one, &weights_one, &weights_one,
-            1.0, 1.0, 1.0,
-            0, 0,
-            &mask, &mask_row_base, 16,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            1.0,
+            1.0,
+            1.0,
+            0,
+            0,
+            &mask,
+            &mask_row_base,
+            16,
             COEFF_DOMAIN_CONSTANTS,
             1.0,
-            CostMode::Upstream { quant_for_coeffs: 1.0 },
+            CostMode::Upstream {
+                quant_for_coeffs: 1.0,
+            },
         );
         assert_eq!(costs.len(), n_blocks);
         // Zero input → zero entropy in each channel + zero pixel loss.
@@ -1147,20 +1211,34 @@ mod tests {
 
         let costs = estimate_entropy_full_strategy_batch_gpu(
             &enc,
-            &zeros, &zeros, &zeros,
+            &zeros,
+            &zeros,
+            &zeros,
             RAW_STRATEGY_DCT16X16,
-            &weights_one, &weights_one, &weights_one,
-            &weights_one, &weights_one, &weights_one,
-            1.0, 1.0, 1.0,
-            0, 0,
-            &mask, &mask_row_base, 16,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            1.0,
+            1.0,
+            1.0,
+            0,
+            0,
+            &mask,
+            &mask_row_base,
+            16,
             COEFF_DOMAIN_CONSTANTS,
             1.0,
             CostMode::Simple,
         );
         assert_eq!(costs.len(), n_blocks);
         for &c in &costs {
-            assert!(c.abs() < 1e-3, "DCT16x16 zero-input cost should be ~0, got {c}");
+            assert!(
+                c.abs() < 1e-3,
+                "DCT16x16 zero-input cost should be ~0, got {c}"
+            );
         }
     }
 
@@ -1187,12 +1265,23 @@ mod tests {
 
         let costs = estimate_entropy_full_dct8_batch_gpu(
             &enc,
-            &zeros, &zeros, &zeros,
-            &weights_one, &weights_one, &weights_one,
-            &weights_one, &weights_one, &weights_one,
-            1.0, 1.0, 1.0,
-            0, 0,
-            &mask, &mask_row_base, 16,
+            &zeros,
+            &zeros,
+            &zeros,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            1.0,
+            1.0,
+            1.0,
+            0,
+            0,
+            &mask,
+            &mask_row_base,
+            16,
             COEFF_DOMAIN_CONSTANTS,
             1.0,
             CostMode::Simple,
@@ -1245,13 +1334,17 @@ mod tests {
         let nzeros = vec![0.0_f32, 0.0];
         let zero_loss = vec![0.0_f64, 0.0];
         let costs = per_block_upstream_cost(
-            &entropy, &entropy, &entropy,
-            &nzeros, &nzeros, &nzeros,
+            &entropy,
+            &entropy,
+            &entropy,
+            &nzeros,
+            &nzeros,
+            &nzeros,
             &zero_loss,
-            1.0,                       // entropy_mul
-            (10.0, 5.0, 1.0),          // (info_loss_mul, cost_delta, zeros_mul)
-            1.0,                       // quant_for_coeffs
-            64,                        // DCT8 block_pixel_count
+            1.0,              // entropy_mul
+            (10.0, 5.0, 1.0), // (info_loss_mul, cost_delta, zeros_mul)
+            1.0,              // quant_for_coeffs
+            64,               // DCT8 block_pixel_count
         );
         // Expected: (15.0 + 21.0) * 1.0 + 10.0 * 0 = 36.0
         assert!((costs[0] - 36.0).abs() < 1e-3, "got {}", costs[0]);
@@ -1268,14 +1361,30 @@ mod tests {
         let nzeros = vec![0.0_f32];
         let loss = vec![1.0_f64];
         let cost_dct8 = per_block_upstream_cost(
-            &entropy, &entropy, &entropy,
-            &nzeros, &nzeros, &nzeros,
-            &loss, 1.0, (1.0, 1.0, 0.0), 1.0, 64,
+            &entropy,
+            &entropy,
+            &entropy,
+            &nzeros,
+            &nzeros,
+            &nzeros,
+            &loss,
+            1.0,
+            (1.0, 1.0, 0.0),
+            1.0,
+            64,
         );
         let cost_dct16 = per_block_upstream_cost(
-            &entropy, &entropy, &entropy,
-            &nzeros, &nzeros, &nzeros,
-            &loss, 1.0, (1.0, 1.0, 0.0), 1.0, 256,
+            &entropy,
+            &entropy,
+            &entropy,
+            &nzeros,
+            &nzeros,
+            &nzeros,
+            &loss,
+            1.0,
+            (1.0, 1.0, 0.0),
+            1.0,
+            256,
         );
         // n=256: loss_scalar = (1/256)^(1/8) * 256 = 0.5612... * 256 ≈ 143.7
         // n=64:  loss_scalar = (1/64)^(1/8)  * 64  = 0.6086... * 64  ≈ 38.95
@@ -1296,8 +1405,12 @@ mod tests {
         let nzeros = vec![0.0_f32];
         let loss = vec![1.0_f64]; // total pixel loss = 1
         let costs = per_block_upstream_cost(
-            &entropy, &entropy, &entropy,
-            &nzeros, &nzeros, &nzeros,
+            &entropy,
+            &entropy,
+            &entropy,
+            &nzeros,
+            &nzeros,
+            &nzeros,
             &loss,
             1.0,
             (1.0, 1.0, 0.0), // info_loss_mul=1, zeros_mul=0 to isolate loss term
@@ -1308,7 +1421,11 @@ mod tests {
         // loss_scalar = (1/64).sqrt().sqrt().sqrt() * 64 / 1
         //            = (0.015625)^(1/8) * 64 = 0.6086... * 64 ≈ 38.95
         // entropy += 1.0 * 38.95
-        assert!(costs[0] > 30.0 && costs[0] < 50.0, "loss-dominated cost {} not in range", costs[0]);
+        assert!(
+            costs[0] > 30.0 && costs[0] < 50.0,
+            "loss-dominated cost {} not in range",
+            costs[0]
+        );
     }
 
     #[cfg(feature = "cuda")]
@@ -1338,15 +1455,28 @@ mod tests {
 
         let costs = estimate_entropy_full_dct8_batch_gpu(
             &enc,
-            &zeros, &zeros, &zeros,
-            &weights_one, &weights_one, &weights_one,
-            &weights_one, &weights_one, &weights_one,
-            1.0, 1.0, 1.0,
-            0, 0,
-            &mask, &mask_row_base, 16,
+            &zeros,
+            &zeros,
+            &zeros,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            1.0,
+            1.0,
+            1.0,
+            0,
+            0,
+            &mask,
+            &mask_row_base,
+            16,
             COEFF_DOMAIN_CONSTANTS,
             1.0,
-            CostMode::Upstream { quant_for_coeffs: 1.0 },
+            CostMode::Upstream {
+                quant_for_coeffs: 1.0,
+            },
         );
         assert_eq!(costs.len(), n_blocks);
         let expected_per_channel = 7.0 * COEFF_DOMAIN_CONSTANTS.2;
@@ -1577,8 +1707,8 @@ mod tests {
     #[test]
     fn test_entropy_mul_for_strategy_normalized_8x8_class() {
         use crate::forks::transform::{
-            RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
-            RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+            RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT8X4,
+            RAW_STRATEGY_IDENTITY,
         };
         let t = EntropyMulTable::reference();
         // 8x8-class transforms get table.X / table.dct8 (= 0.8 in reference).
@@ -1596,9 +1726,9 @@ mod tests {
     #[test]
     fn test_entropy_mul_for_strategy_raw_for_large() {
         use crate::forks::transform::{
-            RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
-            RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
-            RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_DCT8X16,
+            RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
+            RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32,
+            RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
         };
         let t = EntropyMulTable::reference();
         // Larger transforms use raw values per upstream TryMergeAcs.
@@ -1656,17 +1786,20 @@ mod tests {
                 assert!(
                     (mine.0 - theirs.0).abs() < 1e-3,
                     "d={distance} bases={bases:?} info_loss: mine={} theirs={}",
-                    mine.0, theirs.0
+                    mine.0,
+                    theirs.0
                 );
                 assert!(
                     (mine.1 - theirs.1).abs() < 1e-3,
                     "d={distance} bases={bases:?} cost_delta: mine={} theirs={}",
-                    mine.1, theirs.1
+                    mine.1,
+                    theirs.1
                 );
                 assert!(
                     (mine.2 - theirs.2).abs() < 1e-3,
                     "d={distance} bases={bases:?} zeros_mul: mine={} theirs={}",
-                    mine.2, theirs.2
+                    mine.2,
+                    theirs.2
                 );
             }
         }
@@ -1675,8 +1808,7 @@ mod tests {
     #[test]
     fn test_compute_scaled_constants_d1_no_scale() {
         // ratio = 1.0 at distance == 1.0 → bases echo back.
-        let (info, cost, zeros) =
-            compute_scaled_constants(1.0, (1.0, 2.0, 3.0));
+        let (info, cost, zeros) = compute_scaled_constants(1.0, (1.0, 2.0, 3.0));
         assert!((info - 1.0).abs() < 1e-6);
         assert!((cost - 3.0).abs() < 1e-6);
         assert!((zeros - 2.0).abs() < 1e-6);

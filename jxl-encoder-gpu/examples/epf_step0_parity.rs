@@ -54,7 +54,14 @@ fn main() {
     let pad_one = |raw: &[f32]| -> Vec<f32> {
         let h_src = client.create_from_slice(f32::as_bytes(raw));
         let h_dst = client.create_from_slice(f32::as_bytes(&vec![0.0f32; N_PADDED]));
-        gpu_pad::<Backend>(&client, h_src, h_dst.clone(), W as u32, H as u32, PAD as u32);
+        gpu_pad::<Backend>(
+            &client,
+            h_src,
+            h_dst.clone(),
+            W as u32,
+            H as u32,
+            PAD as u32,
+        );
         let bytes = client.read_one(h_dst).expect("pad");
         f32::from_bytes(&bytes).to_vec()
     };

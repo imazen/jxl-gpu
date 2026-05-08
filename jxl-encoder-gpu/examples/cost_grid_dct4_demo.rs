@@ -68,7 +68,10 @@ fn main() {
         let mean = costs.iter().sum::<f32>() / (costs.len() as f32);
         let max = costs.iter().fold(0.0f32, |a, &b| a.max(b));
         let min = costs.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-        println!("{name:>8}: {} costs, min={min:.4} mean={mean:.4} max={max:.4}", costs.len());
+        println!(
+            "{name:>8}: {} costs, min={min:.4} mean={mean:.4} max={max:.4}",
+            costs.len()
+        );
         let ok = costs.iter().all(|&c| c >= 0.0 && c.is_finite());
         if !ok {
             eprintln!("  ✗ {name} produced negative or non-finite costs");

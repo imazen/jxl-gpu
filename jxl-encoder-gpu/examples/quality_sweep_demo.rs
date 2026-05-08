@@ -67,7 +67,10 @@ fn main() {
     );
 
     println!("\nReconstruction quality (sRGB U8 byte MAE):");
-    println!("  {:>5}  {:>8}  {:>6}  {:>6}  {:>6}", "qual", "qac", "R MAE", "G MAE", "B MAE");
+    println!(
+        "  {:>5}  {:>8}  {:>6}  {:>6}  {:>6}",
+        "qual", "qac", "R MAE", "G MAE", "B MAE"
+    );
     for ((q, qac), rgb_out) in qualities.iter().zip(&qacs).zip(&outputs) {
         let mut sum = [0_u64; 3];
         for (i, (&src, &dst)) in rgb_in.iter().zip(rgb_out).enumerate() {

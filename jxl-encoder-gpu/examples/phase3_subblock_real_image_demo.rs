@@ -38,7 +38,7 @@ fn main() {
         compute_cost_grid_identity_single_channel, select_partitions_16x16_full,
     };
     use jxl_encoder_gpu::quant_weights::{
-        dct8_weights_per_channel, dct16x16_weights, dct16x8_weights, replicate_weights,
+        dct8_weights_per_channel, dct16x8_weights, dct16x16_weights, replicate_weights,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -226,8 +226,8 @@ fn main() {
         let mut out = vec![0.0f32; nb_16x8];
         for ry in 0..yb_16x8 {
             for rx in 0..xb_16x8 {
-                out[ry * xb_16x8 + rx] = raw[ry * (xb_16x8 * 2) + 2 * rx]
-                    + raw[ry * (xb_16x8 * 2) + 2 * rx + 1];
+                out[ry * xb_16x8 + rx] =
+                    raw[ry * (xb_16x8 * 2) + 2 * rx] + raw[ry * (xb_16x8 * 2) + 2 * rx + 1];
             }
         }
         out
@@ -296,20 +296,50 @@ fn main() {
 
     println!("=== phase3_subblock_real_image_demo ===");
     println!("Image: {image_path}");
-    println!("Crop:  {w}×{h} ({nb8} 8×8 blocks, {} 16×16 regions)\n", total);
+    println!(
+        "Crop:  {w}×{h} ({nb8} 8×8 blocks, {} 16×16 regions)\n",
+        total
+    );
     println!("16×16-tier partition picks:");
-    println!("  DCT16×16          : {:>6}  ({:>5.1}%)", counts[0], pct(counts[0], total));
-    println!("  Two DCT16×8 horiz : {:>6}  ({:>5.1}%)", counts[1], pct(counts[1], total));
-    println!("  Two DCT8×16 vert  : {:>6}  ({:>5.1}%)", counts[2], pct(counts[2], total));
-    println!("  Four DCT8×8       : {:>6}  ({:>5.1}%)", counts[3], pct(counts[3], total));
-    println!("  Four SubBlocks    : {:>6}  ({:>5.1}%)", counts[4], pct(counts[4], total));
+    println!(
+        "  DCT16×16          : {:>6}  ({:>5.1}%)",
+        counts[0],
+        pct(counts[0], total)
+    );
+    println!(
+        "  Two DCT16×8 horiz : {:>6}  ({:>5.1}%)",
+        counts[1],
+        pct(counts[1], total)
+    );
+    println!(
+        "  Two DCT8×16 vert  : {:>6}  ({:>5.1}%)",
+        counts[2],
+        pct(counts[2], total)
+    );
+    println!(
+        "  Four DCT8×8       : {:>6}  ({:>5.1}%)",
+        counts[3],
+        pct(counts[3], total)
+    );
+    println!(
+        "  Four SubBlocks    : {:>6}  ({:>5.1}%)",
+        counts[4],
+        pct(counts[4], total)
+    );
 
     if counts[4] > 0 {
         let sub_total: usize = sub_counts.iter().sum();
-        println!("\nWithin {} FourSubBlocks regions ({} 8×8 cells), per-cell strategy:", counts[4], sub_total);
+        println!(
+            "\nWithin {} FourSubBlocks regions ({} 8×8 cells), per-cell strategy:",
+            counts[4], sub_total
+        );
         let names = ["DCT8", "DCT4×4", "DCT4×8", "DCT8×4", "IDENTITY", "DCT2X2"];
         for (i, name) in names.iter().enumerate() {
-            println!("  {name:<10}: {:>6}  ({:>5.1}%)", sub_counts[i], pct(sub_counts[i], sub_total));
+            println!(
+                "  {name:<10}: {:>6}  ({:>5.1}%)",
+                sub_counts[i],
+                pct(sub_counts[i], sub_total)
+            );
         }
     }
 }

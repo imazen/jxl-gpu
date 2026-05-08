@@ -67,10 +67,10 @@ fn main() {
                 let c = (i % 8) as f32;
                 let v = ((block_idx * 7 + i * 13).wrapping_mul(31) % 251) as f32 / 251.0 - 0.5;
                 input8[block_idx * 64 + i] = match kind {
-                    0 => 0.3 + 0.05 * (r + c),                  // smooth diag
-                    1 => 0.3 + 0.4 * ((c / 7.0) - 0.5),         // strong horizontal gradient (favors DCT8×16)
-                    2 => 0.3 + 0.4 * ((r / 7.0) - 0.5),         // strong vertical gradient (favors DCT16×8)
-                    _ => 0.3 + 0.4 * v,                         // noise (favors DCT8×8)
+                    0 => 0.3 + 0.05 * (r + c),          // smooth diag
+                    1 => 0.3 + 0.4 * ((c / 7.0) - 0.5), // strong horizontal gradient (favors DCT8×16)
+                    2 => 0.3 + 0.4 * ((r / 7.0) - 0.5), // strong vertical gradient (favors DCT16×8)
+                    _ => 0.3 + 0.4 * v,                 // noise (favors DCT8×8)
                 };
             }
         }
@@ -231,8 +231,8 @@ fn main() {
         let mut out = vec![0.0f32; X_16X8 * Y_16X8];
         for ry in 0..Y_16X8 {
             for rx in 0..X_16X8 {
-                out[ry * X_16X8 + rx] = raw[ry * (X_16X8 * 2) + 2 * rx]
-                    + raw[ry * (X_16X8 * 2) + 2 * rx + 1];
+                out[ry * X_16X8 + rx] =
+                    raw[ry * (X_16X8 * 2) + 2 * rx] + raw[ry * (X_16X8 * 2) + 2 * rx + 1];
             }
         }
         out
@@ -254,8 +254,7 @@ fn main() {
         let mut out = vec![0.0f32; X_8X16 * Y_8X16];
         for ry in 0..Y_8X16 {
             for rx in 0..X_8X16 {
-                out[ry * X_8X16 + rx] =
-                    raw[2 * ry * X_8X16 + rx] + raw[(2 * ry + 1) * X_8X16 + rx];
+                out[ry * X_8X16 + rx] = raw[2 * ry * X_8X16 + rx] + raw[(2 * ry + 1) * X_8X16 + rx];
             }
         }
         out
@@ -289,7 +288,10 @@ fn main() {
 
     println!("=== phase3_rect_selector_demo ===");
     println!("Image: 64×64, 16 regions (4×4), 4-kind cycling content");
-    println!("\nPer-strategy partition counts (out of {}):", partitions.len());
+    println!(
+        "\nPer-strategy partition counts (out of {}):",
+        partitions.len()
+    );
     println!("  DCT16×16          : {}", counts[0]);
     println!("  Two DCT16×8 horiz : {}", counts[1]);
     println!("  Two DCT8×16 vert  : {}", counts[2]);

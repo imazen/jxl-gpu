@@ -43,7 +43,7 @@ fn main() {
         compute_cost_grid_identity_single_channel, select_partitions_16x16_full,
     };
     use jxl_encoder_gpu::quant_weights::{
-        dct8_weights_per_channel, dct16x16_weights, dct16x8_weights, replicate_weights,
+        dct8_weights_per_channel, dct16x8_weights, dct16x16_weights, replicate_weights,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -74,9 +74,7 @@ fn main() {
     let mut total_subs = [0_usize; 6];
     let mut total_regions = 0_usize;
 
-    let upload_f = |c: &ComputeClient<Backend>, v: &[f32]| {
-        c.create_from_slice(f32::as_bytes(v))
-    };
+    let upload_f = |c: &ComputeClient<Backend>, v: &[f32]| c.create_from_slice(f32::as_bytes(v));
 
     let (_wx, wy_per, _wb) = dct8_weights_per_channel();
 
@@ -269,8 +267,8 @@ fn main() {
             let mut out = vec![0.0f32; nb_16x8];
             for ry in 0..yb_16x8 {
                 for rx in 0..xb_16x8 {
-                    out[ry * xb_16x8 + rx] = raw[ry * (xb_16x8 * 2) + 2 * rx]
-                        + raw[ry * (xb_16x8 * 2) + 2 * rx + 1];
+                    out[ry * xb_16x8 + rx] =
+                        raw[ry * (xb_16x8 * 2) + 2 * rx] + raw[ry * (xb_16x8 * 2) + 2 * rx + 1];
                 }
             }
             out
@@ -355,19 +353,47 @@ fn main() {
     }
 
     let pct = |c: usize, t: usize| 100.0 * c as f32 / t as f32;
-    println!("\n=== Aggregate ({} regions across {} images) ===", total_regions, paths.len());
-    println!("  DCT16×16          : {:>6}  ({:>5.1}%)", total_partitions[0], pct(total_partitions[0], total_regions));
-    println!("  Two DCT16×8 horiz : {:>6}  ({:>5.1}%)", total_partitions[1], pct(total_partitions[1], total_regions));
-    println!("  Two DCT8×16 vert  : {:>6}  ({:>5.1}%)", total_partitions[2], pct(total_partitions[2], total_regions));
-    println!("  Four DCT8×8       : {:>6}  ({:>5.1}%)", total_partitions[3], pct(total_partitions[3], total_regions));
-    println!("  Four SubBlocks    : {:>6}  ({:>5.1}%)", total_partitions[4], pct(total_partitions[4], total_regions));
+    println!(
+        "\n=== Aggregate ({} regions across {} images) ===",
+        total_regions,
+        paths.len()
+    );
+    println!(
+        "  DCT16×16          : {:>6}  ({:>5.1}%)",
+        total_partitions[0],
+        pct(total_partitions[0], total_regions)
+    );
+    println!(
+        "  Two DCT16×8 horiz : {:>6}  ({:>5.1}%)",
+        total_partitions[1],
+        pct(total_partitions[1], total_regions)
+    );
+    println!(
+        "  Two DCT8×16 vert  : {:>6}  ({:>5.1}%)",
+        total_partitions[2],
+        pct(total_partitions[2], total_regions)
+    );
+    println!(
+        "  Four DCT8×8       : {:>6}  ({:>5.1}%)",
+        total_partitions[3],
+        pct(total_partitions[3], total_regions)
+    );
+    println!(
+        "  Four SubBlocks    : {:>6}  ({:>5.1}%)",
+        total_partitions[4],
+        pct(total_partitions[4], total_regions)
+    );
 
     let sub_total: usize = total_subs.iter().sum();
     if sub_total > 0 {
         println!("\nWithin {} sub-block cells:", sub_total);
         let names = ["DCT8", "DCT4×4", "DCT4×8", "DCT8×4", "IDENTITY", "DCT2X2"];
         for (i, name) in names.iter().enumerate() {
-            println!("  {name:<10}: {:>6}  ({:>5.1}%)", total_subs[i], pct(total_subs[i], sub_total));
+            println!(
+                "  {name:<10}: {:>6}  ({:>5.1}%)",
+                total_subs[i],
+                pct(total_subs[i], sub_total)
+            );
         }
     }
 }

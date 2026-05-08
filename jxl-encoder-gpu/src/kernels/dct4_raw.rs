@@ -82,11 +82,11 @@ fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
     let s1 = t1 + t2;
     let s2 = t0 - t3;
     let s3 = t1 - t2;
-    let r0_0 = s0 + s1;             // u0
-    let r0_2 = s0 - s1;             // u1
+    let r0_0 = s0 + s1; // u0
+    let r0_2 = s0 - s1; // u1
     let v0 = s2 * WC4_0;
     let v1 = s3 * WC4_1;
-    let r0_3 = v0 - v1;             // w1
+    let r0_3 = v0 - v1; // w1
     let r0_1 = SQRT2 * (v0 + v1) + r0_3; // b0 = SQRT2*w0 + w1
     // ── Second-half: WC8 multiply + dct1d_4 inlined ──
     let w4 = t4 * WC8_0;
@@ -97,11 +97,11 @@ fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
     let q1 = w5 + w6;
     let q2 = w4 - w7;
     let q3 = w5 - w6;
-    let r1_0 = q0 + q1;             // u0
-    let r1_2 = q0 - q1;             // u1
+    let r1_0 = q0 + q1; // u0
+    let r1_2 = q0 - q1; // u1
     let v0b = q2 * WC4_0;
     let v1b = q3 * WC4_1;
-    let r1_3 = v0b - v1b;           // w1
+    let r1_3 = v0b - v1b; // w1
     let r1_1 = SQRT2 * (v0b + v1b) + r1_3; // b0
     // ── Final B-transform + interleave (libjxl `dct1d_8_val` order:
     //     [r0[0], b0, r0[1], b1, r0[2], b2, r0[3], b3]) ──
@@ -124,7 +124,11 @@ fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
 // offsets that the lints flag as no-effect / erasing-op. Suppressed at the
 // kernel function level since the structure (i*COLS + j) is intentional —
 // preserving it makes the per-row indexing pattern obvious to readers.
-#[allow(clippy::erasing_op, clippy::no_effect_underscore_binding, clippy::identity_op)]
+#[allow(
+    clippy::erasing_op,
+    clippy::no_effect_underscore_binding,
+    clippy::identity_op
+)]
 #[cube(launch_unchecked)]
 pub fn dct_4x4_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     let block_idx = ABSOLUTE_POS;
@@ -188,7 +192,11 @@ pub fn dct_4x4_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
 /// + temp region [32..64].
 // Cube macro expands the unrolled loops with literal `0 * COLS + row`
 // offsets — see kernel-level note on dct_4x4_raw_kernel above.
-#[allow(clippy::erasing_op, clippy::no_effect_underscore_binding, clippy::identity_op)]
+#[allow(
+    clippy::erasing_op,
+    clippy::no_effect_underscore_binding,
+    clippy::identity_op
+)]
 #[cube(launch_unchecked)]
 pub fn dct_4x8_raw_kernel(input: &Array<f32>, output: &mut Array<f32>) {
     let block_idx = ABSOLUTE_POS;

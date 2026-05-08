@@ -25,23 +25,46 @@ fn main() {
     println!("input row 0: {:?}", input);
 
     // ── My GPU kernel's dct1d_8 (CPU port, same arithmetic) ──
-    let m0 = input[0]; let m1 = input[1]; let m2 = input[2]; let m3 = input[3];
-    let m4 = input[4]; let m5 = input[5]; let m6 = input[6]; let m7 = input[7];
-    let t0 = m0 + m7; let t1 = m1 + m6; let t2 = m2 + m5; let t3 = m3 + m4;
-    let t4 = m0 - m7; let t5 = m1 - m6; let t6 = m2 - m5; let t7 = m3 - m4;
+    let m0 = input[0];
+    let m1 = input[1];
+    let m2 = input[2];
+    let m3 = input[3];
+    let m4 = input[4];
+    let m5 = input[5];
+    let m6 = input[6];
+    let m7 = input[7];
+    let t0 = m0 + m7;
+    let t1 = m1 + m6;
+    let t2 = m2 + m5;
+    let t3 = m3 + m4;
+    let t4 = m0 - m7;
+    let t5 = m1 - m6;
+    let t6 = m2 - m5;
+    let t7 = m3 - m4;
     // Inner DCT-4 on (t0..t3)
-    let s0 = t0 + t3; let s1 = t1 + t2; let s2 = t0 - t3; let s3 = t1 - t2;
+    let s0 = t0 + t3;
+    let s1 = t1 + t2;
+    let s2 = t0 - t3;
+    let s3 = t1 - t2;
     let r0_0 = s0 + s1;
     let r0_2 = s0 - s1;
-    let v0 = s2 * WC4_0; let v1 = s3 * WC4_1;
+    let v0 = s2 * WC4_0;
+    let v1 = s3 * WC4_1;
     let r0_3 = v0 - v1;
     let r0_1 = SQRT2 * (v0 + v1) + r0_3;
     // WC8 + Inner DCT-4 on (w4..w7)
-    let w4 = t4 * WC8_0; let w5 = t5 * WC8_1; let w6 = t6 * WC8_2; let w7 = t7 * WC8_3;
-    let q0 = w4 + w7; let q1 = w5 + w6; let q2 = w4 - w7; let q3 = w5 - w6;
+    let w4 = t4 * WC8_0;
+    let w5 = t5 * WC8_1;
+    let w6 = t6 * WC8_2;
+    let w7 = t7 * WC8_3;
+    let q0 = w4 + w7;
+    let q1 = w5 + w6;
+    let q2 = w4 - w7;
+    let q3 = w5 - w6;
     let r1_0 = q0 + q1;
     let r1_2 = q0 - q1;
-    let v0b = q2 * WC4_0; let v1b = q3 * WC4_1;
+    let v0b = q2 * WC4_0;
+    let v1b = q3 * WC4_1;
     let r1_3 = v0b - v1b;
     let r1_1 = SQRT2 * (v0b + v1b) + r1_3;
     // Final B-transform
@@ -113,6 +136,8 @@ fn main() {
             max_pos = i;
         }
     }
-    println!("\nmax|Δ| at pos {max_pos}: my={}, upstream={}, diff={:.3e}",
-        my_out[max_pos], upstream_r[max_pos], max_diff);
+    println!(
+        "\nmax|Δ| at pos {max_pos}: my={}, upstream={}, diff={:.3e}",
+        my_out[max_pos], upstream_r[max_pos], max_diff
+    );
 }

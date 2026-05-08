@@ -177,7 +177,14 @@ pub fn quantize_blocks_gpu<R: Runtime>(
         enc.quantize_dct8_blocks(coeffs, weights, qac_qm, thresholds)
     } else {
         enc.quantize_large_blocks(
-            coeffs, weights, qac_qm, thresholds, grid_width, grid_height, llf_x, llf_y,
+            coeffs,
+            weights,
+            qac_qm,
+            thresholds,
+            grid_width,
+            grid_height,
+            llf_x,
+            llf_y,
         )
     }
 }
@@ -232,8 +239,8 @@ pub fn adjust_quant_prescan(
     thresholds: &[f32; 4],
 ) -> Option<AdjustQuantBlockStats> {
     use crate::forks::transform::{
-        RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
-        RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+        RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT8X4,
+        RAW_STRATEGY_IDENTITY,
     };
     // Partial block kinds: pre-scan is skipped (matches upstream
     // `kPartialBlockKinds` skip → returns 0 stats). AFV variants are
@@ -311,11 +318,7 @@ pub fn adjust_quant_prescan(
 ///
 /// The returned bool corresponds to `heuristics_fired & 0x01` in
 /// upstream's bitfield convention.
-pub fn apply_heuristic_a_thresholds(
-    thresholds: &mut [f32; 4],
-    xsize: usize,
-    ysize: usize,
-) -> bool {
+pub fn apply_heuristic_a_thresholds(thresholds: &mut [f32; 4], xsize: usize, ysize: usize) -> bool {
     if xsize > 1 || ysize > 1 {
         let adj = (0.003 * (xsize * ysize) as f32).clamp(0.0, 0.08);
         for t in thresholds.iter_mut() {
@@ -416,24 +419,56 @@ pub fn apply_heuristic_e_large_transform(
     ysize: usize,
 ) -> bool {
     use crate::forks::transform::{
-        RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
-        RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
-        RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_DCT8X16,
+        RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32,
+        RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT64X32,
+        RAW_STRATEGY_DCT64X64,
     };
 
     #[allow(clippy::excessive_precision)]
     const K_MUL1: [[f64; 3]; 4] = [
-        [0.220_806_157_538_484_04, 0.457_974_798_242_620_11, 0.298_592_350_959_779_65],
-        [0.701_094_865_102_868_34, 0.161_852_813_055_126_39, 0.143_876_917_300_354_73],
-        [0.114_985_964_456_218_64, 0.446_568_404_410_277_0, 0.105_876_582_151_490_48],
-        [0.468_496_652_644_093_96, 0.412_390_779_377_819_54, 0.088_667_407_767_185_44],
+        [
+            0.220_806_157_538_484_04,
+            0.457_974_798_242_620_11,
+            0.298_592_350_959_779_65,
+        ],
+        [
+            0.701_094_865_102_868_34,
+            0.161_852_813_055_126_39,
+            0.143_876_917_300_354_73,
+        ],
+        [
+            0.114_985_964_456_218_64,
+            0.446_568_404_410_277_0,
+            0.105_876_582_151_490_48,
+        ],
+        [
+            0.468_496_652_644_093_96,
+            0.412_390_779_377_819_54,
+            0.088_667_407_767_185_44,
+        ],
     ];
     #[allow(clippy::excessive_precision)]
     const K_MUL2: [[f64; 3]; 4] = [
-        [0.274_502_819_418_222_0, 1.125_576_654_998_500, 0.989_504_591_341_283_9],
-        [0.465_216_867_559_828_5, 0.409_458_079_834_558_2, 0.365_818_998_117_513_67],
-        [0.280_349_724_247_157_15, 0.918_265_320_192_973_8, 1.558_153_154_305_741_6],
-        [0.268_731_181_140_337_28, 0.688_637_123_903_924_84, 1.208_218_540_866_678_6],
+        [
+            0.274_502_819_418_222_0,
+            1.125_576_654_998_500,
+            0.989_504_591_341_283_9,
+        ],
+        [
+            0.465_216_867_559_828_5,
+            0.409_458_079_834_558_2,
+            0.365_818_998_117_513_67,
+        ],
+        [
+            0.280_349_724_247_157_15,
+            0.918_265_320_192_973_8,
+            1.558_153_154_305_741_6,
+        ],
+        [
+            0.268_731_181_140_337_28,
+            0.688_637_123_903_924_84,
+            1.208_218_540_866_678_6,
+        ],
     ];
     const K_QUANT_NORMALIZER: f64 = 2.294_270_834_328_472;
     const BLOCK_DIM: usize = 8;
@@ -524,18 +559,17 @@ pub fn apply_heuristic_b_sparse_y(
     *quant = new_quant;
 
     if stats.hf_nonzeros[3] == 0.0 && (stats.hf_max_error[3] as f64) > K_LIMIT[3] {
-        thresholds[3] = (K_MUL[3] * stats.hf_max_error[3] as f64 * new_quant as f64
-            / orig_quant as f64) as f32;
+        thresholds[3] =
+            (K_MUL[3] * stats.hf_max_error[3] as f64 * new_quant as f64 / orig_quant as f64) as f32;
     } else if (stats.hf_nonzeros[1] == 0.0 && (stats.hf_max_error[1] as f64) > K_LIMIT[1])
         || (stats.hf_nonzeros[2] == 0.0 && (stats.hf_max_error[2] as f64) > K_LIMIT[2])
     {
         let max_err = stats.hf_max_error[1].max(stats.hf_max_error[2]);
-        thresholds[1] =
-            (K_MUL[1] * max_err as f64 * new_quant as f64 / orig_quant as f64) as f32;
+        thresholds[1] = (K_MUL[1] * max_err as f64 * new_quant as f64 / orig_quant as f64) as f32;
         thresholds[2] = thresholds[1];
     } else if stats.hf_nonzeros[0] == 0.0 && (stats.hf_max_error[0] as f64) > K_LIMIT[0] {
-        thresholds[0] = (K_MUL[0] * stats.hf_max_error[0] as f64 * new_quant as f64
-            / orig_quant as f64) as f32;
+        thresholds[0] =
+            (K_MUL[0] * stats.hf_max_error[0] as f64 * new_quant as f64 / orig_quant as f64) as f32;
     }
     true
 }
@@ -594,10 +628,8 @@ pub fn apply_heuristic_d_dct8_flatness(
     if raw_strategy != RAW_STRATEGY_DCT {
         return false;
     }
-    let sum = stats.hf_nonzeros[0]
-        + stats.hf_nonzeros[1]
-        + stats.hf_nonzeros[2]
-        + stats.hf_nonzeros[3];
+    let sum =
+        stats.hf_nonzeros[0] + stats.hf_nonzeros[1] + stats.hf_nonzeros[2] + stats.hf_nonzeros[3];
     if sum < 11.0 {
         *quant += 1;
         if *quant >= QUANT_MAX {
@@ -709,7 +741,8 @@ pub fn adjust_quant_block_ac_host(
         fired |= 0x10;
     }
     // (F)
-    let (f_fired, activity) = apply_heuristic_f_activity(quant, thresholds, &stats, c, xsize, ysize);
+    let (f_fired, activity) =
+        apply_heuristic_f_activity(quant, thresholds, &stats, c, xsize, ysize);
     if f_fired {
         fired |= 0x20;
     }
@@ -737,8 +770,8 @@ mod tests {
     #[test]
     fn test_adjust_quant_prescan_skips_partial_block_kinds() {
         use crate::forks::transform::{
-            RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
-            RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+            RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT8X4,
+            RAW_STRATEGY_IDENTITY,
         };
         let coeffs = [0.5_f32; 64];
         let weights = [1.0_f32; 64];
@@ -751,7 +784,17 @@ mod tests {
             RAW_STRATEGY_DCT8X4,
         ] {
             let r = adjust_quant_prescan(
-                &coeffs, &weights, 1.0, 1.0, 1, kind, 8, 8, 1, 1, &thresholds,
+                &coeffs,
+                &weights,
+                1.0,
+                1.0,
+                1,
+                kind,
+                8,
+                8,
+                1,
+                1,
+                &thresholds,
             );
             assert!(r.is_none(), "partial block kind {kind} should skip prescan");
         }
@@ -938,7 +981,9 @@ mod tests {
         };
         for &strat in &[RAW_STRATEGY_DCT, RAW_STRATEGY_DCT4X4] {
             let mut q2 = q;
-            assert!(!apply_heuristic_e_large_transform(&mut q2, &stats, 1, strat, 1, 1));
+            assert!(!apply_heuristic_e_large_transform(
+                &mut q2, &stats, 1, strat, 1, 1
+            ));
             assert_eq!(q2, q);
         }
     }
@@ -956,14 +1001,8 @@ mod tests {
             sum_of_vals: 0.0,
             ..Default::default()
         };
-        let fired = apply_heuristic_e_large_transform(
-            &mut q,
-            &stats,
-            1,
-            RAW_STRATEGY_DCT16X16,
-            2,
-            2,
-        );
+        let fired =
+            apply_heuristic_e_large_transform(&mut q, &stats, 1, RAW_STRATEGY_DCT16X16, 2, 2);
         assert!(fired);
         assert!(q > 100, "quant should be bumped, got {q}");
         assert!(q <= 100 + 2, "quant bump capped at 2, got {q}");
@@ -974,18 +1013,12 @@ mod tests {
         use crate::forks::transform::RAW_STRATEGY_DCT16X16;
         let mut q = 100;
         let stats = AdjustQuantBlockStats {
-            sum_of_error: 1.0, // tiny
+            sum_of_error: 1.0,  // tiny
             sum_of_vals: 100.0, // raises threshold
             ..Default::default()
         };
-        let fired = apply_heuristic_e_large_transform(
-            &mut q,
-            &stats,
-            1,
-            RAW_STRATEGY_DCT16X16,
-            2,
-            2,
-        );
+        let fired =
+            apply_heuristic_e_large_transform(&mut q, &stats, 1, RAW_STRATEGY_DCT16X16, 2, 2);
         assert!(!fired);
         assert_eq!(q, 100);
     }
@@ -1003,7 +1036,9 @@ mod tests {
         for c in [0_usize, 2] {
             let mut q2 = q;
             let mut t2 = t;
-            assert!(!apply_heuristic_b_sparse_y(&mut q2, &mut t2, &stats, c, 2, 2));
+            assert!(!apply_heuristic_b_sparse_y(
+                &mut q2, &mut t2, &stats, c, 2, 2
+            ));
             assert_eq!(q2, q);
             assert_eq!(t2, t);
         }
@@ -1103,7 +1138,11 @@ mod tests {
             RAW_STRATEGY_DCT16X16
         ));
         assert_eq!(q, 100);
-        assert!(apply_heuristic_d_dct8_flatness(&mut q, &stats, RAW_STRATEGY_DCT));
+        assert!(apply_heuristic_d_dct8_flatness(
+            &mut q,
+            &stats,
+            RAW_STRATEGY_DCT
+        ));
         assert_eq!(q, 101);
     }
 
@@ -1115,7 +1154,11 @@ mod tests {
             hf_nonzeros: [4.0, 4.0, 4.0, 4.0], // sum = 16 > 11
             ..Default::default()
         };
-        assert!(!apply_heuristic_d_dct8_flatness(&mut q, &stats, RAW_STRATEGY_DCT));
+        assert!(!apply_heuristic_d_dct8_flatness(
+            &mut q,
+            &stats,
+            RAW_STRATEGY_DCT
+        ));
         assert_eq!(q, 100);
     }
 
@@ -1127,8 +1170,8 @@ mod tests {
         // Outputs (heuristics_fired, sum_of_vals, sum_of_error, activity)
         // and the in/out (thresholds, quant) must all match.
         use crate::forks::transform::{
-            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X32,
-            RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT8X16,
+            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
+            RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X32,
         };
 
         // Build several synthetic blocks across strategies + channels +
@@ -1153,7 +1196,13 @@ mod tests {
                     let weights: Vec<f32> = (0..n)
                         .map(|i| 1.0 + 0.5 * (i as f32 * 0.013).sin())
                         .collect();
-                    let qm_mul = if c == 0 { 1.5 } else if c == 2 { 0.7 } else { 1.0 };
+                    let qm_mul = if c == 0 {
+                        1.5
+                    } else if c == 2 {
+                        0.7
+                    } else {
+                        1.0
+                    };
                     let initial_thresholds = [0.62_f32, 0.62, 0.62, 0.62];
                     let initial_quant = 100_i32;
 
@@ -1161,9 +1210,18 @@ mod tests {
                     let mut t_ours = initial_thresholds;
                     let mut q_ours = initial_quant;
                     let our_outcome = adjust_quant_block_ac_host(
-                        &coeffs, &weights, qac, qm_mul, c, raw_strategy,
-                        bw, bh, xs, ys,
-                        &mut t_ours, &mut q_ours,
+                        &coeffs,
+                        &weights,
+                        qac,
+                        qm_mul,
+                        c,
+                        raw_strategy,
+                        bw,
+                        bh,
+                        xs,
+                        ys,
+                        &mut t_ours,
+                        &mut q_ours,
                     );
 
                     // UPSTREAM orchestrator (via __internals).
@@ -1171,34 +1229,45 @@ mod tests {
                     let mut q_theirs = initial_quant;
                     let (their_fired, their_vals, their_err, their_act) =
                         jxl_encoder::__internals::adjust_quant_block_ac_free(
-                            &coeffs, &weights, qac, qm_mul, c, raw_strategy,
-                            bw, bh, xs, ys,
-                            &mut t_theirs, &mut q_theirs,
+                            &coeffs,
+                            &weights,
+                            qac,
+                            qm_mul,
+                            c,
+                            raw_strategy,
+                            bw,
+                            bh,
+                            xs,
+                            ys,
+                            &mut t_theirs,
+                            &mut q_theirs,
                         );
 
                     // Compare all 4 outputs + (in/out) thresholds + quant.
-                    let ctx = format!(
-                        "strat={raw_strategy} c={c} qac={qac} bw={bw} bh={bh}"
+                    let ctx = format!("strat={raw_strategy} c={c} qac={qac} bw={bw} bh={bh}");
+                    assert_eq!(
+                        our_outcome.heuristics_fired, their_fired,
+                        "{ctx} fired mismatch"
                     );
-                    assert_eq!(our_outcome.heuristics_fired, their_fired,
-                        "{ctx} fired mismatch");
                     assert!(
                         (our_outcome.sum_of_vals - their_vals).abs() < 1e-3,
                         "{ctx} sum_of_vals: ours={} theirs={}",
-                        our_outcome.sum_of_vals, their_vals
+                        our_outcome.sum_of_vals,
+                        their_vals
                     );
                     assert!(
                         (our_outcome.sum_of_error - their_err).abs() < 1e-3,
                         "{ctx} sum_of_error: ours={} theirs={}",
-                        our_outcome.sum_of_error, their_err
+                        our_outcome.sum_of_error,
+                        their_err
                     );
-                    assert_eq!(our_outcome.activity, their_act,
-                        "{ctx} activity mismatch");
+                    assert_eq!(our_outcome.activity, their_act, "{ctx} activity mismatch");
                     for k in 0..4 {
                         assert!(
                             (t_ours[k] - t_theirs[k]).abs() < 1e-4,
                             "{ctx} threshold[{k}]: ours={} theirs={}",
-                            t_ours[k], t_theirs[k]
+                            t_ours[k],
+                            t_theirs[k]
                         );
                     }
                     assert_eq!(q_ours, q_theirs, "{ctx} quant mismatch");

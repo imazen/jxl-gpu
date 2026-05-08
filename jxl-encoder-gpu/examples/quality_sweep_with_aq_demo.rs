@@ -95,12 +95,10 @@ fn main() {
         };
         let src = to_rgb3(&rgb_in);
         let dst = to_rgb3(out);
-        let src_img =
-            imgref::ImgVec::new(src, w as usize, h as usize);
-        let dst_img =
-            imgref::ImgVec::new(dst, w as usize, h as usize);
-        fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_img.as_ref())
-            .expect("ssimulacra2") as f64
+        let src_img = imgref::ImgVec::new(src, w as usize, h as usize);
+        let dst_img = imgref::ImgVec::new(dst, w as usize, h as usize);
+        fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_img.as_ref()).expect("ssimulacra2")
+            as f64
     };
 
     println!("\nPer-distance metrics:");

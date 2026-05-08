@@ -36,9 +36,9 @@ fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::adaptive_quant::compute_mask1x1_gpu;
     use jxl_encoder_gpu::pipeline::{
-        CostGrids16x16, Partition16x16, compute_cost_grid_dct8_xyb,
-        compute_cost_grid_dct8x16_xyb, compute_cost_grid_dct16x8_xyb,
-        compute_cost_grid_dct16x16_xyb, select_partitions_16x16_full,
+        CostGrids16x16, Partition16x16, compute_cost_grid_dct8_xyb, compute_cost_grid_dct8x16_xyb,
+        compute_cost_grid_dct16x8_xyb, compute_cost_grid_dct16x16_xyb,
+        select_partitions_16x16_full,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -73,9 +73,7 @@ fn main() {
     let mut total = [0_usize; 4];
     let mut total_regions = 0_usize;
 
-    let upload = |c: &ComputeClient<Backend>, v: &[f32]| {
-        c.create_from_slice(f32::as_bytes(v))
-    };
+    let upload = |c: &ComputeClient<Backend>, v: &[f32]| c.create_from_slice(f32::as_bytes(v));
 
     for path in &paths {
         let img = match image::open(path) {
@@ -238,8 +236,8 @@ fn main() {
             let mut out = vec![0.0f32; nb_16x8];
             for ry in 0..yb_16x8 {
                 for rx in 0..xb_16x8 {
-                    out[ry * xb_16x8 + rx] = raw[ry * (xb_16x8 * 2) + 2 * rx]
-                        + raw[ry * (xb_16x8 * 2) + 2 * rx + 1];
+                    out[ry * xb_16x8 + rx] =
+                        raw[ry * (xb_16x8 * 2) + 2 * rx] + raw[ry * (xb_16x8 * 2) + 2 * rx + 1];
                 }
             }
             out
@@ -315,10 +313,34 @@ fn main() {
     }
 
     let pct = |c: usize| 100.0 * c as f32 / total_regions as f32;
-    println!("\n=== Aggregate ({} regions across {} images) ===", total_regions, paths.len());
-    println!("  DCT16×16          : {:>6}  ({:>5.1}%)", total[0], pct(total[0]));
-    println!("  Two DCT16×8 horiz : {:>6}  ({:>5.1}%)", total[1], pct(total[1]));
-    println!("  Two DCT8×16 vert  : {:>6}  ({:>5.1}%)", total[2], pct(total[2]));
-    println!("  Four DCT8×8       : {:>6}  ({:>5.1}%)", total[3], pct(total[3]));
-    println!("  rect (16×8 + 8×16): {:>6}  ({:>5.1}%)", total[1] + total[2], pct(total[1] + total[2]));
+    println!(
+        "\n=== Aggregate ({} regions across {} images) ===",
+        total_regions,
+        paths.len()
+    );
+    println!(
+        "  DCT16×16          : {:>6}  ({:>5.1}%)",
+        total[0],
+        pct(total[0])
+    );
+    println!(
+        "  Two DCT16×8 horiz : {:>6}  ({:>5.1}%)",
+        total[1],
+        pct(total[1])
+    );
+    println!(
+        "  Two DCT8×16 vert  : {:>6}  ({:>5.1}%)",
+        total[2],
+        pct(total[2])
+    );
+    println!(
+        "  Four DCT8×8       : {:>6}  ({:>5.1}%)",
+        total[3],
+        pct(total[3])
+    );
+    println!(
+        "  rect (16×8 + 8×16): {:>6}  ({:>5.1}%)",
+        total[1] + total[2],
+        pct(total[1] + total[2])
+    );
 }

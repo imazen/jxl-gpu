@@ -253,13 +253,20 @@ pub fn distance_to_qac(distance: f32) -> f32 {
 /// a different distance-range mapping).
 pub fn block_means_to_qac_field(block_means: &[f32], distance: f32) -> alloc::vec::Vec<f32> {
     let m_min = block_means.iter().copied().fold(f32::INFINITY, f32::min);
-    let m_max = block_means.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let m_max = block_means
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
     let qac_max = distance_to_qac(distance * 0.5); // detail → light quant
     let qac_min = distance_to_qac(distance * 2.0); // smooth → heavy quant
     block_means
         .iter()
         .map(|&m| {
-            let t = if m_max > m_min { (m - m_min) / (m_max - m_min) } else { 0.5 };
+            let t = if m_max > m_min {
+                (m - m_min) / (m_max - m_min)
+            } else {
+                0.5
+            };
             qac_max + (qac_min - qac_max) * t
         })
         .collect()
@@ -313,9 +320,9 @@ fn pad_to_alignment(
 
 /// DCT8 band parameters from libjxl quant_weights.cc:535-561.
 const DCT8_PARAMS: [[f64; 6]; 3] = [
-    [3150.0, 0.0, -0.4, -0.4, -0.4, -2.0],   // X channel
-    [560.0, 0.0, -0.3, -0.3, -0.3, -0.3],    // Y channel
-    [512.0, -2.0, -1.0, 0.0, -1.0, -2.0],    // B channel
+    [3150.0, 0.0, -0.4, -0.4, -0.4, -2.0], // X channel
+    [560.0, 0.0, -0.3, -0.3, -0.3, -0.3],  // Y channel
+    [512.0, -2.0, -1.0, 0.0, -1.0, -2.0],  // B channel
 ];
 
 #[inline]
@@ -481,12 +488,7 @@ impl<R: Runtime> LossyEncoder<R> {
     /// used elsewhere in the repo). For the IEC 61966-2-1 piecewise
     /// curve, deinterleave + linearize on the host before calling
     /// `encode_one` directly with f32 planes.
-    pub fn encode_one_srgb_u8(
-        &self,
-        enc: &GpuEncoder<R>,
-        rgb: &[u8],
-        qac_qm: f32,
-    ) -> Vec<u8> {
+    pub fn encode_one_srgb_u8(&self, enc: &GpuEncoder<R>, rgb: &[u8], qac_qm: f32) -> Vec<u8> {
         let n = (self.width as usize) * (self.height as usize);
         assert_eq!(rgb.len(), n * 3, "rgb.len() must be width*height*3");
         let to_linear = |c: u8| (c as f32 / 255.0).powf(2.4);
@@ -777,8 +779,11 @@ impl<R: Runtime> LossyEncoder<R> {
                         count += 1;
                     }
                 }
-                block_means[by * blocks_per_row + bx] =
-                    if count > 0 { (sum / count as f64) as f32 } else { 1.0 };
+                block_means[by * blocks_per_row + bx] = if count > 0 {
+                    (sum / count as f64) as f32
+                } else {
+                    1.0
+                };
             }
         }
         block_means

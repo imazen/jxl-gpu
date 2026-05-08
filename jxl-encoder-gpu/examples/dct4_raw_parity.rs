@@ -43,8 +43,7 @@ fn main() {
         let mut cpu_out = vec![0.0_f32; N];
         for b in 0..N_BLOCKS {
             let pixels: &[f32; 16] = (&input[b * 16..b * 16 + 16]).try_into().unwrap();
-            let coeffs: &mut [f32; 16] =
-                (&mut cpu_out[b * 16..b * 16 + 16]).try_into().unwrap();
+            let coeffs: &mut [f32; 16] = (&mut cpu_out[b * 16..b * 16 + 16]).try_into().unwrap();
             dct_4x4(pixels, coeffs);
         }
         let h_in = client.create_from_slice(f32::as_bytes(&input));
@@ -78,8 +77,7 @@ fn main() {
         let mut cpu_out = vec![0.0_f32; N];
         for b in 0..N_BLOCKS {
             let pixels: &[f32; 32] = (&input[b * 32..b * 32 + 32]).try_into().unwrap();
-            let coeffs: &mut [f32; 32] =
-                (&mut cpu_out[b * 32..b * 32 + 32]).try_into().unwrap();
+            let coeffs: &mut [f32; 32] = (&mut cpu_out[b * 32..b * 32 + 32]).try_into().unwrap();
             dct_4x8(pixels, coeffs);
         }
         let h_in = client.create_from_slice(f32::as_bytes(&input));

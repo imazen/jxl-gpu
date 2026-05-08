@@ -64,11 +64,7 @@ pub const AFV4X4_BASIS_TRANSPOSE: [f32; 256] = [
 /// Input/output: `num_blocks * 16` floats. `basis_t` is the 16x16
 /// basis-transpose matrix (256 floats), uploaded once by the caller.
 #[cube(launch_unchecked)]
-pub fn afv_dct_4x4_kernel(
-    pixels: &Array<f32>,
-    basis_t: &Array<f32>,
-    coeffs: &mut Array<f32>,
-) {
+pub fn afv_dct_4x4_kernel(pixels: &Array<f32>, basis_t: &Array<f32>, coeffs: &mut Array<f32>) {
     let block_idx = ABSOLUTE_POS;
     let n_blocks = pixels.len() / 16u32 as usize;
     if block_idx >= n_blocks {
@@ -100,11 +96,7 @@ pub fn afv_dct_4x4_kernel(
 
 /// Inverse AFV 4x4 DCT. `pixels[i] = sum_j (basis_t[i][j] * coeffs[j])`.
 #[cube(launch_unchecked)]
-pub fn afv_idct_4x4_kernel(
-    coeffs: &Array<f32>,
-    basis_t: &Array<f32>,
-    pixels: &mut Array<f32>,
-) {
+pub fn afv_idct_4x4_kernel(coeffs: &Array<f32>, basis_t: &Array<f32>, pixels: &mut Array<f32>) {
     let block_idx = ABSOLUTE_POS;
     let n_blocks = coeffs.len() / 16u32 as usize;
     if block_idx >= n_blocks {

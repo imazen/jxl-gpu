@@ -301,12 +301,23 @@ pub fn compute_epf_sharpness_dct8_gpu<R: Runtime>(
     // Step 1: base reconstruction (4 GPU launches for the DCT8-only path).
     let mut base = reconstruct_xyb_dct8_only_gpu(
         enc,
-        quant_dc_x, quant_dc_y, quant_dc_b,
-        quant_ac_x, quant_ac_y, quant_ac_b,
-        weights_x_per_block, weights_y_per_block, weights_b_per_block,
-        qac_qm_x, qac_qm_y, qac_qm_b,
-        x_factor, b_factor,
-        scale_dc, xsize_blocks, ysize_blocks,
+        quant_dc_x,
+        quant_dc_y,
+        quant_dc_b,
+        quant_ac_x,
+        quant_ac_y,
+        quant_ac_b,
+        weights_x_per_block,
+        weights_y_per_block,
+        weights_b_per_block,
+        qac_qm_x,
+        qac_qm_y,
+        qac_qm_b,
+        x_factor,
+        b_factor,
+        scale_dc,
+        xsize_blocks,
+        ysize_blocks,
     );
 
     // Step 2: optional gaborish smoothing (3 launches if enabled).
@@ -329,7 +340,9 @@ pub fn compute_epf_sharpness_dct8_gpu<R: Runtime>(
 
         let recon = apply_epf_chain_gpu(
             enc,
-            &base[0], &base[1], &base[2],
+            &base[0],
+            &base[1],
+            &base[2],
             &inv_sigma,
             epf_iters,
             padded_w as u32,
@@ -340,8 +353,12 @@ pub fn compute_epf_sharpness_dct8_gpu<R: Runtime>(
 
         // Per-block masked L2 — uses the existing GpuEncoder method.
         let costs = enc.block_l2_errors(
-            original_x, original_y, original_b,
-            &recon[0], &recon[1], &recon[2],
+            original_x,
+            original_y,
+            original_b,
+            &recon[0],
+            &recon[1],
+            &recon[2],
             mask1x1,
             xsize_blocks as u32,
             ysize_blocks as u32,
@@ -419,9 +436,7 @@ pub fn apply_epf_chain_gpu<R: Runtime>(
     let mut cur_y: Vec<f32> = plane_y.to_vec();
     let mut cur_b: Vec<f32> = plane_b.to_vec();
 
-    let pad_for = |p: u32, x: &[f32]| -> Vec<f32> {
-        enc.pad_plane_channel(x, width, height, p)
-    };
+    let pad_for = |p: u32, x: &[f32]| -> Vec<f32> { enc.pad_plane_channel(x, width, height, p) };
 
     if epf_iters >= 3 {
         let pad = 3_u32;
@@ -430,9 +445,15 @@ pub fn apply_epf_chain_gpu<R: Runtime>(
         let pb = pad_for(pad, &cur_b);
         let (ox, oy, ob) = apply_epf_step0_gpu(
             enc,
-            &px, &py, &pb,
+            &px,
+            &py,
+            &pb,
             inv_sigma,
-            width, height, xsize_blocks, ysize_blocks, pad,
+            width,
+            height,
+            xsize_blocks,
+            ysize_blocks,
+            pad,
             EPF_PASS0_SIGMA_SCALE * 1.65,
             EPF_BORDER_SAD_MUL,
         );
@@ -447,9 +468,15 @@ pub fn apply_epf_chain_gpu<R: Runtime>(
         let pb = pad_for(pad, &cur_b);
         let (ox, oy, ob) = apply_epf_step1_gpu(
             enc,
-            &px, &py, &pb,
+            &px,
+            &py,
+            &pb,
             inv_sigma,
-            width, height, xsize_blocks, ysize_blocks, pad,
+            width,
+            height,
+            xsize_blocks,
+            ysize_blocks,
+            pad,
             1.65,
             EPF_BORDER_SAD_MUL,
         );
@@ -464,9 +491,15 @@ pub fn apply_epf_chain_gpu<R: Runtime>(
         let pb = pad_for(pad, &cur_b);
         let (ox, oy, ob) = apply_epf_step2_gpu(
             enc,
-            &px, &py, &pb,
+            &px,
+            &py,
+            &pb,
             inv_sigma,
-            width, height, xsize_blocks, ysize_blocks, pad,
+            width,
+            height,
+            xsize_blocks,
+            ysize_blocks,
+            pad,
             EPF_PASS2_SIGMA_SCALE * 1.65,
             EPF_BORDER_SAD_MUL,
         );
@@ -676,18 +709,29 @@ mod tests {
 
         let sharpness = compute_epf_sharpness_dct8_gpu(
             &enc,
-            &original, &original, &original,
-            &dc_zero, &dc_zero, &dc_zero,
-            &ac_zero, &ac_zero, &ac_zero,
-            &weights_one, &weights_one, &weights_one,
-            &qac_qm, &qac_qm, &qac_qm,
-            &zero_factor, &zero_factor,
+            &original,
+            &original,
+            &original,
+            &dc_zero,
+            &dc_zero,
+            &dc_zero,
+            &ac_zero,
+            &ac_zero,
+            &ac_zero,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &qac_qm,
+            &qac_qm,
+            &qac_qm,
+            &zero_factor,
+            &zero_factor,
             &quant_field,
-            1.0,    // quant_scale
-            1.0,    // scale_dc
-            1.0,    // distance → candidates [0, 2, 7]
-            2,      // epf_iters: step 1 + step 2
-            true,   // gaborish on
+            1.0,  // quant_scale
+            1.0,  // scale_dc
+            1.0,  // distance → candidates [0, 2, 7]
+            2,    // epf_iters: step 1 + step 2
+            true, // gaborish on
             &mask,
             xb,
             yb,
@@ -725,11 +769,7 @@ mod tests {
         let candidates = [0_u8, 2_u8, 7_u8];
         // Errors: candidate 0 = 10.0, candidate 1 = 1.0, candidate 2 = 50.0
         // (candidate 0 gets * K_FAVOR_NO_SMOOTHING = 0.99 → 9.9 still > 1.0).
-        let error_maps = vec![
-            vec![10.0_f32; nb],
-            vec![1.0_f32; nb],
-            vec![50.0_f32; nb],
-        ];
+        let error_maps = vec![vec![10.0_f32; nb], vec![1.0_f32; nb], vec![50.0_f32; nb]];
         let out = select_sharpness_two_pass(&error_maps, &candidates, 1.0, xb, yb);
         assert_eq!(out.len(), nb);
         for &v in &out {
@@ -745,11 +785,7 @@ mod tests {
         let yb = 2_usize;
         let nb = xb * yb;
         let candidates = [0_u8, 2_u8, 7_u8];
-        let error_maps = vec![
-            vec![1.005_f32; nb],
-            vec![1.0_f32; nb],
-            vec![100.0_f32; nb],
-        ];
+        let error_maps = vec![vec![1.005_f32; nb], vec![1.0_f32; nb], vec![100.0_f32; nb]];
         let out = select_sharpness_two_pass(&error_maps, &candidates, 1.0, xb, yb);
         // Pass-2 c3 multiplier on sharpness=0 only strengthens this.
         for &v in &out {

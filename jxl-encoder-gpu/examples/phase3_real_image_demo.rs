@@ -217,8 +217,24 @@ fn main() {
         sd16 / me16.max(1e-9),
     );
     println!("\nPartition decisions (n={}):", partitions.len());
-    println!("  DCT16×16          : {:>5}  ({:>5.1}%)", counts[0], 100.0 * counts[0] as f32 / partitions.len() as f32);
-    println!("  Two DCT16×8 horiz : {:>5}  ({:>5.1}%)", counts[1], 100.0 * counts[1] as f32 / partitions.len() as f32);
-    println!("  Two DCT8×16 vert  : {:>5}  ({:>5.1}%)", counts[2], 100.0 * counts[2] as f32 / partitions.len() as f32);
-    println!("  Four DCT8×8       : {:>5}  ({:>5.1}%)", counts[3], 100.0 * counts[3] as f32 / partitions.len() as f32);
+    println!(
+        "  DCT16×16          : {:>5}  ({:>5.1}%)",
+        counts[0],
+        100.0 * counts[0] as f32 / partitions.len() as f32
+    );
+    println!(
+        "  Two DCT16×8 horiz : {:>5}  ({:>5.1}%)",
+        counts[1],
+        100.0 * counts[1] as f32 / partitions.len() as f32
+    );
+    println!(
+        "  Two DCT8×16 vert  : {:>5}  ({:>5.1}%)",
+        counts[2],
+        100.0 * counts[2] as f32 / partitions.len() as f32
+    );
+    println!(
+        "  Four DCT8×8       : {:>5}  ({:>5.1}%)",
+        counts[3],
+        100.0 * counts[3] as f32 / partitions.len() as f32
+    );
 }

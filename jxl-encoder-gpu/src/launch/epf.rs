@@ -6,9 +6,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::kernels::epf::{
-    epf_step0_kernel, epf_step1_kernel, epf_step2_kernel, pad_plane_kernel,
-};
+use crate::kernels::epf::{epf_step0_kernel, epf_step1_kernel, epf_step2_kernel, pad_plane_kernel};
 
 const TPB: u32 = 256;
 

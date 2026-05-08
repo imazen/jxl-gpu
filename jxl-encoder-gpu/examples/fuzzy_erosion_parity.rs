@@ -131,7 +131,9 @@ fn main() {
         k_mul[0], k_mul[1], k_mul[2], k_mul[3]
     );
 
-    let cpu_out = cpu_fuzzy_erosion(&src, SRC_W, SRC_H, FROM_X0, FROM_Y0, REGION_W, REGION_H, k_mul);
+    let cpu_out = cpu_fuzzy_erosion(
+        &src, SRC_W, SRC_H, FROM_X0, FROM_Y0, REGION_W, REGION_H, k_mul,
+    );
     assert_eq!(cpu_out.len(), OUT_W * OUT_H);
 
     let h_src = client.create_from_slice(f32::as_bytes(&src));
@@ -172,7 +174,10 @@ fn main() {
         if ok { "✓" } else { "✗" }
     );
     if !ok {
-        eprintln!("  cpu[{max_pos}]={:.6}  gpu[{max_pos}]={:.6}", cpu_out[max_pos], gpu_out[max_pos]);
+        eprintln!(
+            "  cpu[{max_pos}]={:.6}  gpu[{max_pos}]={:.6}",
+            cpu_out[max_pos], gpu_out[max_pos]
+        );
         std::process::exit(1);
     }
 }

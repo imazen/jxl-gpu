@@ -18,9 +18,9 @@ use alloc::vec::Vec;
 /// libjxl DCT8 band parameters from `quant_weights.cc:535-561`.
 /// `[X, Y, B]` × 6 bands per channel.
 pub const DCT8_PARAMS: [[f64; 6]; 3] = [
-    [3150.0, 0.0, -0.4, -0.4, -0.4, -2.0],   // X channel
-    [560.0, 0.0, -0.3, -0.3, -0.3, -0.3],    // Y channel
-    [512.0, -2.0, -1.0, 0.0, -1.0, -2.0],    // B channel
+    [3150.0, 0.0, -0.4, -0.4, -0.4, -2.0], // X channel
+    [560.0, 0.0, -0.3, -0.3, -0.3, -0.3],  // Y channel
+    [512.0, -2.0, -1.0, 0.0, -1.0, -2.0],  // B channel
 ];
 
 /// libjxl IDENTITY dequant weights from `quant_weights.cc:80-90, 564-579`.
@@ -58,11 +58,7 @@ pub const DCT4_PARAMS: [[f64; 4]; 3] = [
 
 /// libjxl DCT4X4 LLF multiplier parameters from jxl-oxide `dequant.rs:257-277`.
 /// `params[0]` is used for LLF positions 1 and 8, `params[1]` for position 9.
-pub const DCT4_LLF_PARAMS: [[f64; 2]; 3] = [
-    [1.0, 1.0],
-    [1.0, 1.0],
-    [1.0, 1.0],
-];
+pub const DCT4_LLF_PARAMS: [[f64; 2]; 3] = [[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]];
 
 /// libjxl DCT16x8 band parameters from `quant_weights.cc:716-745`.
 /// `[X, Y, B]` × 7 bands per channel. Used for BOTH the DCT16X8 and
@@ -132,7 +128,16 @@ pub const DCT16X32_PARAMS: [[f64; 8]; 3] = [
         -0.229_242_226_530_914_53,
         -0.207_190_988_261_995_78,
     ],
-    [1807.236_946_760_964_4, -1.2, -1.2, -0.7, -0.7, -0.7, -0.4, -0.5],
+    [
+        1807.236_946_760_964_4,
+        -1.2,
+        -1.2,
+        -0.7,
+        -0.7,
+        -0.7,
+        -0.4,
+        -0.5,
+    ],
 ];
 
 /// libjxl DCT64x64 band parameters from `quant_weights.cc:899-931`.
@@ -158,7 +163,16 @@ pub const DCT64X64_PARAMS: [[f64; 8]; 3] = [
         -0.301_808_665_262_421_09,
         -0.273_216_831_253_580_37,
     ],
-    [4493.023_780_098_477, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
+    [
+        4493.023_780_098_477,
+        -1.2,
+        -1.2,
+        -0.8,
+        -0.7,
+        -0.7,
+        -0.4,
+        -0.5,
+    ],
 ];
 
 /// libjxl DCT32x64 band parameters from `quant_weights.cc:935-968`.
@@ -184,7 +198,16 @@ pub const DCT32X64_PARAMS: [[f64; 8]; 3] = [
         -0.301_808_665_262_421_09,
         -0.273_216_831_253_580_37,
     ],
-    [2919.961_618_960_011, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
+    [
+        2919.961_618_960_011,
+        -1.2,
+        -1.2,
+        -0.8,
+        -0.7,
+        -0.7,
+        -0.4,
+        -0.5,
+    ],
 ];
 
 /// libjxl DCT16x16 band parameters from `quant_weights.cc:647-676`.
@@ -221,11 +244,7 @@ pub const DCT16X16_PARAMS: [[f64; 7]; 3] = [
 
 #[inline]
 fn band_mult(v: f64) -> f64 {
-    if v > 0.0 {
-        1.0 + v
-    } else {
-        1.0 / (1.0 - v)
-    }
+    if v > 0.0 { 1.0 + v } else { 1.0 / (1.0 - v) }
 }
 
 #[inline]
@@ -331,7 +350,11 @@ pub fn dct16x16_weights() -> Vec<f32> {
     generate_quant_weights_rect(
         16,
         16,
-        &[&DCT16X16_PARAMS[0], &DCT16X16_PARAMS[1], &DCT16X16_PARAMS[2]],
+        &[
+            &DCT16X16_PARAMS[0],
+            &DCT16X16_PARAMS[1],
+            &DCT16X16_PARAMS[2],
+        ],
         7,
     )
 }
@@ -784,10 +807,7 @@ mod tests {
         for c in 0..3 {
             let dc = w[c * 1024];
             let hf = w[c * 1024 + 1023];
-            assert!(
-                dc < hf,
-                "DCT32 channel {c}: DC={dc} should be < HF={hf}"
-            );
+            assert!(dc < hf, "DCT32 channel {c}: DC={dc} should be < HF={hf}");
         }
     }
 
@@ -807,11 +827,11 @@ mod tests {
         for c in 0..3 {
             let dq = IDENTITY_DEQUANT_WEIGHTS[c];
             let s = c * 64;
-            assert_eq!(w[s], 1.0 / dq[0]);          // DC = ch[0]
-            assert_eq!(w[s + 1], 1.0 / dq[1]);      // AC ch[1]
-            assert_eq!(w[s + 8], 1.0 / dq[1]);      // AC ch[1]
-            assert_eq!(w[s + 9], 1.0 / dq[2]);      // pos9 ch[2]
-            assert_eq!(w[s + 5], 1.0 / dq[0]);      // arbitrary other pos = DC
+            assert_eq!(w[s], 1.0 / dq[0]); // DC = ch[0]
+            assert_eq!(w[s + 1], 1.0 / dq[1]); // AC ch[1]
+            assert_eq!(w[s + 8], 1.0 / dq[1]); // AC ch[1]
+            assert_eq!(w[s + 9], 1.0 / dq[2]); // pos9 ch[2]
+            assert_eq!(w[s + 5], 1.0 / dq[0]); // arbitrary other pos = DC
         }
     }
 

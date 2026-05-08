@@ -58,12 +58,19 @@ fn main() {
     let mut aq_field = vec![0.0_f32; nb];
     for i in 0..nb {
         let bx = i % blocks_per_row;
-        aq_field[i] = if bx < blocks_per_row / 2 { qac_high } else { qac_low };
+        aq_field[i] = if bx < blocks_per_row / 2 {
+            qac_high
+        } else {
+            qac_low
+        };
     }
 
     println!("=== adaptive_quant_demo ===");
     println!("Image: {image_path}");
-    println!("Size: {w}x{h} ({:.2} MP), padded to {pw}x{ph}", n as f64 / 1e6);
+    println!(
+        "Size: {w}x{h} ({:.2} MP), padded to {pw}x{ph}",
+        n as f64 / 1e6
+    );
     println!(
         "Left half:  qac={qac_high:.3} (distance=0.5, high quality)\nRight half: qac={qac_low:.3} (distance=8.0, low quality)\n"
     );

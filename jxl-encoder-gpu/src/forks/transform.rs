@@ -485,7 +485,10 @@ mod tests {
                 }
             }
         }
-        assert!(max_err < 1e-5, "IDENTITY batch roundtrip drift: {max_err:.3e}");
+        assert!(
+            max_err < 1e-5,
+            "IDENTITY batch roundtrip drift: {max_err:.3e}"
+        );
     }
 
     /// DCT2X2 batch dispatcher round-trip.
@@ -504,8 +507,7 @@ mod tests {
                 block_coords.push((bx, by));
             }
         }
-        let coeffs =
-            apply_dct_batch_gpu(&enc, &plane, stride, &block_coords, RAW_STRATEGY_DCT2X2);
+        let coeffs = apply_dct_batch_gpu(&enc, &plane, stride, &block_coords, RAW_STRATEGY_DCT2X2);
         let recon = apply_idct_batch_gpu(&enc, &coeffs, RAW_STRATEGY_DCT2X2);
         assert_eq!(recon.len(), 64 * 64);
         let mut max_err = 0.0_f32;
@@ -519,6 +521,9 @@ mod tests {
                 }
             }
         }
-        assert!(max_err < 1e-5, "DCT2X2 batch roundtrip drift: {max_err:.3e}");
+        assert!(
+            max_err < 1e-5,
+            "DCT2X2 batch roundtrip drift: {max_err:.3e}"
+        );
     }
 }

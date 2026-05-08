@@ -23,7 +23,7 @@ fn main() {
 #[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
 fn main() {
     use cubecl::prelude::*;
-    use jxl_encoder::vardct::dct::{idct_4x4, idct_4x8, dct_4x4, dct_4x8};
+    use jxl_encoder::vardct::dct::{dct_4x4, dct_4x8, idct_4x4, idct_4x8};
     use jxl_encoder_gpu::launch::idct4_raw::{idct_4x4_raw, idct_4x8_raw};
 
     let device = <Backend as cubecl::Runtime>::Device::default();

@@ -169,7 +169,13 @@ fn main() {
     }
 
     let cg16x32 = compute_cost_grid_dct16x32_single_channel::<Backend>(
-        &client, h_in32, h_w32, h_qac32, h_thr32, XB32 as u32, YB32 as u32,
+        &client,
+        h_in32,
+        h_w32,
+        h_qac32,
+        h_thr32,
+        XB32 as u32,
+        YB32 as u32,
     );
     let bytes = client.read_one(cg16x32.costs).expect("read 16x32");
     let costs_16x32: &[f32] = f32::from_bytes(&bytes);
@@ -242,7 +248,13 @@ fn main() {
     }
 
     let cg32x64 = compute_cost_grid_dct32x64_single_channel::<Backend>(
-        &client, h_in64, h_w64, h_qac64, h_thr64, XB64 as u32, YB64 as u32,
+        &client,
+        h_in64,
+        h_w64,
+        h_qac64,
+        h_thr64,
+        XB64 as u32,
+        YB64 as u32,
     );
     let bytes = client.read_one(cg32x64.costs).expect("read 32x64");
     let costs_32x64: &[f32] = f32::from_bytes(&bytes);

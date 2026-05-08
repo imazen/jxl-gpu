@@ -91,9 +91,7 @@ fn main() {
 
     let upload_f = |v: &[f32]| client.create_from_slice(f32::as_bytes(v));
 
-    let run = |name: &str, costs: Vec<f32>| -> (String, Vec<f32>) {
-        (name.to_string(), costs)
-    };
+    let run = |name: &str, costs: Vec<f32>| -> (String, Vec<f32>) { (name.to_string(), costs) };
 
     let read = |handle, label: &str| -> Vec<f32> {
         let bytes = client.read_one(handle).expect(label);
@@ -102,84 +100,102 @@ fn main() {
 
     // Compute all six grids.
     let strategies: Vec<(String, Vec<f32>)> = vec![
-        run("DCT8", read(
-            compute_cost_grid_dct8_single_channel::<Backend>(
-                &client,
-                upload_f(&y_blocks),
-                upload_f(&weights),
-                upload_f(&qac_qm),
-                upload_f(&thresholds[..]),
-                xb8 as u32,
-                yb8 as u32,
-            )
-            .costs,
-            "dct8",
-        )),
-        run("DCT4×4", read(
-            compute_cost_grid_dct4x4_single_channel::<Backend>(
-                &client,
-                upload_f(&y_blocks),
-                upload_f(&weights),
-                upload_f(&qac_qm),
-                upload_f(&thresholds[..]),
-                xb8 as u32,
-                yb8 as u32,
-            )
-            .costs,
-            "dct4x4",
-        )),
-        run("DCT4×8", read(
-            compute_cost_grid_dct4x8_single_channel::<Backend>(
-                &client,
-                upload_f(&y_blocks),
-                upload_f(&weights),
-                upload_f(&qac_qm),
-                upload_f(&thresholds[..]),
-                xb8 as u32,
-                yb8 as u32,
-            )
-            .costs,
-            "dct4x8",
-        )),
-        run("DCT8×4", read(
-            compute_cost_grid_dct8x4_single_channel::<Backend>(
-                &client,
-                upload_f(&y_blocks),
-                upload_f(&weights),
-                upload_f(&qac_qm),
-                upload_f(&thresholds[..]),
-                xb8 as u32,
-                yb8 as u32,
-            )
-            .costs,
-            "dct8x4",
-        )),
-        run("IDENTITY", read(
-            compute_cost_grid_identity_single_channel::<Backend>(
-                &client,
-                upload_f(&y_blocks),
-                upload_f(&weights),
-                upload_f(&qac_qm),
-                upload_f(&thresholds[..]),
-                xb8 as u32,
-                yb8 as u32,
-            )
-            .costs,
-            "identity",
-        )),
-        run("DCT2X2", read(
-            compute_cost_grid_dct2x2_single_channel::<Backend>(
-                &client,
-                upload_f(&y_blocks),
-                upload_f(&weights),
-                upload_f(&qac_qm),
-                upload_f(&thresholds[..]),
-                xb8 as u32,
-                yb8 as u32,
-            )
-            .costs,
-            "dct2x2",
-        )),
+        run(
+            "DCT8",
+            read(
+                compute_cost_grid_dct8_single_channel::<Backend>(
+                    &client,
+                    upload_f(&y_blocks),
+                    upload_f(&weights),
+                    upload_f(&qac_qm),
+                    upload_f(&thresholds[..]),
+                    xb8 as u32,
+                    yb8 as u32,
+                )
+                .costs,
+                "dct8",
+            ),
+        ),
+        run(
+            "DCT4×4",
+            read(
+                compute_cost_grid_dct4x4_single_channel::<Backend>(
+                    &client,
+                    upload_f(&y_blocks),
+                    upload_f(&weights),
+                    upload_f(&qac_qm),
+                    upload_f(&thresholds[..]),
+                    xb8 as u32,
+                    yb8 as u32,
+                )
+                .costs,
+                "dct4x4",
+            ),
+        ),
+        run(
+            "DCT4×8",
+            read(
+                compute_cost_grid_dct4x8_single_channel::<Backend>(
+                    &client,
+                    upload_f(&y_blocks),
+                    upload_f(&weights),
+                    upload_f(&qac_qm),
+                    upload_f(&thresholds[..]),
+                    xb8 as u32,
+                    yb8 as u32,
+                )
+                .costs,
+                "dct4x8",
+            ),
+        ),
+        run(
+            "DCT8×4",
+            read(
+                compute_cost_grid_dct8x4_single_channel::<Backend>(
+                    &client,
+                    upload_f(&y_blocks),
+                    upload_f(&weights),
+                    upload_f(&qac_qm),
+                    upload_f(&thresholds[..]),
+                    xb8 as u32,
+                    yb8 as u32,
+                )
+                .costs,
+                "dct8x4",
+            ),
+        ),
+        run(
+            "IDENTITY",
+            read(
+                compute_cost_grid_identity_single_channel::<Backend>(
+                    &client,
+                    upload_f(&y_blocks),
+                    upload_f(&weights),
+                    upload_f(&qac_qm),
+                    upload_f(&thresholds[..]),
+                    xb8 as u32,
+                    yb8 as u32,
+                )
+                .costs,
+                "identity",
+            ),
+        ),
+        run(
+            "DCT2X2",
+            read(
+                compute_cost_grid_dct2x2_single_channel::<Backend>(
+                    &client,
+                    upload_f(&y_blocks),
+                    upload_f(&weights),
+                    upload_f(&qac_qm),
+                    upload_f(&thresholds[..]),
+                    xb8 as u32,
+                    yb8 as u32,
+                )
+                .costs,
+                "dct2x2",
+            ),
+        ),
     ];
 
     println!("=== strategy_cost_comparison_demo ===");

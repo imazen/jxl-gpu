@@ -70,8 +70,7 @@ fn main() {
     let mut cpu_round = vec![0.0f32; N];
     for b in 0..N_BLOCKS {
         let coeffs: &[f32; 64] = (&cpu_fwd[b * 64..b * 64 + 64]).try_into().unwrap();
-        let pixels: &mut [f32; 64] =
-            (&mut cpu_round[b * 64..b * 64 + 64]).try_into().unwrap();
+        let pixels: &mut [f32; 64] = (&mut cpu_round[b * 64..b * 64 + 64]).try_into().unwrap();
         inverse_identity_transform(coeffs, pixels);
     }
 
@@ -89,7 +88,10 @@ fn main() {
         if ok_inv { "✓" } else { "✗" }
     );
     if !ok_inv {
-        eprintln!("  cpu[{p2}]={:.6}  gpu[{p2}]={:.6}", cpu_round[p2], gpu_inv[p2]);
+        eprintln!(
+            "  cpu[{p2}]={:.6}  gpu[{p2}]={:.6}",
+            cpu_round[p2], gpu_inv[p2]
+        );
     }
 
     // Roundtrip GPU forward → GPU inverse → original.

@@ -66,8 +66,7 @@ fn main() {
     let mut cpu_round = vec![0.0f32; N];
     for b in 0..N_BLOCKS {
         let coeffs: &[f32; 64] = (&cpu_fwd[b * 64..b * 64 + 64]).try_into().unwrap();
-        let pixels: &mut [f32; 64] =
-            (&mut cpu_round[b * 64..b * 64 + 64]).try_into().unwrap();
+        let pixels: &mut [f32; 64] = (&mut cpu_round[b * 64..b * 64 + 64]).try_into().unwrap();
         inverse_dct2x2_transform(coeffs, pixels);
     }
 

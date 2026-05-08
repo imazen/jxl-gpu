@@ -224,8 +224,7 @@ pub fn afv_transform_batch_gpu<R: Runtime>(
 
     // Per-block extraction.
     for b in 0..n_blocks {
-        let pix: &[f32; 64] =
-            (&pixel_blocks[b * 64..b * 64 + 64]).try_into().unwrap();
+        let pix: &[f32; 64] = (&pixel_blocks[b * 64..b * 64 + 64]).try_into().unwrap();
         let a = extract_afv_corner(pix, afv_kind);
         let d = extract_dct4_corner(pix, afv_kind);
         let h = extract_dct4x8_half(pix, afv_kind);
@@ -239,21 +238,15 @@ pub fn afv_transform_batch_gpu<R: Runtime>(
     let h_in_a = client.create_from_slice(f32::as_bytes(&afv_corners));
     let h_basis = client.create_from_slice(f32::as_bytes(basis_t));
     let h_out_a = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks * 16]));
-    crate::launch::afv::afv_dct_4x4::<R>(
-        client, h_in_a, h_basis, h_out_a.clone(), n_blocks as u32,
-    );
+    crate::launch::afv::afv_dct_4x4::<R>(client, h_in_a, h_basis, h_out_a.clone(), n_blocks as u32);
     // 2. Raw DCT 4×4 batched.
     let h_in_d = client.create_from_slice(f32::as_bytes(&dct4_corners));
     let h_out_d = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks * 16]));
-    crate::launch::dct4_raw::dct_4x4_raw::<R>(
-        client, h_in_d, h_out_d.clone(), n_blocks as u32,
-    );
+    crate::launch::dct4_raw::dct_4x4_raw::<R>(client, h_in_d, h_out_d.clone(), n_blocks as u32);
     // 3. Raw DCT 4×8 batched.
     let h_in_8 = client.create_from_slice(f32::as_bytes(&dct4x8_halves));
     let h_out_8 = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks * 32]));
-    crate::launch::dct4_raw::dct_4x8_raw::<R>(
-        client, h_in_8, h_out_8.clone(), n_blocks as u32,
-    );
+    crate::launch::dct4_raw::dct_4x8_raw::<R>(client, h_in_8, h_out_8.clone(), n_blocks as u32);
 
     let bytes_a = client.read_one(h_out_a).expect("afv batch");
     let bytes_d = client.read_one(h_out_d).expect("dct4 batch");
@@ -356,20 +349,20 @@ pub fn inverse_afv_transform_batch_gpu<R: Runtime>(
     let h_basis = client.create_from_slice(f32::as_bytes(basis_t));
     let h_out_a = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks * 16]));
     crate::launch::afv::afv_idct_4x4::<R>(
-        client, h_in_a, h_basis, h_out_a.clone(), n_blocks as u32,
+        client,
+        h_in_a,
+        h_basis,
+        h_out_a.clone(),
+        n_blocks as u32,
     );
     // 2. Inverse raw 4×4 DCT batched.
     let h_in_d = client.create_from_slice(f32::as_bytes(&dct4_in));
     let h_out_d = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks * 16]));
-    crate::launch::idct4_raw::idct_4x4_raw::<R>(
-        client, h_in_d, h_out_d.clone(), n_blocks as u32,
-    );
+    crate::launch::idct4_raw::idct_4x4_raw::<R>(client, h_in_d, h_out_d.clone(), n_blocks as u32);
     // 3. Inverse raw 4×8 DCT batched.
     let h_in_8 = client.create_from_slice(f32::as_bytes(&dct4x8_in));
     let h_out_8 = client.create_from_slice(f32::as_bytes(&vec![0.0_f32; n_blocks * 32]));
-    crate::launch::idct4_raw::idct_4x8_raw::<R>(
-        client, h_in_8, h_out_8.clone(), n_blocks as u32,
-    );
+    crate::launch::idct4_raw::idct_4x8_raw::<R>(client, h_in_8, h_out_8.clone(), n_blocks as u32);
 
     let bytes_a = client.read_one(h_out_a).expect("afv inv batch");
     let bytes_d = client.read_one(h_out_d).expect("idct4 batch");
@@ -398,8 +391,7 @@ pub fn inverse_afv_transform_batch_gpu<R: Runtime>(
         }
         for iy in 0..4 {
             for ix in 0..8 {
-                dst[(iy + (1 - afv_y) * 4) * 8 + ix] =
-                    dct4x8_pixels[b * 32 + iy * 8 + ix];
+                dst[(iy + (1 - afv_y) * 4) * 8 + ix] = dct4x8_pixels[b * 32 + iy * 8 + ix];
             }
         }
     }
@@ -455,8 +447,7 @@ pub fn inverse_afv_transform_gpu<R: Runtime>(
         let block_y = if afv_y == 1 { 3 - iy } else { iy };
         for ix in 0..4 {
             let block_x = if afv_x == 1 { 3 - ix } else { ix };
-            pixels[(iy + afv_y * 4) * 8 + afv_x * 4 + ix] =
-                afv_pixels[block_y * 4 + block_x];
+            pixels[(iy + afv_y * 4) * 8 + afv_x * 4 + ix] = afv_pixels[block_y * 4 + block_x];
         }
     }
 
@@ -478,8 +469,7 @@ pub fn inverse_afv_transform_gpu<R: Runtime>(
     let dct4_pixels: &[f32] = f32::from_bytes(&bytes);
     for iy in 0..4 {
         for ix in 0..4 {
-            pixels[(iy + afv_y * 4) * 8 + (1 - afv_x) * 4 + ix] =
-                dct4_pixels[iy * 4 + ix];
+            pixels[(iy + afv_y * 4) * 8 + (1 - afv_x) * 4 + ix] = dct4_pixels[iy * 4 + ix];
         }
     }
 
@@ -557,9 +547,7 @@ pub fn afv_cost_grid_single_channel<R: Runtime>(
         // Forward AFV.
         let coeffs = afv_transform_batch_gpu(enc, basis_t, pixel_blocks, kind);
         // Quantize using DCT8-shaped path (AFV produces 64 coeffs in 8x8 layout).
-        let quant = quantize_blocks_gpu(
-            enc, &coeffs, &weights, qac_qm, thresholds, 8, 8, 1, 1,
-        );
+        let quant = quantize_blocks_gpu(enc, &coeffs, &weights, qac_qm, thresholds, 8, 8, 1, 1);
         // Dequant via the generic per-coefficient kernel.
         let dequant = dequant_blocks_gpu(enc, &quant, &weights, 64);
         // Inverse AFV → recon pixels.
@@ -647,13 +635,37 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
         let coeffs_b = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_b, kind);
 
         let q_x = quantize_blocks_gpu(
-            enc, &coeffs_x, &weights_x, qac_qm_x, thresholds_x, 8, 8, 1, 1,
+            enc,
+            &coeffs_x,
+            &weights_x,
+            qac_qm_x,
+            thresholds_x,
+            8,
+            8,
+            1,
+            1,
         );
         let q_y = quantize_blocks_gpu(
-            enc, &coeffs_y, &weights_y, qac_qm_y, thresholds_y, 8, 8, 1, 1,
+            enc,
+            &coeffs_y,
+            &weights_y,
+            qac_qm_y,
+            thresholds_y,
+            8,
+            8,
+            1,
+            1,
         );
         let q_b = quantize_blocks_gpu(
-            enc, &coeffs_b, &weights_b, qac_qm_b, thresholds_b, 8, 8, 1, 1,
+            enc,
+            &coeffs_b,
+            &weights_b,
+            qac_qm_b,
+            thresholds_b,
+            8,
+            8,
+            1,
+            1,
         );
 
         let dq_x = dequant_blocks_gpu(enc, &q_x, &weights_x, 64);
@@ -683,8 +695,8 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
-    use crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE;
     use crate::encoder::GpuEncoder;
+    use crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE;
 
     type B = cubecl::cuda::CudaRuntime;
 
@@ -736,28 +748,20 @@ mod tests {
             }
         }
         for kind in 0..4 {
-            let batched = afv_transform_batch_gpu(
-                &enc,
-                &AFV4X4_BASIS_TRANSPOSE,
-                &pixel_blocks,
-                kind,
-            );
+            let batched =
+                afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixel_blocks, kind);
             assert_eq!(batched.len(), N * 64);
             // Per-block reference using afv_transform_gpu.
             for b in 0..N {
-                let pix: &[f32; 64] =
-                    (&pixel_blocks[b * 64..b * 64 + 64]).try_into().unwrap();
-                let single = afv_transform_gpu(
-                    &enc,
-                    &AFV4X4_BASIS_TRANSPOSE,
-                    pix,
-                    kind,
-                );
+                let pix: &[f32; 64] = (&pixel_blocks[b * 64..b * 64 + 64]).try_into().unwrap();
+                let single = afv_transform_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, pix, kind);
                 let batch_block = &batched[b * 64..b * 64 + 64];
                 for i in 0..64 {
                     let d = (single[i] - batch_block[i]).abs();
-                    assert!(d < 1e-5,
-                        "kind={kind} block={b} pos={i}: batch differs from per-block (d={d:.3e})");
+                    assert!(
+                        d < 1e-5,
+                        "kind={kind} block={b} pos={i}: batch differs from per-block (d={d:.3e})"
+                    );
                 }
             }
         }
@@ -776,19 +780,19 @@ mod tests {
             }
         }
         for kind in 0..4 {
-            let coeffs = afv_transform_batch_gpu(
-                &enc, &AFV4X4_BASIS_TRANSPOSE, &pixel_blocks, kind,
-            );
-            let recon = inverse_afv_transform_batch_gpu(
-                &enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs, kind,
-            );
+            let coeffs =
+                afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixel_blocks, kind);
+            let recon =
+                inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs, kind);
             assert_eq!(recon.len(), N * 64);
             let mut max_d = 0.0_f32;
             for i in 0..N * 64 {
                 max_d = max_d.max((pixel_blocks[i] - recon[i]).abs());
             }
-            assert!(max_d < 1e-3,
-                "kind={kind}: AFV batch roundtrip max|Δ| = {max_d:.3e}");
+            assert!(
+                max_d < 1e-3,
+                "kind={kind}: AFV batch roundtrip max|Δ| = {max_d:.3e}"
+            );
         }
     }
 
@@ -822,7 +826,10 @@ mod tests {
         // 4 kinds × N blocks
         assert_eq!(costs.len(), 4 * N);
         for &c in &costs {
-            assert!(c.is_finite() && c >= 0.0, "AFV cost grid produced bad cost {c}");
+            assert!(
+                c.is_finite() && c >= 0.0,
+                "AFV cost grid produced bad cost {c}"
+            );
         }
         // At least one entry should be > 0 (synthetic input is not zero).
         assert!(costs.iter().any(|&c| c > 0.0));
@@ -859,10 +866,18 @@ mod tests {
         let costs = afv_cost_grid_xyb_host(
             &enc,
             &AFV4X4_BASIS_TRANSPOSE,
-            &px, &py, &pb,
-            &wx, &wy, &wb,
-            &qac_qm, &qac_qm, &qac_qm,
-            &thr, &thr, &thr,
+            &px,
+            &py,
+            &pb,
+            &wx,
+            &wy,
+            &wb,
+            &qac_qm,
+            &qac_qm,
+            &qac_qm,
+            &thr,
+            &thr,
+            &thr,
             &mask,
         );
         assert_eq!(costs.len(), 4 * N);
@@ -876,8 +891,7 @@ mod tests {
     fn test_afv_dct_4x4_one_gpu() {
         // Smoke test: per-block AFV-DCT-4×4 helper produces finite output.
         let enc: GpuEncoder<B> = GpuEncoder::new();
-        let pixels: [f32; 16] =
-            core::array::from_fn(|i| 0.3 + 0.2 * ((i as f32) * 0.013).sin());
+        let pixels: [f32; 16] = core::array::from_fn(|i| 0.3 + 0.2 * ((i as f32) * 0.013).sin());
         let coeffs = afv_dct_4x4_one(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixels);
         assert_eq!(coeffs.len(), 16);
         for &v in &coeffs {

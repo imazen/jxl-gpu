@@ -25,11 +25,7 @@ fn main() {
 }
 
 #[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
-fn cpu_afv_transform(
-    basis_t: &[f32; 256],
-    pixels: &[f32; 64],
-    afv_kind: usize,
-) -> [f32; 64] {
+fn cpu_afv_transform(basis_t: &[f32; 256], pixels: &[f32; 64], afv_kind: usize) -> [f32; 64] {
     use jxl_encoder::vardct::dct::{dct_4x4, dct_4x8};
     use jxl_encoder_gpu::forks::afv::{
         extract_afv_corner, extract_dct4_corner, extract_dct4x8_half, pack_afv_dcs,
@@ -86,8 +82,7 @@ fn main() {
     let enc: GpuEncoder<Backend> = GpuEncoder::new();
 
     // Synthetic 8×8 test block.
-    let pixels: [f32; 64] =
-        core::array::from_fn(|i| 0.3 + 0.4 * ((i as f32) * 0.011).sin());
+    let pixels: [f32; 64] = core::array::from_fn(|i| 0.3 + 0.4 * ((i as f32) * 0.011).sin());
 
     let mut max_diff_overall = 0.0_f32;
     let mut all_ok = true;
@@ -106,9 +101,7 @@ fn main() {
         }
         let ok = max_diff < 1e-4; // basis matrix is hand-truncated; allow some drift
         let mark = if ok { "✓" } else { "✗" };
-        println!(
-            "afv_kind={afv_kind}: max|Δ| = {max_diff:.3e} at idx {max_pos} {mark}"
-        );
+        println!("afv_kind={afv_kind}: max|Δ| = {max_diff:.3e} at idx {max_pos} {mark}");
         if !ok {
             all_ok = false;
             eprintln!(
@@ -128,8 +121,7 @@ fn main() {
     println!("\n--- Inverse AFV roundtrip (GPU forward → GPU inverse vs original pixels) ---");
     for afv_kind in 0..4 {
         let coeffs = afv_transform_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixels, afv_kind);
-        let recon =
-            inverse_afv_transform_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs, afv_kind);
+        let recon = inverse_afv_transform_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs, afv_kind);
         let mut max_diff = 0.0_f32;
         let mut max_pos = 0usize;
         for i in 0..64 {

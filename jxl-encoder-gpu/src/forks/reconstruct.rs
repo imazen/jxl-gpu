@@ -68,8 +68,7 @@ pub fn dequant_dc_channel(quant_dc: f32, quant_dc_y: f32, channel: usize, scale_
 /// `DCT_RESAMPLE_SCALE_32_TO_4[i]` — scale factors for the 4-point
 /// resample used by the DC-from-DCT32 forward operation.
 /// Bit-for-bit from upstream.
-pub const DCT_RESAMPLE_SCALE_32_TO_4: [f32; 4] =
-    [1.0, 0.974_886_8, 0.901_764_2, 0.787_054_9];
+pub const DCT_RESAMPLE_SCALE_32_TO_4: [f32; 4] = [1.0, 0.974_886_8, 0.901_764_2, 0.787_054_9];
 
 /// In-place 4-point DCT (libjxl `dct1d_4`). Pure scalar, used by the
 /// DCT32 LLF restoration.
@@ -804,16 +803,12 @@ pub fn dc_from_dct_16x8_or_8x16(llf0: f32, llf1: f32) -> (f32, f32) {
 /// block — 8 for square DCT8, 16 for DCT16×16, 32 for DCT32×*, 64
 /// for DCT64×*) so callers can walk the LLF positions if they need
 /// to (the function itself already has).
-pub fn dispatch_restore_llf(
-    coeffs: &mut [f32],
-    dc_grid: &[f32],
-    raw_strategy: u8,
-) -> usize {
+pub fn dispatch_restore_llf(coeffs: &mut [f32], dc_grid: &[f32], raw_strategy: u8) -> usize {
     use crate::forks::transform::{
-        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
-        RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
-        RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
-        RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
+        RAW_STRATEGY_DCT8X4, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
+        RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+        RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_IDENTITY,
     };
 
     match raw_strategy {
@@ -1428,7 +1423,7 @@ pub fn reconstruct_xyb_dct8_only_gpu<R: Runtime>(
     ysize_blocks: usize,
 ) -> [Vec<f32>; 3] {
     use crate::forks::dequant::dequant_dct8_blocks_gpu;
-    use crate::forks::transform::{apply_idct_batch_gpu, RAW_STRATEGY_DCT};
+    use crate::forks::transform::{RAW_STRATEGY_DCT, apply_idct_batch_gpu};
 
     let n_blocks = xsize_blocks * ysize_blocks;
     debug_assert_eq!(quant_dc_x.len(), n_blocks);
@@ -1456,19 +1451,13 @@ pub fn reconstruct_xyb_dct8_only_gpu<R: Runtime>(
 
     // Step 1: GPU dequant (one launch, three channels).
     let (mut dq_x, mut dq_y, mut dq_b) = dequant_dct8_blocks_gpu(
-        enc, quant_ac_x, quant_ac_y, quant_ac_b, &weights_x, &weights_y, &weights_b,
-        qac_qm_x, qac_qm_y, qac_qm_b, x_factor, b_factor,
+        enc, quant_ac_x, quant_ac_y, quant_ac_b, &weights_x, &weights_y, &weights_b, qac_qm_x,
+        qac_qm_y, qac_qm_b, x_factor, b_factor,
     );
 
     // Step 2: host DC override (overwrites position [b * 64] of each plane).
     restore_dct8_dc_override_batched(
-        &mut dq_x,
-        &mut dq_y,
-        &mut dq_b,
-        quant_dc_x,
-        quant_dc_y,
-        quant_dc_b,
-        scale_dc,
+        &mut dq_x, &mut dq_y, &mut dq_b, quant_dc_x, quant_dc_y, quant_dc_b, scale_dc,
     );
 
     // Step 3: per-channel IDCT 8x8 (three launches).
@@ -1647,11 +1636,36 @@ mod tests {
         let coeffs_dct8 = alloc::vec![0.0_f32; 64];
         let coeffs_dct16 = alloc::vec![0.0_f32; 256];
         let recipes = [
-            BlockRecipe { bx: 0, by: 0, raw_strategy: RAW_STRATEGY_DCT, coeffs: &coeffs_dct8 },
-            BlockRecipe { bx: 1, by: 1, raw_strategy: RAW_STRATEGY_DCT, coeffs: &coeffs_dct8 },
-            BlockRecipe { bx: 7, by: 0, raw_strategy: RAW_STRATEGY_DCT, coeffs: &coeffs_dct8 },
-            BlockRecipe { bx: 2, by: 2, raw_strategy: RAW_STRATEGY_DCT16X16, coeffs: &coeffs_dct16 },
-            BlockRecipe { bx: 5, by: 0, raw_strategy: RAW_STRATEGY_DCT16X16, coeffs: &coeffs_dct16 },
+            BlockRecipe {
+                bx: 0,
+                by: 0,
+                raw_strategy: RAW_STRATEGY_DCT,
+                coeffs: &coeffs_dct8,
+            },
+            BlockRecipe {
+                bx: 1,
+                by: 1,
+                raw_strategy: RAW_STRATEGY_DCT,
+                coeffs: &coeffs_dct8,
+            },
+            BlockRecipe {
+                bx: 7,
+                by: 0,
+                raw_strategy: RAW_STRATEGY_DCT,
+                coeffs: &coeffs_dct8,
+            },
+            BlockRecipe {
+                bx: 2,
+                by: 2,
+                raw_strategy: RAW_STRATEGY_DCT16X16,
+                coeffs: &coeffs_dct16,
+            },
+            BlockRecipe {
+                bx: 5,
+                by: 0,
+                raw_strategy: RAW_STRATEGY_DCT16X16,
+                coeffs: &coeffs_dct16,
+            },
         ];
 
         reconstruct_mixed_strategy_gpu(&enc, &recipes, &mut plane, padded_w);
@@ -1697,7 +1711,12 @@ mod tests {
         let coeffs = alloc::vec![0.0_f32; coords.len() * 64];
 
         batched_reconstruct_same_strategy_gpu(
-            &enc, &coeffs, &coords, RAW_STRATEGY_DCT, &mut plane, padded_w,
+            &enc,
+            &coeffs,
+            &coords,
+            RAW_STRATEGY_DCT,
+            &mut plane,
+            padded_w,
         );
 
         // For each placed block, the destination region should be ~0.
@@ -1705,7 +1724,10 @@ mod tests {
             for row in 0..8 {
                 for col in 0..8 {
                     let v = plane[(by * 8 + row) * padded_w + bx * 8 + col];
-                    assert!(v.abs() < 1e-5, "block ({bx},{by}) row {row} col {col} = {v}");
+                    assert!(
+                        v.abs() < 1e-5,
+                        "block ({bx},{by}) row {row} col {col} = {v}"
+                    );
                 }
             }
         }
@@ -1722,9 +1744,7 @@ mod tests {
         type B = cubecl::cuda::CudaRuntime;
         let enc: GpuEncoder<B> = GpuEncoder::new();
         let mut plane = alloc::vec![0.5_f32; 64];
-        batched_reconstruct_same_strategy_gpu(
-            &enc, &[], &[], RAW_STRATEGY_DCT, &mut plane, 8,
-        );
+        batched_reconstruct_same_strategy_gpu(&enc, &[], &[], RAW_STRATEGY_DCT, &mut plane, 8);
         // Plane unchanged.
         for &v in &plane {
             assert_eq!(v, 0.5);
@@ -1743,9 +1763,7 @@ mod tests {
         let padded_h = 16_usize;
         let mut plane = alloc::vec![1.0_f32; padded_w * padded_h]; // seeded
         let coeffs = alloc::vec![0.0_f32; 64];
-        idct_and_scatter_one_block_gpu(
-            &enc, &coeffs, &mut plane, 2, 1, RAW_STRATEGY_DCT, padded_w,
-        );
+        idct_and_scatter_one_block_gpu(&enc, &coeffs, &mut plane, 2, 1, RAW_STRATEGY_DCT, padded_w);
         // Destination region (16..24, 8..16) should now be ~0.
         for row in 0..8 {
             for col in 0..8 {
@@ -1828,11 +1846,8 @@ mod tests {
     fn test_dispatch_restore_llf_dct16x16_writes_4_llf_positions() {
         use crate::forks::transform::RAW_STRATEGY_DCT16X16;
         let mut coeffs = [0.7_f32; 256];
-        let stride = dispatch_restore_llf(
-            &mut coeffs,
-            &[0.5, 0.5, 0.5, 0.5],
-            RAW_STRATEGY_DCT16X16,
-        );
+        let stride =
+            dispatch_restore_llf(&mut coeffs, &[0.5, 0.5, 0.5, 0.5], RAW_STRATEGY_DCT16X16);
         assert_eq!(stride, 16);
         // Constant DC c=0.5 → only LLF[0,0] = c (other 3 LLF positions ~0).
         assert!((coeffs[0] - 0.5).abs() < 1e-5);
@@ -1849,8 +1864,7 @@ mod tests {
     fn test_dispatch_restore_llf_dct32x32_writes_4x4_llf() {
         use crate::forks::transform::RAW_STRATEGY_DCT32X32;
         let mut coeffs = [0.0_f32; 1024];
-        let stride =
-            dispatch_restore_llf(&mut coeffs, &[0.5_f32; 16], RAW_STRATEGY_DCT32X32);
+        let stride = dispatch_restore_llf(&mut coeffs, &[0.5_f32; 16], RAW_STRATEGY_DCT32X32);
         assert_eq!(stride, 32);
         assert!((coeffs[0] - 0.5).abs() < 1e-5);
         // Verify no off-LLF position was touched (sample from far areas).
@@ -2097,19 +2111,22 @@ mod tests {
     #[test]
     fn test_dc_from_dct_16x8_matches_upstream() {
         // DCT16x8 LLF positions are [0] and [1] in the 8-stride layout.
-        for &(l0, l1) in &[
-            (1.0_f32, 0.0),
-            (0.0, 1.0),
-            (0.5, -0.3),
-            (3.14, -2.71),
-        ] {
+        for &(l0, l1) in &[(1.0_f32, 0.0), (0.0, 1.0), (0.5, -0.3), (3.14, -2.71)] {
             let mut block = [0.0_f32; 128];
             block[0] = l0;
             block[1] = l1;
             let (mine0, mine1) = dc_from_dct_16x8_or_8x16(l0, l1);
             let theirs = jxl_encoder::vardct::dct::dc_from_dct_16x8(&block);
-            assert!((mine0 - theirs[0]).abs() < 1e-5, "(l0={l0}, l1={l1}) [0]: mine={mine0} theirs={}", theirs[0]);
-            assert!((mine1 - theirs[1]).abs() < 1e-5, "(l0={l0}, l1={l1}) [1]: mine={mine1} theirs={}", theirs[1]);
+            assert!(
+                (mine0 - theirs[0]).abs() < 1e-5,
+                "(l0={l0}, l1={l1}) [0]: mine={mine0} theirs={}",
+                theirs[0]
+            );
+            assert!(
+                (mine1 - theirs[1]).abs() < 1e-5,
+                "(l0={l0}, l1={l1}) [1]: mine={mine1} theirs={}",
+                theirs[1]
+            );
         }
     }
 
@@ -2337,7 +2354,10 @@ mod tests {
         let mut single_last = [0.0_f32; 32];
         single_last[31] = 1.0;
         let arbitrary: [f32; 32] = core::array::from_fn(|i| (i as f32 * 0.21).cos() * 0.6);
-        for (ti, trial) in [single0, single_mid, single_last, arbitrary].iter().enumerate() {
+        for (ti, trial) in [single0, single_mid, single_last, arbitrary]
+            .iter()
+            .enumerate()
+        {
             let dc = dc_from_dct_64x32(*trial);
             let restored = restore_llf_dct64x32(dc);
             for i in 0..32 {
@@ -2360,7 +2380,10 @@ mod tests {
         let mut single_last = [0.0_f32; 32];
         single_last[31] = 1.0;
         let arbitrary: [f32; 32] = core::array::from_fn(|i| (i as f32 * 0.17).sin() * 0.6);
-        for (ti, trial) in [single0, single_mid, single_last, arbitrary].iter().enumerate() {
+        for (ti, trial) in [single0, single_mid, single_last, arbitrary]
+            .iter()
+            .enumerate()
+        {
             let dc = dc_from_dct_32x64(*trial);
             let restored = restore_llf_dct32x64(dc);
             for i in 0..32 {
@@ -2589,13 +2612,7 @@ mod tests {
         let quant_dc_y = 100.0_f32;
         let scale_dc = 0.5_f32;
         restore_dct8_dc_override(
-            &mut dq_x,
-            &mut dq_y,
-            &mut dq_b,
-            0.0,
-            quant_dc_y,
-            0.0,
-            scale_dc,
+            &mut dq_x, &mut dq_y, &mut dq_b, 0.0, quant_dc_y, 0.0, scale_dc,
         );
         // dq_y[0] = 100 / (512 * 0.5) = 100 / 256 = 0.390625
         assert!((dq_y[0] - 0.390_625).abs() < 1e-6);
@@ -2642,18 +2659,10 @@ mod tests {
         let mut dq_y_ref = dq_y_batch.clone();
         let mut dq_b_ref = dq_b_batch.clone();
         for b in 0..N {
-            let block_x: &mut [f32; 64] = (&mut dq_x_ref[b * 64..b * 64 + 64])
-                .try_into()
-                .unwrap();
-            let block_y: &mut [f32; 64] = (&mut dq_y_ref[b * 64..b * 64 + 64])
-                .try_into()
-                .unwrap();
-            let block_b: &mut [f32; 64] = (&mut dq_b_ref[b * 64..b * 64 + 64])
-                .try_into()
-                .unwrap();
-            restore_dct8_dc_override(
-                block_x, block_y, block_b, qx[b], qy[b], qb[b], scale_dc,
-            );
+            let block_x: &mut [f32; 64] = (&mut dq_x_ref[b * 64..b * 64 + 64]).try_into().unwrap();
+            let block_y: &mut [f32; 64] = (&mut dq_y_ref[b * 64..b * 64 + 64]).try_into().unwrap();
+            let block_b: &mut [f32; 64] = (&mut dq_b_ref[b * 64..b * 64 + 64]).try_into().unwrap();
+            restore_dct8_dc_override(block_x, block_y, block_b, qx[b], qy[b], qb[b], scale_dc);
         }
         // Batched.
         restore_dct8_dc_override_batched(
@@ -2701,12 +2710,23 @@ mod tests {
 
         let planes = reconstruct_xyb_dct8_only_gpu(
             &enc,
-            &zeros_dc, &zeros_dc, &zeros_dc,
-            &zeros_ac_i, &zeros_ac_i, &zeros_ac_i,
-            &weights_one, &weights_one, &weights_one,
-            &qac_qm, &qac_qm, &qac_qm,
-            &zero_factor, &zero_factor,
-            1.0, xb, yb,
+            &zeros_dc,
+            &zeros_dc,
+            &zeros_dc,
+            &zeros_ac_i,
+            &zeros_ac_i,
+            &zeros_ac_i,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &qac_qm,
+            &qac_qm,
+            &qac_qm,
+            &zero_factor,
+            &zero_factor,
+            1.0,
+            xb,
+            yb,
         );
         for p in &planes {
             assert_eq!(p.len(), xb * 8 * yb * 8);
@@ -2738,12 +2758,23 @@ mod tests {
 
         let planes = reconstruct_xyb_dct8_only_gpu(
             &enc,
-            &dc_zero, &dc_y, &dc_zero,
-            &zeros_ac_i, &zeros_ac_i, &zeros_ac_i,
-            &weights_one, &weights_one, &weights_one,
-            &qac_qm, &qac_qm, &qac_qm,
-            &zero_factor, &zero_factor,
-            1.0, xb, yb,
+            &dc_zero,
+            &dc_y,
+            &dc_zero,
+            &zeros_ac_i,
+            &zeros_ac_i,
+            &zeros_ac_i,
+            &weights_one,
+            &weights_one,
+            &weights_one,
+            &qac_qm,
+            &qac_qm,
+            &qac_qm,
+            &zero_factor,
+            &zero_factor,
+            1.0,
+            xb,
+            yb,
         );
         // Y plane should be constant non-zero; X plane zero; B plane non-zero
         // due to DC-CfL: dc_b = (0 + 100*0.5)/256 = 0.1953

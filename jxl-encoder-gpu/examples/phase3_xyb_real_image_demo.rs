@@ -31,14 +31,13 @@ fn main() {
     use cubecl::prelude::*;
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::adaptive_quant::compute_mask1x1_gpu;
-    use jxl_encoder_gpu::quant_weights::{
-        dct8_weights, dct16x16_weights, dct16x8_weights, replicate_weights,
-    };
     use jxl_encoder_gpu::pipeline::{
-        CostGrids16x16, Partition16x16, compute_cost_grid_dct8_xyb,
-        compute_cost_grid_dct8x16_xyb, compute_cost_grid_dct16x8_xyb,
-        compute_cost_grid_dct16x16_xyb, select_partitions_16x16,
+        CostGrids16x16, Partition16x16, compute_cost_grid_dct8_xyb, compute_cost_grid_dct8x16_xyb,
+        compute_cost_grid_dct16x8_xyb, compute_cost_grid_dct16x16_xyb, select_partitions_16x16,
         select_partitions_16x16_full,
+    };
+    use jxl_encoder_gpu::quant_weights::{
+        dct8_weights, dct16x8_weights, dct16x16_weights, replicate_weights,
     };
 
     let device = <Backend as cubecl::Runtime>::Device::default();
@@ -237,10 +236,26 @@ fn main() {
         sd16 / me16.max(1e-9)
     );
     println!("\nPartition decisions over {} regions:", partitions.len());
-    println!("  DCT16×16          : {:>5}  ({:>5.1}%)", counts[0], 100.0 * counts[0] as f32 / partitions.len() as f32);
-    println!("  Two DCT16×8 horiz : {:>5}  ({:>5.1}%)", counts[1], 100.0 * counts[1] as f32 / partitions.len() as f32);
-    println!("  Two DCT8×16 vert  : {:>5}  ({:>5.1}%)", counts[2], 100.0 * counts[2] as f32 / partitions.len() as f32);
-    println!("  Four DCT8×8       : {:>5}  ({:>5.1}%)", counts[3], 100.0 * counts[3] as f32 / partitions.len() as f32);
+    println!(
+        "  DCT16×16          : {:>5}  ({:>5.1}%)",
+        counts[0],
+        100.0 * counts[0] as f32 / partitions.len() as f32
+    );
+    println!(
+        "  Two DCT16×8 horiz : {:>5}  ({:>5.1}%)",
+        counts[1],
+        100.0 * counts[1] as f32 / partitions.len() as f32
+    );
+    println!(
+        "  Two DCT8×16 vert  : {:>5}  ({:>5.1}%)",
+        counts[2],
+        100.0 * counts[2] as f32 / partitions.len() as f32
+    );
+    println!(
+        "  Four DCT8×8       : {:>5}  ({:>5.1}%)",
+        counts[3],
+        100.0 * counts[3] as f32 / partitions.len() as f32
+    );
     println!("\n(Compare with phase3_real_image_demo — single-channel proxy on the same image.)");
 
     // ---- Now add the rect 3-channel cost grids and re-pick. ----
@@ -320,8 +335,7 @@ fn main() {
         for ry in 0..yb_16x8 {
             for rx in 0..xb_16x8 {
                 out[ry * xb_16x8 + rx] =
-                    raw[ry * (xb_16x8 * 2) + 2 * rx]
-                        + raw[ry * (xb_16x8 * 2) + 2 * rx + 1];
+                    raw[ry * (xb_16x8 * 2) + 2 * rx] + raw[ry * (xb_16x8 * 2) + 2 * rx + 1];
             }
         }
         out
@@ -368,8 +382,7 @@ fn main() {
         dct_8x16: Some(&cost_dct8x16),
         ..Default::default()
     };
-    let partitions_full =
-        select_partitions_16x16_full(&cost_dct8, &cost_dct16x16, extra, xb8, yb8);
+    let partitions_full = select_partitions_16x16_full(&cost_dct8, &cost_dct16x16, extra, xb8, yb8);
     let mut counts_full = [0_usize; 4];
     for &p in &partitions_full {
         counts_full[match p {
@@ -383,9 +396,7 @@ fn main() {
 
     let (mn1, me1, mx1, sd1) = stats(&cost_dct16x8);
     let (mn2, me2, mx2, sd2) = stats(&cost_dct8x16);
-    println!(
-        "\nRect 3-channel cost grids:"
-    );
+    println!("\nRect 3-channel cost grids:");
     println!(
         "  DCT16×8:  min={mn1:.4}  mean={me1:.4}  max={mx1:.4}  std={sd1:.4}  (std/mean={:.3})",
         sd1 / me1.max(1e-9)
@@ -394,16 +405,39 @@ fn main() {
         "  DCT8×16:  min={mn2:.4}  mean={me2:.4}  max={mx2:.4}  std={sd2:.4}  (std/mean={:.3})",
         sd2 / me2.max(1e-9)
     );
-    println!("\nFull 4-strategy 16×16 partition decisions over {} regions:", partitions_full.len());
+    println!(
+        "\nFull 4-strategy 16×16 partition decisions over {} regions:",
+        partitions_full.len()
+    );
     let pct = |c: usize| 100.0 * c as f32 / partitions_full.len() as f32;
-    println!("  DCT16×16          : {:>5}  ({:>5.1}%)", counts_full[0], pct(counts_full[0]));
-    println!("  Two DCT16×8 horiz : {:>5}  ({:>5.1}%)", counts_full[1], pct(counts_full[1]));
-    println!("  Two DCT8×16 vert  : {:>5}  ({:>5.1}%)", counts_full[2], pct(counts_full[2]));
-    println!("  Four DCT8×8       : {:>5}  ({:>5.1}%)", counts_full[3], pct(counts_full[3]));
+    println!(
+        "  DCT16×16          : {:>5}  ({:>5.1}%)",
+        counts_full[0],
+        pct(counts_full[0])
+    );
+    println!(
+        "  Two DCT16×8 horiz : {:>5}  ({:>5.1}%)",
+        counts_full[1],
+        pct(counts_full[1])
+    );
+    println!(
+        "  Two DCT8×16 vert  : {:>5}  ({:>5.1}%)",
+        counts_full[2],
+        pct(counts_full[2])
+    );
+    println!(
+        "  Four DCT8×8       : {:>5}  ({:>5.1}%)",
+        counts_full[3],
+        pct(counts_full[3])
+    );
     println!(
         "\n2-strategy → 4-strategy delta:\n  DCT16×16: {} → {} ({:+})\n  4-DCT8×8: {} → {} ({:+})\n  +rect picks: {}",
-        counts[0], counts_full[0], counts_full[0] as i64 - counts[0] as i64,
-        counts[3], counts_full[3], counts_full[3] as i64 - counts[3] as i64,
+        counts[0],
+        counts_full[0],
+        counts_full[0] as i64 - counts[0] as i64,
+        counts[3],
+        counts_full[3],
+        counts_full[3] as i64 - counts[3] as i64,
         counts_full[1] + counts_full[2],
     );
 }
