@@ -308,11 +308,16 @@ fn main() {
         let cpu_ms = cpu_med.as_secs_f64() * 1000.0;
         let gpu_ms = gpu_med.as_secs_f64() * 1000.0;
         let ratio = cpu_med.as_secs_f64() / gpu_med.as_secs_f64();
-        let max_dr = cpu_r_out
-            .iter()
-            .zip(&gpu_r_out)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f32, f32::max);
+        let chan_max = |cpu: &[f32], gpu: &[f32]| {
+            cpu.iter()
+                .zip(gpu)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max)
+        };
+        // Parity check covers all 3 channels (was R-only — oversight).
+        let max_dr = chan_max(&cpu_r_out, &gpu_r_out)
+            .max(chan_max(&cpu_g_out, &gpu_g_out))
+            .max(chan_max(&cpu_b_out, &gpu_b_out));
         let throughput_gpu = mp / gpu_med.as_secs_f64();
         println!(
             "{:>6}  {:>9.3}  {:>10.2}  {:>10.2}  {:>5.2}× {:>3}  {:>8.2e}  {:>7.0} MP/s",
