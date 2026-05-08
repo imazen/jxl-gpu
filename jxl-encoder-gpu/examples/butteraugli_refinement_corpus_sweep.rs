@@ -25,7 +25,7 @@ fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::butteraugli_loop::{
         ButteraugliLoopGpu, SmartGatePath, linear_planar_to_srgb_u8_interleaved,
-        refine_aq_field_gpu, refine_aq_field_gpu_smart,
+        refine_aq_field_gpu, refine_aq_field_gpu_smart_with_threshold,
     };
     use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
@@ -42,6 +42,10 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
+    let smart_threshold: f32 = std::env::var("SMART_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.10);
 
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&corpus_dir)
         .unwrap_or_else(|e| panic!("read_dir {corpus_dir}: {e}"))
@@ -56,7 +60,7 @@ fn main() {
 
     println!("=== butteraugli_refinement_corpus_sweep ===");
     println!(
-        "Corpus:    {corpus_dir}\nImages:    {}\nDistances: {:?}\nIters:     {iters}\n",
+        "Corpus:        {corpus_dir}\nImages:        {}\nDistances:     {:?}\nIters:         {iters}\nSmart thresh:  {smart_threshold:.3}\n",
         paths.len(),
         distances
     );
@@ -173,11 +177,9 @@ fn main() {
             let (rr, gg, bb) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &refined);
             let s_rf = measure(&mut bg, &rr, &gg, &bb);
 
-            // Smart-gate: distance + content-aware. Use the same
-            // initial AQ to avoid a second AQ encode (the smart fn
-            // measures internally; we measure it by encoding the
-            // resulting field).
-            let smart_outcome = refine_aq_field_gpu_smart(
+            // Smart-gate: distance + content-aware with configurable
+            // threshold (SMART_THRESHOLD env var, default 1.10).
+            let smart_outcome = refine_aq_field_gpu_smart_with_threshold(
                 &enc,
                 &lossy,
                 &mut bg,
@@ -188,9 +190,10 @@ fn main() {
                 &initial_aq,
                 d,
                 iters,
+                smart_threshold,
                 |_| (),
             )
-            .expect("refine_aq_field_gpu_smart");
+            .expect("refine_aq_field_gpu_smart_with_threshold");
             // smart_outcome is correct as a "decision". Measure the
             // selected field's actual butteraugli score.
             let (rrs, ggs, bbs) =
