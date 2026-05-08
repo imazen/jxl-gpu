@@ -565,6 +565,49 @@ impl<R: Runtime> GpuEncoder<R> {
         f32::from_bytes(&bytes).to_vec()
     }
 
+    /// Broadcast-weights variant of [`Self::dequant_simple_blocks`].
+    /// `weights_template` is exactly `block_size` f32 (one quant
+    /// matrix); the kernel broadcasts it across all blocks. Saves
+    /// `(num_blocks - 1) * block_size * 4` bytes of upload traffic
+    /// when callers previously replicated the same matrix per-block.
+    pub fn dequant_simple_blocks_broadcast_w(
+        &self,
+        quant: &[i32],
+        weights_template: &[f32],
+        block_size: u32,
+    ) -> Vec<f32> {
+        let bs = block_size as usize;
+        let n = quant.len();
+        assert!(n.is_multiple_of(bs));
+        assert_eq!(
+            weights_template.len(),
+            bs,
+            "weights_template must be exactly block_size = {bs} entries (got {})",
+            weights_template.len()
+        );
+        let num_blocks = (n / bs) as u32;
+        let h_q = self.client.create_from_slice(i32::as_bytes(quant));
+        let h_w = self
+            .client
+            .create_from_slice(f32::as_bytes(weights_template));
+        let h_o = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n]));
+        crate::launch::dequant_simple::dequant_simple_broadcast_w::<R>(
+            &self.client,
+            h_q,
+            h_w,
+            h_o.clone(),
+            num_blocks,
+            block_size,
+        );
+        let bytes = self
+            .client
+            .read_one(h_o)
+            .expect("read dequant_simple broadcast");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
     /// Quantize a contiguous batch of larger-strategy blocks (DCT16,
     /// DCT16x8/8x16, DCT32, DCT32x16/16x32, DCT64, DCT64x32/32x64).
     ///
@@ -1450,5 +1493,43 @@ mod tests {
             m > 1e-3,
             "IDENTITY and DCT2X2 should produce different coeffs (max|Δ|={m:.3e})"
         );
+    }
+
+    /// Verify dequant_simple_blocks_broadcast_w produces bit-identical
+    /// output to dequant_simple_blocks when the latter is called with
+    /// replicated weights. Two block sizes (64, 256) cover both DCT8
+    /// and DCT16x16 layouts.
+    #[test]
+    fn test_dequant_simple_broadcast_matches_perblock() {
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        for &block_size in &[64u32, 256u32] {
+            let n_blocks = 16;
+            let bs = block_size as usize;
+            let mut quant = alloc::vec![0_i32; n_blocks * bs];
+            for (i, q) in quant.iter_mut().enumerate() {
+                *q = ((i.wrapping_mul(31) % 251) as i32) - 125;
+            }
+            let mut weights_template = alloc::vec![0.0f32; bs];
+            for (i, w) in weights_template.iter_mut().enumerate() {
+                *w = 0.5 + 0.5 * ((i.wrapping_mul(17) % 251) as f32 / 251.0);
+            }
+            let mut weights_replicated = alloc::vec![0.0f32; n_blocks * bs];
+            for b in 0..n_blocks {
+                weights_replicated[b * bs..(b + 1) * bs].copy_from_slice(&weights_template);
+            }
+
+            let perblock =
+                enc.dequant_simple_blocks(&quant, &weights_replicated, block_size);
+            let broadcast =
+                enc.dequant_simple_blocks_broadcast_w(&quant, &weights_template, block_size);
+
+            assert_eq!(perblock.len(), broadcast.len());
+            for (i, (&a, &b)) in perblock.iter().zip(broadcast.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "block_size={block_size}, i={i}: perblock={a} vs broadcast={b}"
+                );
+            }
+        }
     }
 }

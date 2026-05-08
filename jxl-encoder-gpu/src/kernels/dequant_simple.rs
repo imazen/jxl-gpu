@@ -34,3 +34,36 @@ pub fn dequant_simple_kernel(
         i += 1u32;
     }
 }
+
+/// Broadcast-weights variant of [`dequant_simple_kernel`]. `weights`
+/// is exactly `block_size` f32 (one quant matrix), broadcast across
+/// all blocks.
+///
+/// Saves `(num_blocks - 1) * block_size * 4` bytes of GPU memory +
+/// upload traffic when callers were previously replicating the same
+/// matrix per-block — the common case for the AFV cost grid (which
+/// runs the same DCT8 weight table over all candidate blocks). Same
+/// algorithmic semantics as the per-block variant when called with
+/// replicated weights.
+#[cube(launch_unchecked)]
+pub fn dequant_simple_kernel_broadcast_w(
+    quant: &Array<i32>,
+    weights: &Array<f32>,
+    output: &mut Array<f32>,
+    block_size: u32,
+) {
+    let block_idx = ABSOLUTE_POS;
+    let bs = block_size as usize;
+    let n_blocks = quant.len() / bs;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * bs;
+    let mut i: u32 = 0u32;
+    while (i as usize) < bs {
+        let iu = i as usize;
+        // Broadcast: weights[iu] not weights[off + iu].
+        output[off + iu] = (quant[off + iu] as f32) * weights[iu];
+        i += 1u32;
+    }
+}

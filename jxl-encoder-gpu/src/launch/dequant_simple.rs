@@ -6,7 +6,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::kernels::dequant_simple::dequant_simple_kernel;
+use crate::kernels::dequant_simple::{dequant_simple_kernel, dequant_simple_kernel_broadcast_w};
 
 pub fn dequant_simple<R: Runtime>(
     client: &ComputeClient<R>,
@@ -25,6 +25,32 @@ pub fn dequant_simple<R: Runtime>(
             CubeDim::new_1d(1),
             ArrayArg::from_raw_parts(quant, n),
             ArrayArg::from_raw_parts(weights, n),
+            ArrayArg::from_raw_parts(output, n),
+            block_size,
+        );
+    }
+}
+
+/// Broadcast-weights launcher for
+/// [`dequant_simple_kernel_broadcast_w`]. `weights` is exactly
+/// `block_size` f32 (one quant matrix), broadcast across all blocks.
+pub fn dequant_simple_broadcast_w<R: Runtime>(
+    client: &ComputeClient<R>,
+    quant: Handle,
+    weights: Handle, // block_size f32
+    output: Handle,
+    num_blocks: u32,
+    block_size: u32,
+) {
+    let n = (num_blocks as usize) * (block_size as usize);
+    let cubes = num_blocks.max(1);
+    unsafe {
+        dequant_simple_kernel_broadcast_w::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(cubes, 1, 1),
+            CubeDim::new_1d(1),
+            ArrayArg::from_raw_parts(quant, n),
+            ArrayArg::from_raw_parts(weights, block_size as usize),
             ArrayArg::from_raw_parts(output, n),
             block_size,
         );
