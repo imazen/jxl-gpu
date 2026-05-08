@@ -756,6 +756,29 @@ impl<R: Runtime> LossyEncoder<R> {
         b: &[f32],
         distance: f32,
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        self.encode_one_with_strategy_search_dct8_16_traced(enc, r, g, b, distance, &mut |_| {})
+    }
+
+    /// Tracing variant of [`Self::encode_one_with_strategy_search_dct8_16`]
+    /// that calls `mark` with a static label between each major stage.
+    /// The caller measures time between callbacks (e.g. with
+    /// `std::time::Instant`) to attribute work to specific stages.
+    ///
+    /// Stage labels (in order):
+    /// `pad_upload`, `xyb_gab`, `mask1x1`, `cost_dct8_dct16`,
+    /// `cost_dct16x8`, `cost_dct8x16`, `selector`, `dc_grids`,
+    /// `mixed_strategy_encode_recon`, `postpass_gab_epf_xyb`,
+    /// `download_crop`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_one_with_strategy_search_dct8_16_traced(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        distance: f32,
+        mark: &mut dyn FnMut(&'static str),
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         use crate::forks::cost::{
             compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16,
             strategy_search_costs_dct8_16x16,
@@ -781,12 +804,14 @@ impl<R: Runtime> LossyEncoder<R> {
         let nb8 = xb8 * yb8;
 
         // Stage 1: pad + upload
+        mark("start");
         let r_pad = pad_to_alignment(r, w, h, pw, ph);
         let g_pad = pad_to_alignment(g, w, h, pw, ph);
         let b_pad = pad_to_alignment(b, w, h, pw, ph);
         let g_r = enc.upload_plane(&r_pad, self.padded_width, self.padded_height);
         let g_g = enc.upload_plane(&g_pad, self.padded_width, self.padded_height);
         let g_b = enc.upload_plane(&b_pad, self.padded_width, self.padded_height);
+        mark("pad_upload");
 
         // Stage 2: XYB + gaborish (GPU) → download to host
         let (xx, xy, xb) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
@@ -796,9 +821,11 @@ impl<R: Runtime> LossyEncoder<R> {
         let xyb_x: Vec<f32> = enc.download_plane(&xx_g);
         let xyb_y: Vec<f32> = enc.download_plane(&xy_g);
         let xyb_b: Vec<f32> = enc.download_plane(&xb_g);
+        mark("xyb_gab");
 
         // Stage 3: mask1x1 from Y channel
         let mask1x1 = enc.mask1x1_field(&xyb_y, self.padded_width, self.padded_height);
+        mark("mask1x1");
 
         // Stage 4: cost grids — DCT8, DCT16x16, DCT16x8, DCT8x16
         let (dct8_x, dct8_y, dct8_b) = dct8_weights_per_channel();
@@ -844,6 +871,7 @@ impl<R: Runtime> LossyEncoder<R> {
             0,
             scaled_constants,
         );
+        mark("cost_dct8_dct16");
 
         let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16(
             enc,
@@ -867,6 +895,7 @@ impl<R: Runtime> LossyEncoder<R> {
             0,
             scaled_constants,
         );
+        mark("cost_dct16x8");
         let cost_dct8x16 = strategy_search_costs_dct16x8_or_8x16(
             enc,
             &xyb_x,
@@ -890,6 +919,8 @@ impl<R: Runtime> LossyEncoder<R> {
             scaled_constants,
         );
 
+        mark("cost_dct8x16");
+
         // Stage 5: host-side selector + assignments
         let extra = CostGrids16x16 {
             dct_16x8: Some(&cost_dct16x8),
@@ -899,11 +930,13 @@ impl<R: Runtime> LossyEncoder<R> {
         let partitions =
             select_partitions_16x16_full(&cost_dct8, &cost_dct16, extra, xb8, yb8);
         let assignments = partitions_16x16_to_assignments(&partitions, xb8, yb8);
+        mark("selector");
 
         // Stage 6: per-channel DC grids
         let dc_grid_x = compute_dc_grid_per_8x8_block(&xyb_x, pw, ph);
         let dc_grid_y = compute_dc_grid_per_8x8_block(&xyb_y, pw, ph);
         let dc_grid_b = compute_dc_grid_per_8x8_block(&xyb_b, pw, ph);
+        mark("dc_grids");
 
         // Stage 7: encode + reconstruct via mixed-strategy IDCT.
         // Strategies supported: DCT8, DCT16x16, DCT16x8, DCT8x16.
@@ -968,6 +1001,7 @@ impl<R: Runtime> LossyEncoder<R> {
             &mut plane_y,
             &mut plane_b,
         );
+        mark("mixed_strategy_encode_recon");
 
 
         // Stage 8: postpass (gab_smooth + EPF + xyb_to_linear), matching
@@ -1041,9 +1075,11 @@ impl<R: Runtime> LossyEncoder<R> {
 
         let (rgb_r, rgb_g, rgb_b) =
             enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
+        mark("postpass_gab_epf_xyb");
         let r_out = enc.download_plane(&rgb_r);
         let g_out = enc.download_plane(&rgb_g);
         let b_out = enc.download_plane(&rgb_b);
+        mark("download_crop");
 
         (
             crop_to_original(&r_out, pw, w, h),

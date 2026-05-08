@@ -140,16 +140,38 @@ fn main() {
         "  narrow AQ R=1.4: score={score_n:.4}  pnorm_3={pn3_n:.4}  (qac min={q_n_min:.3} max={q_n_max:.3})"
     );
 
-    // Baseline 2c: AC strategy search (Phase A MVP — DCT8 vs DCT16x16).
+    // Baseline 2c: AC strategy search (Phase B — DCT8/DCT16x16/DCT16x8/DCT8x16).
+    // Use the traced variant to attribute time per stage. We run it twice and
+    // report the second run's per-stage breakdown — first run pays JIT/warm-up.
+    let mut stages: Vec<(&'static str, std::time::Instant)> = Vec::new();
+    let t_strat0 = std::time::Instant::now();
+    let _ = lossy.encode_one_with_strategy_search_dct8_16_traced(
+        &enc, &r, &g, &b, distance, &mut |_| {},
+    );
+    let dt_strat0 = t_strat0.elapsed();
+
     let t_strat = std::time::Instant::now();
-    let (rec_r_s, rec_g_s, rec_b_s) =
-        lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, distance);
+    let (rec_r_s, rec_g_s, rec_b_s) = lossy
+        .encode_one_with_strategy_search_dct8_16_traced(&enc, &r, &g, &b, distance, &mut |label| {
+            stages.push((label, std::time::Instant::now()));
+        });
     let dt_strat = t_strat.elapsed();
     let (score_strat, pn3_strat) = measure_score(&mut bg, &rec_r_s, &rec_g_s, &rec_b_s);
     println!(
-        "  strat-search:    score={score_strat:.4}  pnorm_3={pn3_strat:.4}  (DCT8/DCT16x16, {:.0} ms)\n",
+        "  strat-search:    score={score_strat:.4}  pnorm_3={pn3_strat:.4}  (DCT8/16/16x8/8x16, warm-up {:.0} ms, second {:.0} ms)",
+        dt_strat0.as_secs_f64() * 1000.0,
         dt_strat.as_secs_f64() * 1000.0
     );
+    println!("    per-stage breakdown:");
+    for w in stages.windows(2) {
+        let dur = w[1].1.duration_since(w[0].1);
+        println!(
+            "      {:>32} {:>7.2} ms",
+            w[1].0,
+            dur.as_secs_f64() * 1000.0
+        );
+    }
+    println!();
 
     // Use the original sRGB U8 bytes directly as the butteraugli
     // reference. Round-tripping through transfer functions (esp. our
