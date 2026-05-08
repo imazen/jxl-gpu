@@ -697,16 +697,47 @@ pub fn refine_aq_field_gpu<R: Runtime>(
         bg.copy_diffmap_to(&mut diffmap)?;
 
         // Step 4: reduce diffmap → per-block tile distances → adjust qf.
-        let tile_dist = refine_quant_field_one_iter(
-            &mut aq_field,
-            initial_aq_field,
+        // Force iter >= 2 semantics in adjust_quant_field (cur_pow=0.0,
+        // only-bad-blocks regime). The cur_pow=0.2 path softens GOOD
+        // blocks (`qac *= diff^0.2 < 1`) to "save bits" — but our
+        // qac-domain pipeline has no bit budget, so softening just
+        // degrades good blocks unnecessarily and the regression
+        // observed at d=4.0 (refined +19.7% vs uniform) traces to
+        // exactly this path. Skipping it also means
+        // `clamp_toward_initial` (which fires at iter==1 to undo
+        // softening overshoot) becomes a no-op, so we bypass
+        // refine_quant_field_one_iter entirely and call the helpers
+        // directly.
+        let tile_dist = compute_tile_distances(
             &diffmap,
-            iter,
-            // qac-domain: integer-step bump is neutered. See doc comment.
-            1.0,
-            0.0,
-            &cfg,
+            cfg.width,
+            cfg.height,
+            cfg.xsize_blocks,
+            cfg.ysize_blocks,
+            &cfg.info,
         );
+        if iter < iters {
+            // Cap the per-iter multiplier at 1.5 to prevent compound
+            // upward drift across iterations on consistently-bad blocks.
+            // Without an integer-quant ceiling like upstream's
+            // raw_quant ∈ [1, 255], `qac *= diff` with diff > 4 (common
+            // at d=4.0 since target_distance=4 means diff=tile_dist/4)
+            // would push qac to qf_higher ≈ 6.05 in one iteration on
+            // every "bad" block, causing the catastrophic +19.7% AQ
+            // regression at high d.
+            for bi in 0..aq_field.len() {
+                let diff = (tile_dist[bi] / target_distance).min(1.5);
+                if diff > 1.0 {
+                    aq_field[bi] *= diff;
+                }
+                if aq_field[bi] > bounds.qf_higher {
+                    aq_field[bi] = bounds.qf_higher;
+                }
+                if aq_field[bi] < bounds.qf_lower {
+                    aq_field[bi] = bounds.qf_lower;
+                }
+            }
+        }
 
         trace(RefineIterTrace {
             iter,
