@@ -375,6 +375,65 @@ pub fn scatter_block_to_plane(
     }
 }
 
+/// Forward DC extraction for DCT16×16 — bit-for-bit inverse of
+/// [`restore_llf_dct16x16`]. Mirrors upstream
+/// `vardct::dct::forward_large::dc_from_dct_16x16`.
+///
+/// Takes the 4 LLF coefficient values from a fully-populated 16×16
+/// coefficient block (positions `[0, 1, 16, 17]`) and returns the
+/// 2×2 DC grid that the encoder would store.
+///
+/// Used here for the roundtrip parity test
+/// `forward(restore(dc)) == dc` and `restore(forward(llf)) == llf`,
+/// which validates `restore_llf_dct16x16` more strongly than the
+/// constant-DC property test alone (this catches sign / scale /
+/// transpose inversions that constant-DC misses).
+///
+/// Math (forward direction; per upstream comments in
+/// `restore_llf_from_dc`):
+/// ```text
+///   temp[iy,ix] = llf[iy,ix] * s_iy * s_ix * 4.0
+///   dc_grid = 2x2_IDCT(temp) where 2x2_IDCT == H/4
+/// ```
+/// `H` is the unnormalized 2×2 Hadamard (H*H = 4*I).
+pub fn dc_from_dct_16x16(llf_grid: [f32; 4]) -> [f32; 4] {
+    let s0 = DCT_RESAMPLE_SCALE_16_TO_2[0];
+    let s1 = DCT_RESAMPLE_SCALE_16_TO_2[1];
+    // Apply per-position scale + 4.0 factor.
+    let t00 = llf_grid[0] * s0 * s0 * 4.0;
+    let t01 = llf_grid[1] * s0 * s1 * 4.0;
+    let t10 = llf_grid[2] * s1 * s0 * 4.0;
+    let t11 = llf_grid[3] * s1 * s1 * 4.0;
+    // 2x2 IDCT = H/4.
+    [
+        (t00 + t01 + t10 + t11) / 4.0,
+        (t00 + t01 - t10 - t11) / 4.0,
+        (t00 - t01 + t10 - t11) / 4.0,
+        (t00 - t01 - t10 + t11) / 4.0,
+    ]
+}
+
+/// Forward DC extraction for DCT16×8 / DCT8×16 — inverse of
+/// [`restore_llf_dct16x8_or_8x16`]. Mirrors upstream's
+/// `dc_from_dct_16x8` / `dc_from_dct_8x16` LLF extraction step.
+///
+/// Takes 2 LLF coefficient values (positions `[0, 1]`) and returns
+/// the pair of DC values (vertical for DCT16×8, horizontal for
+/// DCT8×16).
+///
+/// Math:
+/// ```text
+///   dc[0] = llf[0] * s0 + llf[1] * s1
+///   dc[1] = llf[0] * s0 - llf[1] * s1
+/// ```
+pub fn dc_from_dct_16x8_or_8x16(llf0: f32, llf1: f32) -> (f32, f32) {
+    let s0 = DCT_RESAMPLE_SCALE_16_TO_2[0];
+    let s1 = DCT_RESAMPLE_SCALE_16_TO_2[1];
+    let t0 = llf0 * s0;
+    let t1 = llf1 * s1;
+    (t0 + t1, t0 - t1)
+}
+
 /// Per-strategy LLF dispatcher. Given the dequantized DC grid for a
 /// single block of the given AC strategy, calls the matching
 /// `restore_llf_*` helper and writes the resulting LLF coefficients
@@ -1574,6 +1633,64 @@ mod tests {
         assert!((r[0] - c).abs() < 1e-5);
         for i in 1..16 {
             assert!(r[i].abs() < 1e-5, "pos {i}: got {} expected 0", r[i]);
+        }
+    }
+
+    #[test]
+    fn test_dct16x16_forward_inverse_roundtrip() {
+        // Strong parity: forward then inverse should recover the LLF values.
+        // Catches sign / scale / transpose bugs that the constant-DC test misses.
+        for trial in &[
+            [1.0_f32, 0.0, 0.0, 0.0],
+            [0.0_f32, 1.0, 0.0, 0.0],
+            [0.0_f32, 0.0, 1.0, 0.0],
+            [0.0_f32, 0.0, 0.0, 1.0],
+            [0.5_f32, -0.3, 0.7, -0.2],
+            [3.14_f32, -2.71, 1.41, 0.577],
+        ] {
+            let dc = dc_from_dct_16x16(*trial);
+            let restored = restore_llf_dct16x16(dc);
+            for i in 0..4 {
+                assert!(
+                    (restored[i] - trial[i]).abs() < 1e-5,
+                    "trial {trial:?} pos {i}: got {} expected {}",
+                    restored[i],
+                    trial[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dct16x16_inverse_forward_roundtrip() {
+        // Other direction: dc → llf → dc should recover the dc values.
+        for trial in &[
+            [1.0_f32, 0.0, 0.0, 0.0],
+            [0.0_f32, 1.0, 0.0, 0.0],
+            [0.5_f32, -0.3, 0.7, -0.2],
+            [12.0_f32, -7.0, 4.5, -1.1],
+        ] {
+            let llf = restore_llf_dct16x16(*trial);
+            let dc = dc_from_dct_16x16(llf);
+            for i in 0..4 {
+                assert!(
+                    (dc[i] - trial[i]).abs() < 1e-5,
+                    "trial {trial:?} pos {i}: got {} expected {}",
+                    dc[i],
+                    trial[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dct16x8_or_8x16_forward_inverse_roundtrip() {
+        // Both directions for the 2-point case.
+        for &(l0, l1) in &[(1.0_f32, 0.0), (0.0, 1.0), (0.5, -0.3), (3.14, -2.71)] {
+            let (dc0, dc1) = dc_from_dct_16x8_or_8x16(l0, l1);
+            let restored = restore_llf_dct16x8_or_8x16(dc0, dc1);
+            assert!((restored[0] - l0).abs() < 1e-5);
+            assert!((restored[1] - l1).abs() < 1e-5);
         }
     }
 
