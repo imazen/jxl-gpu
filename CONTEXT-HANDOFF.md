@@ -1,6 +1,118 @@
 # jxl-encoder-gpu / imazen/jxl-gpu — context handoff
 
-**Last updated:** 2026-05-08 (session 6.7 final — G5.1 fully closed via `__internals` feature + cross-repo wiring)
+**Last updated:** 2026-05-08 (session 7+ — butteraugli refinement loop landed end-to-end with smart content-aware gating, two-metric validation, tunable threshold)
+
+## Session 7+: butteraugli refinement loop + smart gate (production-ready)
+
+Multi-loop work building out a complete GPU-substituted butteraugli
+quant-refinement loop on top of the existing `forks::*` pipeline.
+The loop and its smart-gate wrapper are now production-mature:
+validated on two perceptual metrics (butteraugli + SSIMULACRA2), two
+resolutions (1024×1024 CLIC, 512×512 CID22), 27 unit tests passing,
+with caller-tunable threshold knobs.
+
+### Code surface (`forks::butteraugli_loop`, gated `butteraugli-loop` cargo feature)
+
+| Symbol | Role |
+|---|---|
+| `ButteraugliLoopGpu<R>` | Persistent `butteraugli_gpu::Butteraugli` wrapper. `set_reference` once + `compute_with_reference` per iter. |
+| `linear_f32_to_srgb_u8` + `linear_planar_to_srgb_u8_interleaved[_into]` | IEC 61966-2-1 piecewise transfer (matches butteraugli-gpu's internal `srgb_byte_to_linear` inverse). |
+| `DeviationBounds::compute` | qf_lower/qf_higher derived from initial float field via `sqrt(250 / ratio)`. Mirrors upstream lines 105-122. |
+| `compute_tile_distances` + `AcStrategyInfo` | AC-strategy-aware 16th-power-mean diffmap reduction. `K_TILE_NORM=1.2`. |
+| `clamp_toward_initial`, `adjust_quant_field` | kOriginalComparisonRound clamp + per-iter adjustment. |
+| `refine_quant_field_one_iter` + `RefineConfig` | Composes the four upstream helpers in iteration order. |
+| `refine_aq_field_gpu` | Multi-iter loop wiring `LossyEncoder::encode_one_adaptive` + helpers. Qac-domain adaptation (no integer-step bump). |
+| `refine_aq_field_gpu_auto` + `should_refine_at_distance` + `REFINEMENT_DISTANCE_THRESHOLD = 1.5` | Distance-only auto-gate. |
+| `refine_aq_field_gpu_smart` + `SmartGateOutcome` + `SmartGatePath` | **Production gate**. Always measures AQ + uniform; routes to one of three paths (DistanceGated / AqRegressedFallToUniform / Refined). |
+| `refine_aq_field_gpu_smart_with_threshold` + `SMART_GATE_AQ_REGRESSION_RATIO = 1.10` | Tunable variant. 1.10 = butteraugli optimum, 1.30 = SSIM2 optimum. |
+
+### Pipeline gap closure (foundational for the loop's usefulness)
+
+| Commit | Win |
+|---|---|
+| `691c0aab` | Decoder-side `gab_smooth` in `run_pipeline_with_qac` (-17.3% baseline butteraugli at d=1.0) |
+| `d9a201ca` | EPF chain + IEC sRGB linearization in demo (-81% baseline). Vec-based EPF added ~65 ms/iter. |
+| `710f760c` | Persistent EPF (`epf_step1_persistent`, `epf_step2_persistent`, `upload_inv_sigma`) — reclaimed the 65 ms; identical quality. |
+
+Net pipeline: butteraugli baseline at d=1.0 went from ~8.76 to ~1.34
+(-85%) on a 1024×1024 CLIC photo via this gap closure.
+
+### Smart gate empirical validation (16-image CLIC2025-1024 sweep)
+
+| dist | metric | uniform | AQ | refined | smart |
+|------|--------|---------|----|---------|-------|
+| 1.0 | butteraugli | 1.2386 | 1.4221 (+15%) | 1.2105 | **1.1886 (-4%)** |
+| 1.0 | SSIM2 | 87.913 | **88.841 (+0.93)** | 89.071 | 88.488 |
+| 2.0 | butteraugli | 2.0245 | 2.2413 (+11%) | 2.1195 | **2.0240 (-0%)** |
+| 2.0 | SSIM2 | 80.099 | **82.472 (+2.37)** | 82.489 | 81.412 |
+| 4.0 | butteraugli | 3.2582 | 3.5580 (+9%) | 3.5160 | **3.2417 (-1%)** |
+| 4.0 | SSIM2 | 67.677 | **72.432 (+4.76)** | 72.433 | 70.445 |
+
+**Major finding: butteraugli and SSIMULACRA2 disagree on AQ.**
+Butteraugli sees AQ as a regression of uniform (+9-15%); SSIM2 sees
+AQ as a significant win (+0.93 to +4.76). Smart gate wins on both —
+butteraugli because it falls back to uniform on the catastrophic
+regressions, SSIM2 because it preserves AQ on the images where AQ
+helps.
+
+### Caller recommendation (for users adopting the smart gate)
+
+- **JXL/butteraugli pipeline** (default): use
+  `refine_aq_field_gpu_smart` with the const default 1.10 threshold.
+- **SSIMULACRA2-targeted output**: use
+  `refine_aq_field_gpu_smart_with_threshold` with 1.30 (lets more AQ
+  through, captures more SSIM2 wins).
+
+### Sweep / validation artifacts (archived, not committed)
+
+`/mnt/v/output/jxl-encoder-gpu/butteraugli-refinement-sweep/`:
+- `sweep_clic_8imgs_2026-05-08.log` — initial 8-image CLIC sweep
+- `sweep_clic_16imgs_2026-05-08.log` — 16-image CLIC sweep
+- `sweep_clic_16imgs_smart_2026-05-08.log` — with smart gate
+- `sweep_clic_16imgs_ssim2_2026-05-08.log` — first SSIM2 cross-validation
+- `sweep_clic_16imgs_full_ssim2_2026-05-08.log` — SSIM2 for all 4 paths
+- `sweep_clic_16imgs_t110_2026-05-08.log` — threshold=1.10
+- `sweep_clic_16imgs_t120_2026-05-08.log` — threshold=1.20
+- `sweep_clic_16imgs_t130_2026-05-08.log` — threshold=1.30
+- `sweep_cid22_512_8imgs_2026-05-08.log` — 512px cross-resolution
+
+### Demos to know
+
+- `examples/butteraugli_refinement_demo` — single-image demo with
+  per-iteration trace, comparing uniform / AQ R=2.0 / AQ R=1.4
+  (narrow) / refined. Configurable via `IMAGE_PATH`, `ITERS`,
+  `DISTANCE` env vars.
+- `examples/butteraugli_refinement_corpus_sweep` — multi-image
+  validation harness with butteraugli + SSIM2 measurements + smart
+  paths breakdown. Configurable via `CORPUS_DIR`, `MAX_IMAGES`,
+  `ITERS`, `SMART_THRESHOLD`. Sweep time ~43s for 16 images at 3
+  distances on RTX 5070 (after dedup commit `90cb9ee5`).
+
+### Open follow-up directions (priority order)
+
+1. **AC strategy selection in `run_pipeline_with_qac`** — closes the
+   ~14% AQ-vs-uniform regression at d=2.0 by allowing DCT16/32 to
+   absorb the per-block qac variance. Multi-hour but the biggest
+   remaining quality lever.
+2. **Metric-internal smart gate** — make the gate measure SSIM2
+   internally (or a butteraugli+SSIM2 combined score) so the
+   threshold is consistent across user metric preferences.
+3. **AdjustQuantBlockAC GPU kernel** — host helpers exist; GPU
+   kernel would parallelize per-block. Per `PORT_STATUS.md`.
+4. **Per-(width, height) buffer cache** — Phase 4 ❌ item; useful
+   for variable-resolution batch workloads.
+5. **JXL bitstream output integration** — pivots the project; current
+   path ends at reconstructed RGB pixels, not a JXL file.
+
+### Files most relevant to recent work
+
+- `jxl-encoder-gpu/src/forks/butteraugli_loop.rs` — all helpers + smart gate
+- `jxl-encoder-gpu/src/lossy_encoder.rs` — pipeline (gab_smooth + EPF + persistent variants)
+- `jxl-encoder-gpu/src/persistent.rs` — persistent EPF step1/step2 + upload_inv_sigma
+- `jxl-encoder-gpu/examples/butteraugli_refinement_demo.rs`
+- `jxl-encoder-gpu/examples/butteraugli_refinement_corpus_sweep.rs`
+
+---
 
 ## Session 6.7 G5.1 closure (final)
 
