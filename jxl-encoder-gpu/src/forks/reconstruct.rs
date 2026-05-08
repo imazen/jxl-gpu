@@ -1971,6 +1971,158 @@ mod tests {
         }
     }
 
+    // ─── Upstream parity tests for dc_from_dct_* helpers ────────────
+    //
+    // Validates our hand-rolled forward DC-extraction helpers
+    // against jxl-encoder's `pub` dc_from_dct_* functions. Together
+    // with the roundtrip tests, this gives full G5.1-compliant
+    // parity coverage on the LLF restoration path:
+    //
+    //   1. `dc_from_dct_X` (mine)  ≡  `jxl_encoder::vardct::dct::dc_from_dct_X` (upstream)  — these tests
+    //   2. `restore_llf_dct_X(dc_from_dct_X(llf)) == llf` — roundtrips
+    //
+    // Together: both directions of the LLF restoration are verified
+    // against upstream's exposed forward path, no longer just
+    // against each other.
+
+    /// Build a synthetic NxM coefficient block whose only non-zero
+    /// values are at the LLF positions provided.
+    fn synthesize_block_with_llf<const N: usize>(
+        llf_grid: &[f32],
+        llf_positions: &[(usize, usize)],
+        rows: usize,
+        cols: usize,
+    ) -> [f32; N] {
+        let _ = (rows, cols); // unused, kept for clarity
+        debug_assert_eq!(llf_grid.len(), llf_positions.len());
+        let mut block = [0.0_f32; N];
+        for (i, &(r, c)) in llf_positions.iter().enumerate() {
+            block[r * cols + c] = llf_grid[i];
+        }
+        block
+    }
+
+    #[test]
+    fn test_dc_from_dct_32x32_matches_upstream() {
+        // Synthetic LLF inputs at the 4×4 positions [iy*32+ix].
+        // dc_from_dct_32x32 should match jxl_encoder upstream exactly.
+        let trials: [[f32; 16]; 4] = [
+            {
+                let mut a = [0.0_f32; 16];
+                a[0] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 16];
+                a[5] = 1.0;
+                a
+            },
+            [
+                3.14, -2.71, 1.41, 0.577, -1.0, 2.0, -3.0, 4.0, 0.1, -0.2, 0.3, -0.4, 5.5, -6.6,
+                7.7, -8.8,
+            ],
+            core::array::from_fn(|i| (i as f32 * 0.13).sin() * 0.5),
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            // Build a 1024-coefficient block with LLF at positions
+            // [iy*32+ix] for iy, ix in 0..4 (matching where
+            // restore_llf_dct32x32's output goes).
+            let mut llf_positions = alloc::vec::Vec::with_capacity(16);
+            for iy in 0..4 {
+                for ix in 0..4 {
+                    llf_positions.push((iy, ix));
+                }
+            }
+            let block: [f32; 1024] =
+                synthesize_block_with_llf::<1024>(trial, &llf_positions, 32, 32);
+            let mine = dc_from_dct_32x32(*trial);
+            let theirs = jxl_encoder::vardct::dct::dc_from_dct_32x32(&block);
+            for i in 0..16 {
+                assert!(
+                    (mine[i] - theirs[i]).abs() < 1e-4,
+                    "trial {ti} pos {i}: mine={} theirs={}",
+                    mine[i],
+                    theirs[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dc_from_dct_64x64_matches_upstream() {
+        let trials: [[f32; 64]; 3] = [
+            {
+                let mut a = [0.0_f32; 64];
+                a[0] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 64];
+                a[27] = 1.0;
+                a
+            },
+            core::array::from_fn(|i| (i as f32 * 0.13).sin() * 0.7),
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            let mut llf_positions = alloc::vec::Vec::with_capacity(64);
+            for iy in 0..8 {
+                for ix in 0..8 {
+                    llf_positions.push((iy, ix));
+                }
+            }
+            let block: alloc::vec::Vec<f32> = {
+                let mut v = alloc::vec![0.0_f32; 4096];
+                for (i, &(r, c)) in llf_positions.iter().enumerate() {
+                    v[r * 64 + c] = trial[i];
+                }
+                v
+            };
+            let mine = dc_from_dct_64x64(*trial);
+            let theirs = jxl_encoder::vardct::dct::dc_from_dct_64x64(&block);
+            for i in 0..64 {
+                assert!(
+                    (mine[i] - theirs[i]).abs() < 5e-3,
+                    "trial {ti} pos {i}: mine={} theirs={}",
+                    mine[i],
+                    theirs[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dc_from_dct_32x16_matches_upstream() {
+        let trials: [[f32; 8]; 3] = [
+            {
+                let mut a = [0.0_f32; 8];
+                a[0] = 1.0;
+                a
+            },
+            [0.5, -0.3, 0.7, -0.2, 1.1, -1.7, 0.9, -2.3],
+            [3.14, -2.71, 1.41, 0.577, -1.0, 2.0, -3.0, 4.0],
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            // Position in 32-stride layout (= 16 cols + 16 zero).
+            // LLF positions: [iy*32+ix] for iy in 0..2, ix in 0..4
+            let mut block = [0.0_f32; 512];
+            for iy in 0..2 {
+                for ix in 0..4 {
+                    block[iy * 32 + ix] = trial[iy * 4 + ix];
+                }
+            }
+            let mine = dc_from_dct_32x16(*trial);
+            let theirs = jxl_encoder::vardct::dct::dc_from_dct_32x16(&block);
+            for i in 0..8 {
+                assert!(
+                    (mine[i] - theirs[i]).abs() < 1e-4,
+                    "trial {ti} pos {i}: mine={} theirs={}",
+                    mine[i],
+                    theirs[i]
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_dct64x64_forward_inverse_roundtrip() {
         // 5 trial inputs covering corner cases.
