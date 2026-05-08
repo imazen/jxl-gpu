@@ -24,7 +24,8 @@
 fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::butteraugli_loop::{
-        ButteraugliLoopGpu, linear_planar_to_srgb_u8_interleaved, refine_aq_field_gpu,
+        ButteraugliLoopGpu, SmartGatePath, linear_planar_to_srgb_u8_interleaved,
+        refine_aq_field_gpu, refine_aq_field_gpu_smart,
     };
     use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
@@ -65,10 +66,12 @@ fn main() {
     let mut sum_un = vec![0.0_f64; nd];
     let mut sum_aq = vec![0.0_f64; nd];
     let mut sum_rf = vec![0.0_f64; nd];
+    let mut sum_sm = vec![0.0_f64; nd]; // smart-gate
     let mut wins_rf_vs_un = vec![0_usize; nd];
     let mut wins_rf_vs_aq = vec![0_usize; nd];
     let mut losses_rf_vs_un = vec![0_usize; nd];
     let mut worst_rf_vs_un: Vec<(f32, String)> = vec![(0.0, String::new()); nd];
+    let mut smart_paths: Vec<[usize; 3]> = vec![[0; 3]; nd]; // [DistanceGated, AqRegressed, Refined]
 
     let to_linear = |c: u8| -> f32 {
         let f = c as f32 / 255.0;
@@ -85,7 +88,7 @@ fn main() {
         "image",
         distances
             .iter()
-            .map(|d| format!("d={d:>3.1} (un / AQ / refined / Δrf-un)"))
+            .map(|d| format!("d={d:>3.1} (un / AQ / refined / smart / Δrf-un)"))
             .collect::<Vec<_>>()
             .join("  ")
     );
@@ -163,9 +166,39 @@ fn main() {
             let (rr, gg, bb) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &refined);
             let s_rf = measure(&mut bg, &rr, &gg, &bb);
 
+            // Smart-gate: distance + content-aware. Use the same
+            // initial AQ to avoid a second AQ encode (the smart fn
+            // measures internally; we measure it by encoding the
+            // resulting field).
+            let smart_outcome = refine_aq_field_gpu_smart(
+                &enc,
+                &lossy,
+                &mut bg,
+                &r,
+                &g,
+                &b,
+                &pixels,
+                &initial_aq,
+                d,
+                iters,
+                |_| (),
+            )
+            .expect("refine_aq_field_gpu_smart");
+            // smart_outcome is correct as a "decision". Measure the
+            // selected field's actual butteraugli score.
+            let (rrs, ggs, bbs) =
+                lossy.encode_one_adaptive(&enc, &r, &g, &b, &smart_outcome.aq_field);
+            let s_sm = measure(&mut bg, &rrs, &ggs, &bbs);
+            match smart_outcome.path {
+                SmartGatePath::DistanceGated => smart_paths[di][0] += 1,
+                SmartGatePath::AqRegressedFallToUniform => smart_paths[di][1] += 1,
+                SmartGatePath::Refined => smart_paths[di][2] += 1,
+            }
+
             sum_un[di] += s_un as f64;
             sum_aq[di] += s_aq as f64;
             sum_rf[di] += s_rf as f64;
+            sum_sm[di] += s_sm as f64;
             let drf_un = s_rf - s_un;
             if s_rf < s_un - 0.005 {
                 wins_rf_vs_un[di] += 1;
@@ -179,8 +212,8 @@ fn main() {
                 wins_rf_vs_aq[di] += 1;
             }
             print!(
-                "  {:>5.2}/{:>5.2}/{:>5.2}/{:>+6.3}",
-                s_un, s_aq, s_rf, drf_un
+                "  {:>5.2}/{:>5.2}/{:>5.2}/{:>5.2}/{:>+6.3}",
+                s_un, s_aq, s_rf, s_sm, drf_un
             );
         }
         println!();
@@ -189,31 +222,39 @@ fn main() {
     let nf = paths.len() as f64;
     println!("\n=== Aggregate (n={}, lower butteraugli = better) ===", paths.len());
     println!(
-        "  {:>5}  {:>9}  {:>9}  {:>9}  {:>5}/{:>5}  {:>5}  {:>22}",
-        "dist", "uniform µ", "AQ µ", "refined µ", "rf>un", "rf<un", "rf<AQ", "worst-rf-vs-un (Δ)"
+        "  {:>5}  {:>9}  {:>9}  {:>9}  {:>9}  {:>5}/{:>5}  {:>5}  {}",
+        "dist", "uniform µ", "AQ µ", "refined µ", "smart µ", "rf>un", "rf<un", "rf<AQ",
+        "smart paths [DistGate / AQ→un / Refined]"
     );
     for (di, d) in distances.iter().enumerate() {
-        let (worst_d, worst_name) = &worst_rf_vs_un[di];
-        let worst_str = if losses_rf_vs_un[di] > 0 {
-            format!(
-                "{:>15.15} ({:+.3})",
-                worst_name.chars().take(15).collect::<String>(),
-                worst_d
-            )
-        } else {
-            String::from("(none)")
-        };
         println!(
-            "  {:>5.2}  {:>9.4}  {:>9.4}  {:>9.4}  {:>5}/{:>5}  {:>5}  {:>22}",
+            "  {:>5.2}  {:>9.4}  {:>9.4}  {:>9.4}  {:>9.4}  {:>5}/{:>5}  {:>5}  {} / {} / {}",
             d,
             sum_un[di] / nf,
             sum_aq[di] / nf,
             sum_rf[di] / nf,
+            sum_sm[di] / nf,
             wins_rf_vs_un[di],
             losses_rf_vs_un[di],
             wins_rf_vs_aq[di],
-            worst_str,
+            smart_paths[di][0],
+            smart_paths[di][1],
+            smart_paths[di][2],
         );
+    }
+    println!("\nWorst refinement-vs-uniform regressions (per distance):");
+    for (di, d) in distances.iter().enumerate() {
+        let (worst_d, worst_name) = &worst_rf_vs_un[di];
+        if losses_rf_vs_un[di] > 0 {
+            println!(
+                "  d={:.2}  {:>15.15} ({:+.3})",
+                d,
+                worst_name.chars().take(15).collect::<String>(),
+                worst_d
+            );
+        } else {
+            println!("  d={:.2}  (none)", d);
+        }
     }
     println!(
         "\nrf<un / rf<AQ counts: 'wins' = score > 0.005 better. The refined\nloop is doing useful work if rf<un > rf>un at the same distance.\nWorst-loss column shows the worst refinement regression vs uniform\n— useful for identifying content types where refinement should be\nskipped or tuned differently."

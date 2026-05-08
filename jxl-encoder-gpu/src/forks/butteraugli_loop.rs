@@ -668,34 +668,43 @@ pub struct SmartGateOutcome {
 /// Which path the smart gate chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmartGatePath {
-    /// Distance > [`REFINEMENT_DISTANCE_THRESHOLD`]; returned `initial_aq_field` unchanged.
-    /// Cost: 0 GPU encodes (no measurement either).
+    /// AQ acceptable but distance > [`REFINEMENT_DISTANCE_THRESHOLD`];
+    /// returned `initial_aq_field` as-is. Cost: 2 baseline encodes +
+    /// 2 measures (AQ + uniform).
     DistanceGated,
-    /// Distance ≤ threshold AND AQ regresses uniform by > 10%;
-    /// returned a uniform qac field. Cost: 2 encodes (initial AQ + uniform)
-    /// + 2 butteraugli measures.
+    /// AQ regresses uniform by > [`SMART_GATE_AQ_REGRESSION_RATIO`]
+    /// (10%); returned a uniform qac field. Fires regardless of
+    /// distance — refinement can't recover from a doomed initial.
+    /// Cost: same as DistanceGated (2 encodes + 2 measures, no
+    /// refinement run).
     AqRegressedFallToUniform,
-    /// Distance ≤ threshold AND AQ is acceptable; ran full refinement
+    /// AQ acceptable AND distance ≤ threshold; ran full refinement
     /// loop. Cost: 2 baseline encodes + the refinement loop.
     Refined,
 }
 
 /// Content-aware auto-gated refinement.
 ///
-/// Combines the conservative distance gate with a per-content
-/// AQ-regression check:
+/// Always measures AQ vs uniform baselines first, then chooses one
+/// of three paths:
 ///
-/// 1. If `target_distance > REFINEMENT_DISTANCE_THRESHOLD`, skip
-///    refinement entirely (returns `initial_aq_field`).
-/// 2. Else, encode + measure `initial_aq_field` AND uniform-qac
-///    baselines. If AQ score > uniform × [`SMART_GATE_AQ_REGRESSION_RATIO`],
-///    the AQ field is hurting on this image — return a uniform qac
-///    field instead of refining a doomed initial.
-/// 3. Else, run [`refine_aq_field_gpu`].
+/// 1. If AQ score > uniform × [`SMART_GATE_AQ_REGRESSION_RATIO`]
+///    (10% regression), the AQ field is hurting on this image —
+///    return a uniform qac field. Refinement at any distance can't
+///    recover from a regressing initial AQ; better to skip AQ
+///    entirely.
+/// 2. Else if `target_distance > REFINEMENT_DISTANCE_THRESHOLD` (1.5),
+///    return the initial AQ field as-is (refinement doesn't help on
+///    average and risks catastrophic regressions at high d).
+/// 3. Else (low distance, AQ acceptable), run [`refine_aq_field_gpu`].
 ///
-/// Costs 2 extra encode+measure cycles vs [`refine_aq_field_gpu_auto`]
-/// when distance ≤ threshold (one each for AQ and uniform). At
-/// 1024×1024 on RTX 5070 this is ~100 ms additional.
+/// Costs 2 baseline encode+measure cycles always (one each for AQ
+/// and uniform). At 1024×1024 on RTX 5070 ≈ 100 ms additional vs
+/// [`refine_aq_field_gpu_auto`]. The benefit is that at high d this
+/// catches AQ-regressing content that distance-gated returned
+/// blindly. Empirically this is the best-mean-quality path in the
+/// 16-image CLIC corpus sweep at d=1.0 (1.1886 vs 1.2105 refined,
+/// 1.2386 uniform, 1.4221 AQ).
 ///
 /// Returns a [`SmartGateOutcome`] with the selected field plus
 /// diagnostics so callers can log / decide. The trace callback is
@@ -714,15 +723,6 @@ pub fn refine_aq_field_gpu_smart<R: Runtime>(
     iters: usize,
     trace: impl FnMut(RefineIterTrace),
 ) -> butteraugli_gpu::Result<SmartGateOutcome> {
-    if !should_refine_at_distance(target_distance) {
-        return Ok(SmartGateOutcome {
-            aq_field: initial_aq_field.to_vec(),
-            path: SmartGatePath::DistanceGated,
-            initial_aq_score: None,
-            uniform_score: None,
-        });
-    }
-
     let (width, height) = lossy.dimensions();
     bg.set_reference(ref_srgb)?;
 
@@ -749,10 +749,9 @@ pub fn refine_aq_field_gpu_smart<R: Runtime>(
     );
     let s_un = bg.compute_with_reference(&recon_srgb)?.score;
 
+    // Path 1: AQ regresses uniform — fall back to uniform regardless
+    // of distance. Refinement can't recover from a doomed initial.
     if s_aq > s_un * SMART_GATE_AQ_REGRESSION_RATIO {
-        // AQ regresses uniform — fall back to uniform field. Refining
-        // a doomed AQ field at distance ≤ 1.5 produces the worst-case
-        // outcomes we observed in the corpus sweep.
         return Ok(SmartGateOutcome {
             aq_field: alloc::vec![qac_uniform; initial_aq_field.len()],
             path: SmartGatePath::AqRegressedFallToUniform,
@@ -761,6 +760,18 @@ pub fn refine_aq_field_gpu_smart<R: Runtime>(
         });
     }
 
+    // Path 2: AQ acceptable but distance too high for refinement — use
+    // initial AQ as-is.
+    if !should_refine_at_distance(target_distance) {
+        return Ok(SmartGateOutcome {
+            aq_field: initial_aq_field.to_vec(),
+            path: SmartGatePath::DistanceGated,
+            initial_aq_score: Some(s_aq),
+            uniform_score: Some(s_un),
+        });
+    }
+
+    // Path 3: refine.
     let refined = refine_aq_field_gpu(
         enc,
         lossy,
@@ -1403,10 +1414,13 @@ mod tests {
         assert!(!should_refine_at_distance(f32::NAN));
     }
 
-    /// Smart gate at high distance: distance gated, no AQ measure.
+    /// Smart gate at high distance: never refines (refinement gated by
+    /// distance). Path is either DistanceGated (AQ acceptable, return
+    /// initial AQ) or AqRegressedFallToUniform (AQ regresses, fall back
+    /// to uniform). Both score AQ + uniform, neither runs refinement.
     #[cfg(feature = "cuda")]
     #[test]
-    fn test_refine_aq_field_gpu_smart_distance_gates_off() {
+    fn test_refine_aq_field_gpu_smart_high_distance_never_refines() {
         type B = cubecl::cuda::CudaRuntime;
         let enc: GpuEncoder<B> = GpuEncoder::new();
         let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, 64, 64);
@@ -1423,10 +1437,15 @@ mod tests {
         )
         .expect("smart");
 
-        assert_eq!(outcome.path, SmartGatePath::DistanceGated);
-        assert_eq!(outcome.aq_field, initial);
-        assert!(outcome.initial_aq_score.is_none());
-        assert!(outcome.uniform_score.is_none());
+        // Always measures both at high distance now.
+        assert!(outcome.initial_aq_score.is_some());
+        assert!(outcome.uniform_score.is_some());
+        // Path is never Refined at high distance.
+        assert!(matches!(
+            outcome.path,
+            SmartGatePath::DistanceGated | SmartGatePath::AqRegressedFallToUniform
+        ));
+        assert_eq!(outcome.aq_field.len(), initial.len());
     }
 
     /// Smart gate at low distance: measures both, picks one of the two
