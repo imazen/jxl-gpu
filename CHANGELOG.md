@@ -78,6 +78,47 @@ LLF helpers in place, the dispatcher just needs to: read DC grid →
 call the right LLF restorer → write LLF positions into the
 coefficient block → run per-strategy IDCT → scatter.
 
+### Strategy-generic `estimate_entropy_full` orchestrator (`5f75ea2e`, `3fea1e18`)
+
+Generalizes the DCT8-only entropy orchestrator (706b59fe) to all
+standard JXL AC strategies (DCT8 / DCT4-family / IDENTITY / DCT2X2 /
+DCT16x8 / DCT8x16 / DCT16x16 / DCT32x16 / DCT16x32 / DCT32x32 /
+DCT64x32 / DCT32x64 / DCT64x64). AFV0-3 still through `forks::afv`.
+
+Two pieces:
+
+1. `per_block_upstream_cost` parameterized over `block_pixel_count`
+   (`5f75ea2e`) — was hardcoded to 64 for the DCT8 fast path; now
+   any strategy passes its `block_w * block_h`. The 8th-root
+   pixel-loss scaling `loss_scalar = (loss/n)^(1/8) * n / quant`
+   uses `n = block_pixel_count` directly.
+2. `dct_blocks_gpu(enc, blocks, raw_strategy)` (`3fea1e18`) —
+   strategy-aware batched forward DCT for already-gathered
+   block-major input, mirrors `apply_dct_batch_gpu`'s dispatch arm
+   without the gather step.
+3. `estimate_entropy_full_strategy_batch_gpu` (`3fea1e18`) — strategy-
+   generic orchestrator. Same 12-launch pipeline shape as the DCT8
+   fast path, parameterized by `raw_strategy`:
+   - `dct_blocks_gpu(strategy)` for forward DCT
+   - `entropy_coeffs_pixel_blocks_gpu` with `n_per_block = coeff_count_per_strategy`
+   - `apply_idct_batch_gpu(strategy)` for IDCT
+   - `pixel_loss_blocks_gpu` with `block_w/block_h = tile_dims_pixels(strategy)`
+   - `per_block_upstream_cost` with `block_pixel_count = block_w * block_h`
+
+GPU smoke test on DCT16x16 zero-input → ~0 cost validates the
+non-DCT8 plumbing.
+
+**Caveat documented**: upstream's generic-path estimate_entropy_full
+also weights X channel by `1 + min(num_blocks/8, 3)` for
+`num_blocks >= 2 && c == 0 && use_pixel_domain` — NOT applied here.
+Fine for relative-ranking cost (the common case); callers needing
+full upstream parity for X on multi-block strategies must apply
+the weight separately.
+
+The DCT8-only `estimate_entropy_full_dct8_batch_gpu` (706b59fe)
+remains as a faster specialization with hardcoded sizes; the
+strategy-generic version is the addition.
+
 ### `per_block_upstream_cost` + `CostMode` orchestrator switch (`5787eec8`, `e5ca5e27`)
 
 Closes the caveat from 706b59fe — the orchestrator now offers

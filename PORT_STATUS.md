@@ -143,22 +143,30 @@ in `jxl-encoder`; gated on user approval.
 
 
 
-**estimate_entropy_full DCT8 orchestrator landed as of 2026-05-08** —
-`forks::cost::estimate_entropy_full_dct8_batch_gpu` composes ~12 GPU
+**estimate_entropy_full orchestrator (DCT8 + strategy-generic) landed
+as of 2026-05-08** — `forks::cost::estimate_entropy_full_dct8_batch_gpu`
+(DCT8 fast path) and `forks::cost::estimate_entropy_full_strategy_batch_gpu`
+(strategy-generic; works for all standard strategies including
+DCT16+/DCT32+/DCT64+/IDENTITY/DCT2X2/DCT4-family) compose ~12 GPU
 launches per call (3 forward DCT + 3 entropy + 3 IDCT + 3 pixel-loss)
-plus host-side combiners (`extract_per_block_entropy`,
-`sum_per_block_entropy_3channel`, `combine_pixel_loss_3channel`,
-`per_block_total_cost`, and the upstream-faithful `per_block_upstream_cost`)
-into a per-block cost evaluator for the AC strategy search.
+plus host-side combiners. Strategy-generic version uses
+`coeff_count_per_strategy(raw_strategy)` for the entropy kernel's
+n_per_block and `tile_dims_pixels(raw_strategy)` for the pixel-loss
+block dimensions. AFV0-3 routed through `forks::afv` separately.
 `CostMode::{Simple, Upstream}` lets callers pick between a fast
-relative-ranking form and the bit-faithful
-`estimate_entropy_full` formula with `k_zeros_mul * f(nzeros)`
-bits-cost + 8th-root pixel-loss scaling. The upstream entropy
-kernel itself only fills `entropy_sum + nzeros_sum` columns of
-the 4-stat output (this matches upstream's pixel-domain mode
-behavior — `info_loss_sum` is intentionally 0 in pixel-domain
-mode); the `info_loss_mul` term is computed on the host from the
-combined pixel loss. **Mixed-strategy
+relative-ranking form and the bit-faithful `estimate_entropy_full`
+formula with `k_zeros_mul * f(nzeros)` bits-cost + 8th-root
+pixel-loss scaling (`per_block_upstream_cost` generalized over
+`block_pixel_count` for any strategy). The upstream entropy kernel
+itself only fills `entropy_sum + nzeros_sum` columns of the 4-stat
+output (matches upstream's pixel-domain mode behavior —
+`info_loss_sum` is intentionally 0 in pixel-domain mode); the
+`info_loss_mul` term is computed on the host from the combined
+pixel loss. Caveat: upstream's generic-path also weights X channel
+by `1 + min(num_blocks/8, 3)` for `num_blocks >= 2 && c == 0` —
+NOT applied here. Fine for relative-ranking; callers needing full
+upstream parity for X on multi-block strategies must apply the
+weight before/after. **Mixed-strategy
 reconstruct on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_mixed_strategy_gpu` accepts a heterogeneous `&[BlockRecipe]` (each carrying `bx, by, raw_strategy, coeffs`), groups by strategy, emits ≤ 15 GPU launches per image (one per supported strategy that appears in the recipes). AFV0-3 still route through `forks::afv` separately. **`compute_epf_sharpness_dct8_gpu` fully composed as of 2026-05-07** — runs reconstruct → gaborish (opt) → per-candidate EPF + L2 → two-pass selection on GPU end-to-end for the DCT8-only path. **All per-strategy LLF restoration helpers ported as of 2026-05-07** — `forks::reconstruct::restore_llf_*` covers DCT16×8, DCT8×16, DCT16×16, DCT32×32, DCT32×16, DCT16×32, DCT64×64, DCT64×32, DCT32×64 (15 unit tests), each as a pure-scalar host helper. The 1×1-LLF strategies (IDENTITY/DCT2X2/DCT4×*/AFV0-3) reuse `restore_dct8_dc_override`'s simple DC formula. **AdjustQuantBlockAC fully ported as host helpers as of 2026-05-07** — pre-scan + all 6 heuristics A-F + orchestrator (`forks::quantize::adjust_quant_block_ac_host`) match upstream. A future `#[cube]` kernel can transcribe the now-standalone heuristics for per-block-parallel execution without further reverse-engineering. **EPF Step 0 (12-tap) ported and parity-verified at FP32 floor as of 2026-05-07** — closes the heaviest of the three EPF passes; all three are now on GPU. **DCT8-only reconstruct path on GPU as of 2026-05-07** — `forks::reconstruct::reconstruct_xyb_dct8_only_gpu` composes dequant + DC override + IDCT + scatter into 4 GPU launches per image. Sufficient for the all-blocks-are-DCT8 case (common for straightforward distance values). **All standard JXL AC strategy forward + inverse transforms are now on GPU** (DCT4/8/16/32/64 family, IDENTITY, DCT2X2, AFV0-3) as of 2026-05-07. **Quantize + dequant kernels cover the full strategy family** (DCT8 fast path + generic `quantize_large` / `dequant_simple` for any block size) as of 2026-05-07.
 
 ## Coverage summary
