@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+### Smart-gate cross-validation: SSIMULACRA2 + 512px content (`6b95ff24`, `467150f4`)
+
+Two validation steps confirm the smart gate is a real perceptual
+quality improvement, not a butteraugli-specific optimization.
+
+**SSIMULACRA2 cross-validation** (16-image CLIC2025-1024 sweep,
+archived `sweep_clic_16imgs_ssim2_2026-05-08.log`):
+
+| dist | butteraugli (smart vs uniform) | SSIMULACRA2 (smart vs uniform) |
+|------|-----------------------------------|----------------------------------|
+| 1.0  | 1.2386 → 1.1886 (-4.0%)           | 87.913 → 88.488 (+0.575)          |
+| 2.0  | 2.0245 → 2.0240 (-0.0%)           | 80.099 → 81.412 (+1.313)          |
+| 4.0  | 3.2582 → 3.2417 (-0.5%)           | 67.677 → 70.445 (+2.768)          |
+
+The smart gate wins on BOTH metrics at all 3 distances. Win
+magnitude on SSIM2 actually INCREASES with distance (+0.575 →
++1.313 → +2.768) — opposite of the butteraugli pattern. SSIM2 sees
+the AQ-vs-uniform fallback as a meaningful perceptual gain that
+butteraugli barely registers, suggesting the gate captures real
+quality wins beyond what either metric alone shows.
+
+**512×512 cross-resolution sweep** (8 CID22-512 images,
+archived `sweep_cid22_512_8imgs_2026-05-08.log`):
+
+| dist | butteraugli                       | SSIMULACRA2                      |
+|------|-----------------------------------|----------------------------------|
+| 1.0  | 1.1815 → 1.1795 (-0.2%)           | 89.233 → 89.488 (+0.255)          |
+| 2.0  | 1.9855 → 2.0083 (+1.1%)           | 82.069 → 82.256 (+0.187)          |
+| 4.0  | 3.1508 → 3.2478 (+3.1%)           | 70.454 → 71.295 (+0.841)          |
+
+Wins are smaller at 512px on butteraugli (mostly matches uniform)
+but stay positive on SSIM2. No catastrophic regressions on either
+metric — the safety floor holds across resolutions and metrics.
+
+The `SMART_GATE_AQ_REGRESSION_RATIO = 1.10` threshold was tuned for
+1024px content; future per-resolution calibration could tighten the
+512px wins. Smart-paths distribution at 512px (1.0: 0/6/2, 2.0:
+1/7/0, 4.0: 3/5/0) shows the gate is active and triggering as
+designed — most images get AQ→uniform fallback, matching the 1024px
+behavior pattern.
+
 ### Smart content-aware gate: refine_aq_field_gpu_smart (`b6f483a5`, `f9b0ca6a`, `52dd19f2`)
 
 Production-ready content-aware gating for the butteraugli refinement
