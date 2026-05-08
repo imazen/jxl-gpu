@@ -2,6 +2,59 @@
 
 ## [Unreleased]
 
+### Empirical: butteraugli and SSIMULACRA2 disagree on content-driven AQ (`0e470164`)
+
+Expanded the corpus sweep to compute SSIMULACRA2 for all four
+reconstruction paths (uniform / AQ / refined / smart). Reveals a
+fundamental metric disagreement that reshapes the optimal policy:
+
+| dist | metric        | uniform | AQ | refined | smart |
+|------|---------------|---------|----|---------|-------|
+| 1.0  | butteraugli µ | 1.2386  | 1.4221 (+15%) | 1.2105 (-2%) | **1.1886 (-4%)** |
+| 1.0  | SSIM2 µ       | 87.913  | **88.841 (+0.93)** | **89.071 (+1.16)** | 88.488 (+0.58) |
+| 2.0  | butteraugli µ | 2.0245  | 2.2413 (+11%) | 2.1195 (+5%) | **2.0240 (-0%)** |
+| 2.0  | SSIM2 µ       | 80.099  | **82.472 (+2.37)** | **82.489 (+2.39)** | 81.412 (+1.31) |
+| 4.0  | butteraugli µ | 3.2582  | 3.5580 (+9%) | 3.5160 (+8%) | **3.2417 (-1%)** |
+| 4.0  | SSIM2 µ       | 67.677  | **72.432 (+4.76)** | **72.433 (+4.76)** | 70.445 (+2.77) |
+
+**The metrics give opposite answers about AQ:**
+- Butteraugli: AQ regresses uniform by +9-15% at all distances
+- SSIM2: AQ BEATS uniform by +0.93–4.76 at all distances (14/15/16
+  of 16 strict wins per distance)
+
+Refined matches AQ on SSIM2 at d=2/4 (82.489 vs 82.472, 72.433 vs
+72.432) — refinement adds zero SSIM2 gain at higher d. At d=1.0
+refined edges AQ (+0.23 SSIM2).
+
+**The smart gate optimizes for butteraugli** — falling back to
+uniform when AQ regresses butteraugli. That HURTS SSIM2 vs always
+using AQ:
+- d=1.0: smart +0.58 SSIM2 vs AQ alone +0.93
+- d=2.0: smart +1.31 vs AQ alone +2.37
+- d=4.0: smart +2.77 vs AQ alone +4.76
+
+**Implication: optimal policy is metric-dependent.**
+- For butteraugli-targeted output: use the smart gate (this is the
+  default for JXL, since libjxl optimizes for butteraugli).
+- For SSIMULACRA2-targeted output: always use AQ, skip smart gate,
+  skip refinement at d≥2.
+
+Why the disagreement: butteraugli is sensitive to LOCAL
+discontinuities (per-block qac variance creates block-edge
+artifacts that butteraugli penalizes); SSIM2 is sensitive to
+STRUCTURAL similarity (AQ's heavy-quant on smooth regions preserves
+edges better, which SSIM2 rewards). Our DCT8-only pipeline lacks
+the AC strategy selection + EPF maturity that absorb per-block qac
+variance in libjxl, amplifying butteraugli's sensitivity here.
+
+Archived at
+`/mnt/v/output/jxl-encoder-gpu/butteraugli-refinement-sweep/sweep_clic_16imgs_full_ssim2_2026-05-08.log`.
+
+Future work: metric-configurable smart gate
+(`SmartGateMetric::Butteraugli | Ssim2 | Combined`), per-resolution
+threshold tuning, or AC strategy selection (which would close the
+butteraugli/SSIM2 gap by absorbing the per-block variance).
+
 ### Smart-gate cross-validation: SSIMULACRA2 + 512px content (`6b95ff24`, `467150f4`)
 
 Two validation steps confirm the smart gate is a real perceptual
