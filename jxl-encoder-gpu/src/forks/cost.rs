@@ -1594,6 +1594,40 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_scaled_constants_matches_upstream() {
+        // G5.1 parity: compare against upstream's
+        // jxl_encoder::__internals::compute_scaled_constants_free
+        // (gated by the __internals cargo feature). Spot-check a
+        // grid of distance × bases to catch any algorithmic drift.
+        for &distance in &[0.5_f32, 1.0, 2.0, 5.0, 10.0] {
+            for &bases in &[
+                (1.0_f32, 2.0, 3.0),
+                (138.0, 5.335_918_5, 7.565_053_4), // COEFF_DOMAIN_CONSTANTS-shape
+                (0.1, 0.5, 1.7),
+            ] {
+                let mine = compute_scaled_constants(distance, bases);
+                let theirs =
+                    jxl_encoder::__internals::compute_scaled_constants_free(distance, bases);
+                assert!(
+                    (mine.0 - theirs.0).abs() < 1e-3,
+                    "d={distance} bases={bases:?} info_loss: mine={} theirs={}",
+                    mine.0, theirs.0
+                );
+                assert!(
+                    (mine.1 - theirs.1).abs() < 1e-3,
+                    "d={distance} bases={bases:?} cost_delta: mine={} theirs={}",
+                    mine.1, theirs.1
+                );
+                assert!(
+                    (mine.2 - theirs.2).abs() < 1e-3,
+                    "d={distance} bases={bases:?} zeros_mul: mine={} theirs={}",
+                    mine.2, theirs.2
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_compute_scaled_constants_d1_no_scale() {
         // ratio = 1.0 at distance == 1.0 → bases echo back.
         let (info, cost, zeros) =

@@ -178,6 +178,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_ytox_ratio_matches_upstream() {
+        // G5.1 parity: every i8 value must match upstream's
+        // jxl_encoder::__internals::ytox_ratio exactly.
+        for x in i8::MIN..=i8::MAX {
+            let mine = ytox_ratio(x);
+            let theirs = jxl_encoder::__internals::ytox_ratio(x);
+            assert_eq!(mine, theirs, "x={x}: mine={mine} theirs={theirs}");
+        }
+    }
+
+    #[test]
+    fn test_ytob_ratio_matches_upstream() {
+        for b in i8::MIN..=i8::MAX {
+            let mine = ytob_ratio(b);
+            let theirs = jxl_encoder::__internals::ytob_ratio(b);
+            assert_eq!(mine, theirs, "b={b}: mine={mine} theirs={theirs}");
+        }
+    }
+
+    #[test]
     fn test_ytox_ratio_zero_is_zero() {
         assert_eq!(ytox_ratio(0), 0.0);
     }

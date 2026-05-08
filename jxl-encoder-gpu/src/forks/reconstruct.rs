@@ -1581,6 +1581,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_inv_dc_quant_matches_upstream() {
+        // G5.1 parity: each of the 3 channel values must match upstream's
+        // jxl_encoder::__internals::INV_DC_QUANT exactly.
+        for c in 0..3 {
+            assert_eq!(
+                INV_DC_QUANT[c],
+                jxl_encoder::__internals::INV_DC_QUANT[c],
+                "channel {c}"
+            );
+        }
+    }
+
+    #[test]
     fn test_dequant_dc_channel_x_y_no_cfl() {
         // X / Y channels: no CfL contribution. Output = quant_dc / inv_factor.
         // X: inv_factor = 4096 * 0.5 = 2048; 100 / 2048 = 0.04883
