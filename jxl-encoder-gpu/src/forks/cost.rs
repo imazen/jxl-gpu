@@ -238,6 +238,61 @@ pub fn per_block_total_cost(
         .collect()
 }
 
+/// X-channel multi-block weight from upstream's generic-path
+/// `estimate_entropy_full` (`vardct/ac_strategy.rs:1047, 1087`).
+///
+/// `w = 1 + min(num_blocks / 8, 3)` for `num_blocks >= 2`, else `1.0`.
+///
+/// Upstream applies this to (a) the X channel's `entropy`
+/// contribution and (b) the X channel's `total_pixel_loss`
+/// contribution — matching the DCT8 fast path's NO weight (DCT8 has
+/// `num_blocks = 1` so `w = 1.0` is a no-op there).
+///
+/// Use [`apply_x_multiblock_weight_to_loss`] and
+/// [`apply_x_multiblock_weight_to_entropy`] to apply to per-channel
+/// arrays.
+#[inline]
+pub fn x_multiblock_weight(num_blocks: usize) -> f32 {
+    if num_blocks >= 2 {
+        1.0 + (num_blocks as f32 / 8.0).min(3.0)
+    } else {
+        1.0
+    }
+}
+
+/// Apply [`x_multiblock_weight`] to the X channel's per-block pixel
+/// loss in-place. No-op when `num_blocks < 2`.
+///
+/// Caller can call this between [`pixel_loss_blocks_gpu`] (for X)
+/// and [`combine_pixel_loss_3channel`] to match upstream's
+/// generic-path behavior.
+pub fn apply_x_multiblock_weight_to_loss(loss_x: &mut [f64], num_blocks: usize) {
+    let w = x_multiblock_weight(num_blocks) as f64;
+    if w == 1.0 {
+        return;
+    }
+    for v in loss_x.iter_mut() {
+        *v *= w;
+    }
+}
+
+/// Apply [`x_multiblock_weight`] to the X channel's per-block
+/// entropy in-place. No-op when `num_blocks < 2`. Mirrors
+/// upstream's `if c == 0 && num_blocks >= 2 && use_pixel_domain {
+/// entropy *= w; }` — effectively weights ONLY X's contribution
+/// (since upstream's `entropy` accumulator hasn't received Y or B
+/// yet at the moment X is processed in the generic-path channel
+/// order 0/1/2).
+pub fn apply_x_multiblock_weight_to_entropy(entropy_x: &mut [f32], num_blocks: usize) {
+    let w = x_multiblock_weight(num_blocks);
+    if w == 1.0 {
+        return;
+    }
+    for v in entropy_x.iter_mut() {
+        *v *= w;
+    }
+}
+
 /// Combine per-block per-channel pixel-domain losses (output of
 /// [`pixel_loss_blocks_gpu`] called once per channel) into a single
 /// per-block total via the [`CHANNEL_MUL`] weights.
@@ -1240,6 +1295,66 @@ mod tests {
         for (i, &c) in cost.iter().enumerate() {
             assert!((c - 1.5 * entropy[i]).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn test_x_multiblock_weight_singleton_is_one() {
+        assert_eq!(x_multiblock_weight(0), 1.0);
+        assert_eq!(x_multiblock_weight(1), 1.0);
+    }
+
+    #[test]
+    fn test_x_multiblock_weight_grows_then_caps() {
+        // num_blocks=2 → 1 + 2/8 = 1.25
+        assert!((x_multiblock_weight(2) - 1.25).abs() < 1e-6);
+        // num_blocks=4 → 1 + 4/8 = 1.5
+        assert!((x_multiblock_weight(4) - 1.5).abs() < 1e-6);
+        // num_blocks=8 → 1 + 8/8 = 2.0
+        assert!((x_multiblock_weight(8) - 2.0).abs() < 1e-6);
+        // num_blocks=16 → 1 + 16/8 = 3.0
+        assert!((x_multiblock_weight(16) - 3.0).abs() < 1e-6);
+        // num_blocks=24 → 1 + 24/8 = 4.0
+        assert!((x_multiblock_weight(24) - 4.0).abs() < 1e-6);
+        // num_blocks=32 → 1 + min(4, 3) = 4.0 (cap is on the SECOND term)
+        // Wait: 32/8 = 4.0, min(4.0, 3.0) = 3.0, so w = 1 + 3 = 4.0
+        assert!((x_multiblock_weight(32) - 4.0).abs() < 1e-6);
+        // num_blocks=64 → 64/8 = 8, min(8, 3) = 3, w = 4
+        assert!((x_multiblock_weight(64) - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_apply_x_multiblock_weight_to_loss_no_op_for_singleton() {
+        let mut loss = vec![1.0_f64, 2.0, 3.0];
+        let original = loss.clone();
+        apply_x_multiblock_weight_to_loss(&mut loss, 1);
+        assert_eq!(loss, original);
+    }
+
+    #[test]
+    fn test_apply_x_multiblock_weight_to_loss_scales_by_w() {
+        let mut loss = vec![1.0_f64, 2.0, 3.0];
+        // num_blocks=4 → w = 1.5
+        apply_x_multiblock_weight_to_loss(&mut loss, 4);
+        let expected = vec![1.5_f64, 3.0, 4.5];
+        for i in 0..3 {
+            assert!((loss[i] - expected[i]).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_apply_x_multiblock_weight_to_entropy_no_op_for_singleton() {
+        let mut e = vec![10.0_f32, 20.0];
+        apply_x_multiblock_weight_to_entropy(&mut e, 1);
+        assert_eq!(e, vec![10.0_f32, 20.0]);
+    }
+
+    #[test]
+    fn test_apply_x_multiblock_weight_to_entropy_scales_by_w() {
+        let mut e = vec![10.0_f32, 20.0];
+        // num_blocks=8 → w = 2.0
+        apply_x_multiblock_weight_to_entropy(&mut e, 8);
+        assert!((e[0] - 20.0).abs() < 1e-6);
+        assert!((e[1] - 40.0).abs() < 1e-6);
     }
 
     #[test]
