@@ -151,15 +151,19 @@ fn main() {
             .expect("set_reference for baselines");
 
         for (di, &d) in distances.iter().enumerate() {
-            // Uniform
+            // Encode each path ONCE and retain reconstructions for both
+            // butteraugli (above) and ssim2 (below) measurements. Avoids
+            // the ~3 redundant encodes per cell that the earlier
+            // measure-then-re-encode-for-ssim2 pattern incurred.
             let q_un = distance_to_qac(d);
-            let (rr, gg, bb) = lossy.encode_one(&enc, &r, &g, &b, q_un);
-            let s_un = measure(&mut bg, &rr, &gg, &bb);
-            // Initial AQ
+            let (rr_un, gg_un, bb_un) = lossy.encode_one(&enc, &r, &g, &b, q_un);
+            let s_un = measure(&mut bg, &rr_un, &gg_un, &bb_un);
+
             let initial_aq = lossy.compute_aq_field(&enc, &r, &g, &b, d);
-            let (rr, gg, bb) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
-            let s_aq = measure(&mut bg, &rr, &gg, &bb);
-            // Refined
+            let (rr_aq, gg_aq, bb_aq) =
+                lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
+            let s_aq = measure(&mut bg, &rr_aq, &gg_aq, &bb_aq);
+
             let refined = refine_aq_field_gpu(
                 &enc,
                 &lossy,
@@ -174,8 +178,8 @@ fn main() {
                 |_| (),
             )
             .expect("refine_aq_field_gpu");
-            let (rr, gg, bb) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &refined);
-            let s_rf = measure(&mut bg, &rr, &gg, &bb);
+            let (rr_rf, gg_rf, bb_rf) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &refined);
+            let s_rf = measure(&mut bg, &rr_rf, &gg_rf, &bb_rf);
 
             // Smart-gate: distance + content-aware with configurable
             // threshold (SMART_THRESHOLD env var, default 1.10).
@@ -194,8 +198,6 @@ fn main() {
                 |_| (),
             )
             .expect("refine_aq_field_gpu_smart_with_threshold");
-            // smart_outcome is correct as a "decision". Measure the
-            // selected field's actual butteraugli score.
             let (rrs, ggs, bbs) =
                 lossy.encode_one_adaptive(&enc, &r, &g, &b, &smart_outcome.aq_field);
             let s_sm = measure(&mut bg, &rrs, &ggs, &bbs);
@@ -205,30 +207,22 @@ fn main() {
                 SmartGatePath::Refined => smart_paths[di][2] += 1,
             }
 
-            // SSIMULACRA2 cross-validation: re-use the uniform recon
-            // from earlier (rr/gg/bb were overwritten by AQ/refined; we
-            // need to encode uniform again here for ssim2).
+            // SSIMULACRA2 cross-validation: reuse the four reconstructions
+            // captured above (no redundant re-encoding).
             let to_rgb3 = |buf: &[u8]| -> Vec<[u8; 3]> {
                 buf.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
             };
             let src_rgb3 = to_rgb3(&pixels);
             let src_img = imgref::ImgVec::new(src_rgb3, w as usize, h as usize);
-
-            let (rr_un, gg_un, bb_un) = lossy.encode_one(&enc, &r, &g, &b, q_un);
             let make_dst = |rr: &[f32], gg: &[f32], bb: &[f32]| {
-                let srgb = linear_planar_to_srgb_u8_interleaved(rr, gg, bb, w as usize, h as usize);
+                let srgb =
+                    linear_planar_to_srgb_u8_interleaved(rr, gg, bb, w as usize, h as usize);
                 imgref::ImgVec::new(to_rgb3(&srgb), w as usize, h as usize)
             };
             let dst_un = make_dst(&rr_un, &gg_un, &bb_un);
-            // Re-encode AQ + refined to capture pixels for ssim2 (the
-            // first-pass measurements above did not retain rec_*).
-            let (rr_aq, gg_aq, bb_aq) =
-                lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
             let dst_aq = make_dst(&rr_aq, &gg_aq, &bb_aq);
-            let (rr_rf, gg_rf, bb_rf) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &refined);
             let dst_rf = make_dst(&rr_rf, &gg_rf, &bb_rf);
             let dst_sm = make_dst(&rrs, &ggs, &bbs);
-
             let s2_un = fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_un.as_ref())
                 .expect("ssim2 un") as f64;
             let s2_aq = fast_ssim2::compute_ssimulacra2(src_img.as_ref(), dst_aq.as_ref())
