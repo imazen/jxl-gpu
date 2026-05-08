@@ -70,6 +70,61 @@ pub fn entropy_coeffs_pixel_kernel(
     output[oo + 3usize] = f32::new(0.0);
 }
 
+/// Broadcast-weights variant of [`entropy_coeffs_pixel_kernel`].
+/// `weights` and `inv_weights` are each exactly `n` f32 (one quant
+/// matrix and its inverse), broadcast across all blocks. Saves
+/// `2 * (num_blocks - 1) * n * 4` bytes of upload traffic — twice
+/// the savings of the dequant variants because this kernel reads
+/// both forward AND inverse weights.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn entropy_coeffs_pixel_kernel_broadcast_w(
+    block_c: &Array<f32>,
+    block_y: &Array<f32>,
+    weights: &Array<f32>,
+    inv_weights: &Array<f32>,
+    error_coeffs: &mut Array<f32>,
+    output: &mut Array<f32>,
+    n: u32,
+    cmap_factor: f32,
+    quant: f32,
+    k_cost_delta: f32,
+) {
+    let block_idx = ABSOLUTE_POS;
+    let n_per = n as usize;
+    let n_blocks = block_c.len() / n_per;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * n_per;
+    let oo = block_idx * 4usize;
+
+    let mut entropy_sum = f32::new(0.0);
+    let mut nzeros_sum = f32::new(0.0);
+    let mut i: u32 = 0u32;
+    while (i as usize) < n_per {
+        let iu = i as usize;
+        let val_in = block_c[off + iu];
+        let val_y = block_y[off + iu] * cmap_factor;
+        // Broadcast: weights[iu] / inv_weights[iu] not [off + iu].
+        let val = (val_in - val_y) * inv_weights[iu] * quant;
+        let rval = f32::round(val);
+        let diff = val - rval;
+        error_coeffs[off + iu] = weights[iu] * diff;
+        let q = f32::abs(rval);
+        entropy_sum = entropy_sum + f32::sqrt(q) * k_cost_delta;
+        if q != 0.0f32 {
+            nzeros_sum = nzeros_sum + 1.0f32;
+        }
+        i += 1u32;
+    }
+
+    output[oo] = entropy_sum;
+    output[oo + 1usize] = nzeros_sum;
+    output[oo + 2usize] = f32::new(0.0);
+    output[oo + 3usize] = f32::new(0.0);
+}
+
 /// Coefficient-domain mode: skips error_coeffs writes, computes info_loss
 /// and info_loss2, adds k_cost2 for q >= 1.5.
 #[cube(launch_unchecked)]
