@@ -375,6 +375,162 @@ pub fn scatter_block_to_plane(
     }
 }
 
+/// Fast 1D IDCT for N=4 — bit-for-bit port of upstream
+/// `vardct::dct::inverse::idct1d_4`. Pure scalar; matched inverse of
+/// our private `dct1d_4` (i.e., `idct1d_4(dct1d_4(x)) == x`).
+fn idct1d_4(mem: &mut [f32]) {
+    const INV_SQRT2: f32 = 1.0 / 1.414_213_5;
+    const INV_WC4: [f32; 2] = [1.0 / 0.541_196_1, 1.0 / 1.306_563_0];
+    let (a, b, c, d) = (mem[0], mem[2], mem[1], mem[3]); // de-interleave
+    // Reverse B transform on odd half.
+    let odd0 = (c - d) * INV_SQRT2;
+    // Reverse idct1d_2 on odd half.
+    let o0_pre = (odd0 + d) * 0.5;
+    let o1_pre = (odd0 - d) * 0.5;
+    // Reverse Wc multipliers (multiply by reciprocal).
+    let o0 = o0_pre * INV_WC4[0];
+    let o1 = o1_pre * INV_WC4[1];
+    // Reverse idct1d_2 on even half.
+    let e0 = (a + b) * 0.5;
+    let e1 = (a - b) * 0.5;
+    mem[0] = (e0 + o0) * 0.5;
+    mem[1] = (e1 + o1) * 0.5;
+    mem[2] = (e1 - o1) * 0.5;
+    mem[3] = (e0 - o0) * 0.5;
+}
+
+/// Forward DC extraction for DCT32×32 — inverse of
+/// [`restore_llf_dct32x32`]. Mirrors upstream's
+/// `dc_from_dct_32x32` (forward_large.rs:68).
+///
+/// Takes the 16 LLF coefficient values from a fully-populated 32×32
+/// coefficient block (positions `coeffs[iy * 32 + ix]` for
+/// `iy, ix in 0..4`) and returns the 4×4 DC grid that the encoder
+/// would store. Inputs are in the same order as
+/// `restore_llf_dct32x32`'s output.
+///
+/// Math (forward direction):
+/// ```text
+///   block[iy*4+ix] = llf[iy*4+ix] * SCALE_32_TO_4[iy] * SCALE_32_TO_4[ix] * 16.0
+///   4x4 IDCT: idct1d_4(rows), transpose, idct1d_4(rows)
+/// ```
+pub fn dc_from_dct_32x32(llf_grid: [f32; 16]) -> [f32; 16] {
+    let mut block = [0.0_f32; 16];
+    for iy in 0..4 {
+        for ix in 0..4 {
+            block[iy * 4 + ix] = llf_grid[iy * 4 + ix]
+                * DCT_RESAMPLE_SCALE_32_TO_4[iy]
+                * DCT_RESAMPLE_SCALE_32_TO_4[ix]
+                * 16.0;
+        }
+    }
+    // 4x4 IDCT: idct1d_4 on rows, transpose, idct1d_4 on rows.
+    for iy in 0..4 {
+        idct1d_4(&mut block[iy * 4..(iy + 1) * 4]);
+    }
+    let mut transposed = [0.0_f32; 16];
+    for iy in 0..4 {
+        for ix in 0..4 {
+            transposed[ix * 4 + iy] = block[iy * 4 + ix];
+        }
+    }
+    for iy in 0..4 {
+        idct1d_4(&mut transposed[iy * 4..(iy + 1) * 4]);
+    }
+    transposed
+}
+
+/// Forward DC extraction for DCT32×16 — inverse of
+/// [`restore_llf_dct32x16`]. Mirrors upstream
+/// `dc_from_dct_32x16` (forward_large.rs:139).
+///
+/// Takes 8 LLF values (the 2×4 LLF block at positions
+/// `coeffs[iy * 32 + ix]` for `iy in 0..2, ix in 0..4`) and returns
+/// the 4×2 DC grid in row-major (`dc[iy * 2 + ix]` for
+/// `iy in 0..4, ix in 0..2`).
+///
+/// Math: scale + compensation × 4, IDCT 4-pt on rows, transpose,
+/// 2-pt IDCT (unnormalized; the ×4 compensation factor absorbs the
+/// `*0.5` that idct1d_2 would otherwise apply).
+pub fn dc_from_dct_32x16(llf_grid: [f32; 8]) -> [f32; 8] {
+    // llf_grid[iy*4+ix] for iy in 0..2, ix in 0..4 (matches restore_llf_dct32x16 output).
+    let mut block = [0.0_f32; 8];
+    for iy in 0..2 {
+        for ix in 0..4 {
+            block[iy * 4 + ix] = llf_grid[iy * 4 + ix]
+                * DCT_RESAMPLE_SCALE_16_TO_2[iy]
+                * DCT_RESAMPLE_SCALE_32_TO_4[ix]
+                * 4.0;
+        }
+    }
+    // IDCT on 4-element rows (2 rows).
+    idct1d_4(&mut block[0..4]);
+    idct1d_4(&mut block[4..8]);
+    // Transpose 2×4 → 4×2.
+    let mut t = [0.0_f32; 8];
+    for iy in 0..2 {
+        for ix in 0..4 {
+            t[ix * 2 + iy] = block[iy * 4 + ix];
+        }
+    }
+    // Unnormalized 2-pt IDCT on each of 4 rows of 2 (no *0.5).
+    for iy in 0..4 {
+        let a = t[iy * 2];
+        let b = t[iy * 2 + 1];
+        t[iy * 2] = a + b;
+        t[iy * 2 + 1] = a - b;
+    }
+    t
+}
+
+/// Forward DC extraction for DCT16×32 — inverse of
+/// [`restore_llf_dct16x32`]. Mirrors upstream
+/// `dc_from_dct_16x32` (the ROWS<COLS branch, transpose).
+///
+/// Takes 8 LLF values (the 2×4 LLF block at positions
+/// `coeffs[iy * 32 + ix]` for `iy in 0..2, ix in 0..4`) and returns
+/// the 2×4 DC grid in row-major (`dc[iy * 4 + ix]`).
+///
+/// Math: scale + compensation × 4, 2-pt IDCT (unnormalized) on rows
+/// of 2 after transpose, then IDCT 4-pt on rows of 4. Transposes
+/// match the inverse of `restore_llf_dct16x32`'s row-major path.
+pub fn dc_from_dct_16x32(llf_grid: [f32; 8]) -> [f32; 8] {
+    let mut block = [0.0_f32; 8];
+    for iy in 0..2 {
+        for ix in 0..4 {
+            block[iy * 4 + ix] = llf_grid[iy * 4 + ix]
+                * DCT_RESAMPLE_SCALE_16_TO_2[iy]
+                * DCT_RESAMPLE_SCALE_32_TO_4[ix]
+                * 4.0;
+        }
+    }
+    // Transpose 2x4 → 4x2.
+    let mut t = [0.0_f32; 8];
+    for iy in 0..2 {
+        for ix in 0..4 {
+            t[ix * 2 + iy] = block[iy * 4 + ix];
+        }
+    }
+    // Unnormalized 2-pt IDCT on each of 4 rows of 2.
+    for iy in 0..4 {
+        let a = t[iy * 2];
+        let b = t[iy * 2 + 1];
+        t[iy * 2] = a + b;
+        t[iy * 2 + 1] = a - b;
+    }
+    // Transpose back 4x2 → 2x4.
+    let mut result = [0.0_f32; 8];
+    for iy in 0..4 {
+        for ix in 0..2 {
+            result[ix * 4 + iy] = t[iy * 2 + ix];
+        }
+    }
+    // IDCT on 4-element rows (2 rows).
+    idct1d_4(&mut result[0..4]);
+    idct1d_4(&mut result[4..8]);
+    result
+}
+
 /// Forward DC extraction for DCT16×16 — bit-for-bit inverse of
 /// [`restore_llf_dct16x16`]. Mirrors upstream
 /// `vardct::dct::forward_large::dc_from_dct_16x16`.
@@ -1633,6 +1789,132 @@ mod tests {
         assert!((r[0] - c).abs() < 1e-5);
         for i in 1..16 {
             assert!(r[i].abs() < 1e-5, "pos {i}: got {} expected 0", r[i]);
+        }
+    }
+
+    #[test]
+    fn test_dct32x32_forward_inverse_roundtrip() {
+        // 6 trial inputs covering corner cases.
+        let trials: [[f32; 16]; 6] = [
+            // single non-zero LLF positions to catch index/sign errors
+            {
+                let mut a = [0.0_f32; 16];
+                a[0] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 16];
+                a[5] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 16];
+                a[15] = 1.0;
+                a
+            },
+            // sign-mixed
+            {
+                let mut a = [0.0_f32; 16];
+                for (i, v) in a.iter_mut().enumerate() {
+                    *v = if i % 2 == 0 { 0.5 } else { -0.5 };
+                }
+                a
+            },
+            // checkerboard
+            {
+                let mut a = [0.0_f32; 16];
+                for (i, v) in a.iter_mut().enumerate() {
+                    *v = if (i / 4 + i % 4) % 2 == 0 { 1.0 } else { -1.0 };
+                }
+                a
+            },
+            // arbitrary
+            [
+                3.14, -2.71, 1.41, 0.577, -1.0, 2.0, -3.0, 4.0, 0.1, -0.2, 0.3, -0.4, 5.5, -6.6,
+                7.7, -8.8,
+            ],
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            let dc = dc_from_dct_32x32(*trial);
+            let restored = restore_llf_dct32x32(dc);
+            for i in 0..16 {
+                assert!(
+                    (restored[i] - trial[i]).abs() < 1e-3,
+                    "trial {ti} pos {i}: got {} expected {}",
+                    restored[i],
+                    trial[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dct32x16_forward_inverse_roundtrip() {
+        let trials: [[f32; 8]; 5] = [
+            {
+                let mut a = [0.0_f32; 8];
+                a[0] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 8];
+                a[3] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 8];
+                a[7] = 1.0;
+                a
+            },
+            [0.5, -0.3, 0.7, -0.2, 1.1, -1.7, 0.9, -2.3],
+            [3.14, -2.71, 1.41, 0.577, -1.0, 2.0, -3.0, 4.0],
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            let dc = dc_from_dct_32x16(*trial);
+            let restored = restore_llf_dct32x16(dc);
+            for i in 0..8 {
+                assert!(
+                    (restored[i] - trial[i]).abs() < 1e-4,
+                    "trial {ti} pos {i}: got {} expected {}",
+                    restored[i],
+                    trial[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dct16x32_forward_inverse_roundtrip() {
+        let trials: [[f32; 8]; 5] = [
+            {
+                let mut a = [0.0_f32; 8];
+                a[0] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 8];
+                a[3] = 1.0;
+                a
+            },
+            {
+                let mut a = [0.0_f32; 8];
+                a[7] = 1.0;
+                a
+            },
+            [0.5, -0.3, 0.7, -0.2, 1.1, -1.7, 0.9, -2.3],
+            [3.14, -2.71, 1.41, 0.577, -1.0, 2.0, -3.0, 4.0],
+        ];
+        for (ti, trial) in trials.iter().enumerate() {
+            let dc = dc_from_dct_16x32(*trial);
+            let restored = restore_llf_dct16x32(dc);
+            for i in 0..8 {
+                assert!(
+                    (restored[i] - trial[i]).abs() < 1e-4,
+                    "trial {ti} pos {i}: got {} expected {}",
+                    restored[i],
+                    trial[i]
+                );
+            }
         }
     }
 
