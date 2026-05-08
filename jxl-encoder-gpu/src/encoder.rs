@@ -58,16 +58,28 @@ use crate::launch::pixel_loss::pixel_loss;
 use crate::launch::quantize::quantize_dct8;
 use crate::launch::xyb::{xyb_forward, xyb_inverse};
 
-/// GPU-accelerated JXL encoder. Holds a long-lived cubecl client plus
-/// per-(width, height) GPU buffer caches.
+/// GPU-accelerated JXL encoder. Holds a long-lived cubecl client.
 ///
-/// Construct once per process; reuse across many encodes. Per-instance
-/// allocation is expensive (hundreds of ms at 1MP); the cache amortizes
-/// it. See `kernels::xyb` and friends for the underlying kernels.
+/// Construct once per process; reuse across many encodes. Per-call
+/// `client.create_from_slice(...)` allocations on the cubecl backend
+/// are not free (hundreds of ms at 1MP per call on first allocation;
+/// the cubecl backend pools internally for subsequent allocations of
+/// the same size). For a perf-critical loop calling many encodes,
+/// the [`crate::persistent`] module's `GpuPlane` / `GpuBlocks` types
+/// let you upload once and reuse the resulting `Handle` across
+/// launches without round-tripping through `Vec<f32>`.
+///
+/// **TODO** (`encoder.rs:71`): a `HashMap<(u32, u32), GpuInstance<R>>`
+/// per-(w,h) buffer cache could pool the intermediate per-launch
+/// allocations across calls of the same dims. Not implemented because
+/// (a) cubecl's backend allocator may already pool, and (b) we don't
+/// yet have bench numbers showing per-call alloc is the bottleneck.
+/// Cf. global TODO in `PORT_STATUS.md` "Per-(w,h) instance pre-allocation
+/// cache".
+///
+/// See `kernels::xyb` and friends for the underlying kernels.
 pub struct GpuEncoder<R: Runtime> {
     client: ComputeClient<R>,
-    // TODO: per-(w,h) buffer cache:
-    // instances: HashMap<(u32, u32), GpuInstance<R>>,
     _runtime: core::marker::PhantomData<R>,
 }
 
