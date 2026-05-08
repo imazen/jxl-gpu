@@ -26,7 +26,10 @@ jxl-encoder = { workspace = true, optional = true, features = ["std"] }
 
 [dev-dependencies]
 jxl-encoder-simd = { workspace = true }
-jxl-encoder = { workspace = true, features = ["std"] }
+# `__internals` exposes pub(crate) symbols (epf_step0_strip,
+# adjust_quant_block_ac, compute_scaled_constants, ytox_ratio,
+# ytob_ratio, INV_DC_QUANT) for G5.1-compliant parity testing.
+jxl-encoder = { workspace = true, features = ["std", "__internals"] }
 bytemuck = { workspace = true }
 image = { workspace = true }
 jxl = { workspace = true }

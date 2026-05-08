@@ -73,98 +73,32 @@ fn main() {
         };
     }
 
-    // Constants copied from upstream `jxl_encoder::vardct::epf`.
+    // CPU reference: call upstream's epf_step0_strip directly via the
+    // __internals cargo feature. G5.1-compliant — no hand-rolled
+    // re-derivation. Constants (EPF_PASS0_SIGMA_SCALE,
+    // EPF_BORDER_SAD_MUL, EPF_CHANNEL_SCALE, EPF0_NEIGHBORS) live in
+    // the upstream module and don't need re-declaration here.
     const EPF_PASS0_SIGMA_SCALE: f32 = 0.9;
     const EPF_BORDER_SAD_MUL: f32 = 2.0 / 3.0;
-    const EPF_CHANNEL_SCALE: [f32; 3] = [40.0, 5.0, 3.5];
-    const NEIGHBORS: [(isize, isize); 12] = [
-        (-2, 0),
-        (-1, -1),
-        (-1, 0),
-        (-1, 1),
-        (0, -2),
-        (0, -1),
-        (0, 1),
-        (0, 2),
-        (1, -1),
-        (1, 0),
-        (1, 1),
-        (2, 0),
-    ];
     let sigma_scale = EPF_PASS0_SIGMA_SCALE * 1.65;
     let border_sigma_mul = EPF_BORDER_SAD_MUL;
 
-    // CPU reference: line-by-line port of upstream epf_step0_strip.
-    let pad = PAD;
     let mut cpu_x = vec![0.0f32; N];
     let mut cpu_y = vec![0.0f32; N];
     let mut cpu_b = vec![0.0f32; N];
-    let planes = [&in_x[..], &in_y[..], &in_b[..]];
-    for py in 0..H {
-        for px in 0..W {
-            let by = py / 8;
-            let bx = px / 8;
-            let is = inv_sigma[by * XB + bx];
-            let oidx = py * W + px;
-            if is == 0.0 {
-                let pidx = (py + pad) * STRIDE + (px + pad);
-                cpu_x[oidx] = planes[0][pidx];
-                cpu_y[oidx] = planes[1][pidx];
-                cpu_b[oidx] = planes[2][pidx];
-                continue;
-            }
-            let mod_x = px % 8;
-            let mod_y = py % 8;
-            let at_border = mod_x == 0 || mod_x == 7 || mod_y == 0 || mod_y == 7;
-            let bm = if at_border { border_sigma_mul } else { 1.0 };
-            let eff_is = is * sigma_scale * bm;
-
-            let cx = px + pad;
-            let cy = py + pad;
-            let center_idx = cy * STRIDE + cx;
-            let mut total_w = 1.0_f32;
-            let mut sum_x = planes[0][center_idx];
-            let mut sum_y = planes[1][center_idx];
-            let mut sum_b = planes[2][center_idx];
-
-            for &(dy, dx) in &NEIGHBORS {
-                let nx = (cx as isize + dx) as usize;
-                let ny = (cy as isize + dy) as usize;
-                // sad_3x3_plus
-                let c_off = [
-                    cy * STRIDE + cx,
-                    (cy - 1) * STRIDE + cx,
-                    cy * STRIDE + (cx - 1),
-                    cy * STRIDE + (cx + 1),
-                    (cy + 1) * STRIDE + cx,
-                ];
-                let n_off = [
-                    ny * STRIDE + nx,
-                    (ny - 1) * STRIDE + nx,
-                    ny * STRIDE + (nx - 1),
-                    ny * STRIDE + (nx + 1),
-                    (ny + 1) * STRIDE + nx,
-                ];
-                let mut sad = 0.0_f32;
-                for i in 0..5 {
-                    for c in 0..3 {
-                        sad += (planes[c][c_off[i]] - planes[c][n_off[i]]).abs()
-                            * EPF_CHANNEL_SCALE[c];
-                    }
-                }
-                let weight = (sad * eff_is + 1.0).max(0.0);
-                let n_idx = ny * STRIDE + nx;
-                total_w += weight;
-                sum_x += weight * planes[0][n_idx];
-                sum_y += weight * planes[1][n_idx];
-                sum_b += weight * planes[2][n_idx];
-            }
-            let inv_tw = 1.0 / total_w;
-            cpu_x[oidx] = sum_x * inv_tw;
-            cpu_y[oidx] = sum_y * inv_tw;
-            cpu_b[oidx] = sum_b * inv_tw;
-        }
-    }
+    jxl_encoder::__internals::epf_step0_strip_free(
+        [&in_x, &in_y, &in_b],
+        &inv_sigma,
+        XB,
+        W,
+        0, // py_start
+        H, // rows = full image height
+        STRIDE,
+        PAD,
+        &mut cpu_x,
+        &mut cpu_y,
+        &mut cpu_b,
+    );
 
     // GPU
     let h_ix = client.create_from_slice(f32::as_bytes(&in_x));
