@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Smart content-aware gate: refine_aq_field_gpu_smart (`b6f483a5`, `f9b0ca6a`, `52dd19f2`)
+
+Production-ready content-aware gating for the butteraugli refinement
+loop. Three commits land progressively:
+
+- `b6f483a5`: distance-only auto-gate (`refine_aq_field_gpu_auto`)
+  with `REFINEMENT_DISTANCE_THRESHOLD = 1.5` empirically derived
+  from the 8-image CLIC sweep.
+- `f9b0ca6a`: initial smart-gate concept that measured AQ-vs-uniform
+  only at low distance.
+- `52dd19f2`: final smart gate that measures AQ-vs-uniform at ALL
+  distances and falls back to uniform when AQ regresses by > 10%.
+
+**Final smart-gate logic:**
+1. Always measure AQ + uniform baselines (~100 ms at 1024² on RTX 5070).
+2. If AQ score > uniform × `SMART_GATE_AQ_REGRESSION_RATIO` (1.10),
+   fall back to a uniform qac field (refinement can't recover from a
+   doomed initial AQ).
+3. Else if `target_distance > 1.5`, return initial AQ as-is
+   (refinement gated by distance).
+4. Else, run the full refinement loop.
+
+**16-image CLIC corpus sweep results:**
+
+| dist | uniform µ | AQ µ | refined µ | **smart µ** | smart paths [DistGate / AQ→un / Refined] |
+|---|---|---|---|---|---|
+| 1.0 | 1.2386 | 1.4221 | 1.2105 | **1.1886** (-4.0% vs uniform) | 0 / 12 / 4 |
+| 2.0 | 2.0245 | 2.2413 | 2.1195 | **2.0240** (-0.0%) | 7 / 9 / 0 |
+| 4.0 | 3.2582 | 3.5580 | 3.5160 | **3.2417** (-0.5%) | 9 / 7 / 0 |
+
+The smart gate **never regresses uniform** at any distance and gains
+real quality at d=1.0 (-4.0%, refining 4 of 16 images). The previous
+distance-only auto-gate at d=2.0 returned initial AQ (+10.7% worse
+than uniform); now smart matches uniform exactly. At d=4.0 the
+distance gate kept AQ regressions; smart catches them and falls back
+to uniform, beating uniform by -0.5%.
+
+`SmartGateOutcome` returns the selected field plus diagnostic scores
+(`initial_aq_score`, `uniform_score`) and the path taken
+(`SmartGatePath::{DistanceGated, AqRegressedFallToUniform, Refined}`)
+so callers can log per-image telemetry.
+
+Sweep results archived at
+`/mnt/v/output/jxl-encoder-gpu/butteraugli-refinement-sweep/sweep_clic_16imgs_smart_2026-05-08.log`.
+
 ### Corpus-level refinement validation: butteraugli_refinement_corpus_sweep (`36b91171`)
 
 Multi-image sweep example that validates whether the single-image
