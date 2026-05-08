@@ -164,6 +164,47 @@ fn tile_dims(raw_strategy: u8) -> (usize, usize) {
     }
 }
 
+/// Strategy-aware batched forward DCT for already-gathered
+/// block-major pixel data. Mirrors [`apply_dct_batch_gpu`]'s
+/// dispatch arm without the gather step — useful when callers
+/// have already produced block-major input (e.g., the entropy
+/// orchestrator that takes per-block pixel buffers directly).
+///
+/// `pixel_blocks.len()` MUST equal `n_blocks * tile_pixels` for the
+/// strategy (e.g., `n_blocks * 64` for DCT8, `n_blocks * 256` for
+/// DCT16x16, etc.). Returns the per-block coefficient buffer of
+/// length `n_blocks * coeff_count_per_strategy(raw_strategy)`.
+///
+/// AFV0-3 strategies are NOT supported here — use
+/// `forks::afv::afv_transform_batch_gpu` instead.
+pub fn dct_blocks_gpu<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    pixel_blocks: &[f32],
+    raw_strategy: u8,
+) -> Vec<f32> {
+    match raw_strategy {
+        RAW_STRATEGY_DCT => enc.dct_8x8_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT4X8 => enc.dct_4x8_full_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT8X4 => enc.dct_8x4_full_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT4X4 => enc.dct_4x4_full_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT16X8 => enc.dct_16x8_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT8X16 => enc.dct_8x16_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT16X16 => enc.dct_16x16_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT32X16 => enc.dct_32x16_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT16X32 => enc.dct_16x32_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT32X32 => enc.dct_32x32_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT64X32 => enc.dct_64x32_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT32X64 => enc.dct_32x64_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT64X64 => enc.dct_64x64_blocks(pixel_blocks),
+        RAW_STRATEGY_IDENTITY => enc.identity_blocks(pixel_blocks),
+        RAW_STRATEGY_DCT2X2 => enc.dct2x2_blocks(pixel_blocks),
+        _ => panic!(
+            "dct_blocks_gpu: unsupported strategy {raw_strategy} \
+             (use forks::afv::afv_transform_batch_gpu for AFV0-3)"
+        ),
+    }
+}
+
 /// Batched DCT dispatch on the GPU. All `block_coords` MUST use the
 /// same `raw_strategy`.
 ///
