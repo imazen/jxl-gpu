@@ -37,6 +37,10 @@ jxl = { path = "/home/lilith/work/third-party/jxl-rs/jxl" }
 fast-ssim2 = { path = "../fast-ssim2/fast-ssim2", default-features = true, features = ["imgref"] }
 imgref = "1"
 
+# GPU butteraugli for the (opt-in) butteraugli-loop quant refinement.
+# Pinned to the zenmetrics workspace path; same cubecl version as us.
+butteraugli-gpu = { path = "../zenmetrics/crates/butteraugli-gpu", default-features = false }
+
 [profile.dev]
 # Compile at opt-level=3 even in debug builds — GPU kernels and
 # DCT inner loops are too slow at -O0 to be useful during iteration.

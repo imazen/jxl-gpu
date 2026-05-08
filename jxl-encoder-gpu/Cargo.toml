@@ -19,10 +19,16 @@ cpu = ["cubecl/cpu"]
 # `encoder` brings in the jxl-encoder dep for the high-level GpuEncoder
 # facade. Disable for kernel-library-only builds (smaller dep tree).
 encoder = ["dep:jxl-encoder"]
+# `butteraugli-loop` enables the GPU butteraugli orchestrator
+# (`forks::butteraugli_loop_gpu`) that mirrors upstream's
+# `vardct::butteraugli_loop` but runs the per-iteration distance
+# compute on GPU via zenmetrics/butteraugli-gpu. Off by default.
+butteraugli-loop = ["dep:butteraugli-gpu"]
 
 [dependencies]
 cubecl = { workspace = true }
 jxl-encoder = { workspace = true, optional = true, features = ["std"] }
+butteraugli-gpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 jxl-encoder-simd = { workspace = true }

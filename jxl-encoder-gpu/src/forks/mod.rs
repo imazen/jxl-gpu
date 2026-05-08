@@ -46,6 +46,8 @@
 
 pub mod adaptive_quant;
 pub mod afv;
+#[cfg(feature = "butteraugli-loop")]
+pub mod butteraugli_loop;
 pub mod cfl;
 pub mod cost;
 pub mod dequant;
