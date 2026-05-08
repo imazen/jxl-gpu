@@ -161,6 +161,47 @@ fn dct1d_8(mem: &mut [f32]) {
     mem[7] = b3;
 }
 
+/// Compute the per-(8×8) block DC value for a padded spatial plane.
+/// Returns one f32 per block in raster order (row-major over 8×8
+/// block grid).
+///
+/// DC value matches the DCT8 forward DCT's coefficient[0]: the mean
+/// of the 64 pixels in the block multiplied by 8.0 (because the DCT
+/// orthonormal basis gives coefficient[0] = sum / sqrt(64) = sum / 8;
+/// for our convention coefficient[0] = mean × 8).
+///
+/// Used by [`encode_and_reconstruct_mixed_strategy_single_channel`]
+/// to build the `dc_grid_per_8x8_block` argument that
+/// [`dispatch_restore_llf`] consumes.
+pub fn compute_dc_grid_per_8x8_block(
+    plane: &[f32],
+    padded_width: usize,
+    padded_height: usize,
+) -> Vec<f32> {
+    debug_assert_eq!(plane.len(), padded_width * padded_height);
+    debug_assert!(padded_width.is_multiple_of(8));
+    debug_assert!(padded_height.is_multiple_of(8));
+    let xsize_blocks = padded_width / 8;
+    let ysize_blocks = padded_height / 8;
+    let mut out = alloc::vec![0.0_f32; xsize_blocks * ysize_blocks];
+    for by in 0..ysize_blocks {
+        for bx in 0..xsize_blocks {
+            let mut sum = 0.0_f32;
+            let y0 = by * 8;
+            let x0 = bx * 8;
+            for dy in 0..8 {
+                let row_off = (y0 + dy) * padded_width + x0;
+                for dx in 0..8 {
+                    sum += plane[row_off + dx];
+                }
+            }
+            // mean × 8 = (sum / 64) × 8 = sum / 8
+            out[by * xsize_blocks + bx] = sum * 0.125;
+        }
+    }
+    out
+}
+
 /// `DCT_RESAMPLE_SCALE_64_TO_8[i]` — scale factors for the 8-point
 /// resample used by the DC-from-DCT64 forward operation.
 /// Bit-for-bit from upstream.
@@ -1900,6 +1941,38 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
+    /// DC grid mean × 8 invariant: uniform plane → all blocks same DC.
+    #[test]
+    fn test_compute_dc_grid_uniform() {
+        let plane = alloc::vec![0.5_f32; 16 * 16];
+        let dc = compute_dc_grid_per_8x8_block(&plane, 16, 16);
+        // 4 blocks (2×2 grid). Each block: 64 × 0.5 = 32, ×0.125 = 4.0.
+        assert_eq!(dc.len(), 4);
+        for v in &dc {
+            assert!((v - 4.0).abs() < 1e-5, "got {v}");
+        }
+    }
+
+    /// DC grid varies with content: gradient → distinct per-block DCs.
+    #[test]
+    fn test_compute_dc_grid_gradient() {
+        // 16x8 plane with gradient: pixel value = x.
+        let mut plane = alloc::vec![0.0_f32; 16 * 8];
+        for y in 0..8 {
+            for x in 0..16 {
+                plane[y * 16 + x] = x as f32;
+            }
+        }
+        let dc = compute_dc_grid_per_8x8_block(&plane, 16, 8);
+        // Two blocks. Block (0,0): pixels 0..7 each row, sum = 28*8 = 224, dc = 28.
+        // Block (1,0): pixels 8..15, sum = (8+15)*8/2*8 = 92*8 = 736 -- wait let me recompute.
+        // pixels x=8..15: 8+9+10+11+12+13+14+15 = 92. × 8 rows = 736. × 0.125 = 92.
+        // Block (0,0): 0..7 = 28. × 8 rows = 224. × 0.125 = 28.
+        assert_eq!(dc.len(), 2);
+        assert!((dc[0] - 28.0).abs() < 1e-4);
+        assert!((dc[1] - 92.0).abs() < 1e-4);
+    }
+
     /// Smoke test: encode_and_reconstruct_mixed_strategy_single_channel
     /// with a heterogeneous DCT8/DCT16x16 assignment over a synthetic
     /// uniform-DC plane. Verifies it composes end-to-end without panic
