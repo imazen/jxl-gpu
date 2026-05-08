@@ -125,6 +125,41 @@ pub fn dequant_dct8_blocks_gpu<R: Runtime>(
     )
 }
 
+/// Broadcast-weights variant of [`dequant_dct8_blocks_gpu`]. Each
+/// weights template is exactly 64 f32 (one DCT8 quant matrix per
+/// channel); the kernel broadcasts across all blocks. Saves
+/// `3 * (num_blocks - 1) * 64 * 4` bytes of upload traffic when the
+/// caller's existing pattern was replicating the matrix per-block.
+#[allow(clippy::too_many_arguments)]
+pub fn dequant_dct8_blocks_gpu_broadcast_w<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    quant_x: &[i32],
+    quant_y: &[i32],
+    quant_b: &[i32],
+    weights_x_template: &[f32],
+    weights_y_template: &[f32],
+    weights_b_template: &[f32],
+    qac_qm_x: &[f32],
+    qac_qm_y: &[f32],
+    qac_qm_b: &[f32],
+    x_factor: &[f32],
+    b_factor: &[f32],
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    enc.dequant_dct8_blocks_broadcast_w(
+        quant_x,
+        quant_y,
+        quant_b,
+        weights_x_template,
+        weights_y_template,
+        weights_b_template,
+        qac_qm_x,
+        qac_qm_y,
+        qac_qm_b,
+        x_factor,
+        b_factor,
+    )
+}
+
 /// Strategy-aware simple dequant (no CfL, no adjust_quant_bias).
 /// Computes `output[i] = quant[i] * weights[i]` for arbitrary
 /// `block_size` (DCT8 → 64, DCT16x16 → 256, DCT32x32 → 1024, etc.).

@@ -1422,7 +1422,7 @@ pub fn reconstruct_xyb_dct8_only_gpu<R: Runtime>(
     xsize_blocks: usize,
     ysize_blocks: usize,
 ) -> [Vec<f32>; 3] {
-    use crate::forks::dequant::dequant_dct8_blocks_gpu;
+    use crate::forks::dequant::dequant_dct8_blocks_gpu_broadcast_w;
     use crate::forks::transform::{RAW_STRATEGY_DCT, apply_idct_batch_gpu};
 
     let n_blocks = xsize_blocks * ysize_blocks;
@@ -1438,21 +1438,23 @@ pub fn reconstruct_xyb_dct8_only_gpu<R: Runtime>(
     debug_assert_eq!(x_factor.len(), n_blocks);
     debug_assert_eq!(b_factor.len(), n_blocks);
 
-    // Replicate per-block weight tables for every block (the GPU dequant
-    // kernel takes per-coefficient weights matching the quantized layout).
-    let mut weights_x = Vec::with_capacity(n_blocks * 64);
-    let mut weights_y = Vec::with_capacity(n_blocks * 64);
-    let mut weights_b = Vec::with_capacity(n_blocks * 64);
-    for _ in 0..n_blocks {
-        weights_x.extend_from_slice(weights_x_per_block);
-        weights_y.extend_from_slice(weights_y_per_block);
-        weights_b.extend_from_slice(weights_b_per_block);
-    }
-
-    // Step 1: GPU dequant (one launch, three channels).
-    let (mut dq_x, mut dq_y, mut dq_b) = dequant_dct8_blocks_gpu(
-        enc, quant_ac_x, quant_ac_y, quant_ac_b, &weights_x, &weights_y, &weights_b, qac_qm_x,
-        qac_qm_y, qac_qm_b, x_factor, b_factor,
+    // Step 1: GPU dequant (one launch, three channels) using
+    // broadcast-weights variant — saves the n_blocks-replication of
+    // the 3 × 64-float weight templates that the per-block variant
+    // required (4 MB per channel saved at 16384 blocks).
+    let (mut dq_x, mut dq_y, mut dq_b) = dequant_dct8_blocks_gpu_broadcast_w(
+        enc,
+        quant_ac_x,
+        quant_ac_y,
+        quant_ac_b,
+        weights_x_per_block.as_slice(),
+        weights_y_per_block.as_slice(),
+        weights_b_per_block.as_slice(),
+        qac_qm_x,
+        qac_qm_y,
+        qac_qm_b,
+        x_factor,
+        b_factor,
     );
 
     // Step 2: host DC override (overwrites position [b * 64] of each plane).

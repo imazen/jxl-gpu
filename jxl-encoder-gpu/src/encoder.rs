@@ -46,7 +46,7 @@ use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, 
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
 use crate::launch::denoise::denoise as denoise_launch;
-use crate::launch::dequant::dequant_dct8;
+use crate::launch::dequant::{dequant_dct8, dequant_dct8_broadcast_w};
 use crate::launch::entropy::entropy_coeffs_pixel;
 use crate::launch::epf::{epf_step0, epf_step1, epf_step2, pad_plane};
 use crate::launch::fuzzy_erosion::{fuzzy_erosion as fuzzy_erosion_launch, fuzzy_erosion_kmul};
@@ -1018,6 +1018,85 @@ impl<R: Runtime> GpuEncoder<R> {
             .client
             .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_coef]));
         dequant_dct8::<R>(
+            &self.client,
+            h_qx,
+            h_qy,
+            h_qb,
+            h_wx,
+            h_wy,
+            h_wb,
+            h_qmx,
+            h_qmy,
+            h_qmb,
+            h_xf,
+            h_bf,
+            h_ox.clone(),
+            h_oy.clone(),
+            h_ob.clone(),
+            num_blocks,
+        );
+        let xb = self.client.read_one(h_ox).expect("x");
+        let yb = self.client.read_one(h_oy).expect("y");
+        let bb = self.client.read_one(h_ob).expect("b");
+        (
+            f32::from_bytes(&xb).to_vec(),
+            f32::from_bytes(&yb).to_vec(),
+            f32::from_bytes(&bb).to_vec(),
+        )
+    }
+
+    /// Broadcast-weights variant of [`Self::dequant_dct8_blocks`].
+    /// Each `weights_*_template` is exactly 64 f32 (one DCT8 quant
+    /// matrix per channel); the kernel broadcasts across all blocks.
+    /// Saves `3 * (num_blocks - 1) * 64 * 4` bytes of upload traffic
+    /// when callers were previously replicating the matrix per-block.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dequant_dct8_blocks_broadcast_w(
+        &self,
+        quant_x: &[i32],
+        quant_y: &[i32],
+        quant_b: &[i32],
+        weights_x_template: &[f32],
+        weights_y_template: &[f32],
+        weights_b_template: &[f32],
+        qac_qm_x: &[f32],
+        qac_qm_y: &[f32],
+        qac_qm_b: &[f32],
+        x_factor: &[f32],
+        b_factor: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let n_coef = quant_x.len();
+        assert!(n_coef.is_multiple_of(64));
+        for (label, w) in [
+            ("weights_x_template", weights_x_template),
+            ("weights_y_template", weights_y_template),
+            ("weights_b_template", weights_b_template),
+        ] {
+            assert_eq!(w.len(), 64, "{label} must be exactly 64 f32 (got {})", w.len());
+        }
+        let nb = n_coef / 64;
+        let num_blocks = nb as u32;
+        let h_qx = self.client.create_from_slice(i32::as_bytes(quant_x));
+        let h_qy = self.client.create_from_slice(i32::as_bytes(quant_y));
+        let h_qb = self.client.create_from_slice(i32::as_bytes(quant_b));
+        let h_wx = self.client.create_from_slice(f32::as_bytes(weights_x_template));
+        let h_wy = self.client.create_from_slice(f32::as_bytes(weights_y_template));
+        let h_wb = self.client.create_from_slice(f32::as_bytes(weights_b_template));
+        let h_qmx = self.client.create_from_slice(f32::as_bytes(qac_qm_x));
+        let h_qmy = self.client.create_from_slice(f32::as_bytes(qac_qm_y));
+        let h_qmb = self.client.create_from_slice(f32::as_bytes(qac_qm_b));
+        let h_xf = self.client.create_from_slice(f32::as_bytes(x_factor));
+        let h_bf = self.client.create_from_slice(f32::as_bytes(b_factor));
+        let h_ox = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_coef]));
+        let h_oy = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_coef]));
+        let h_ob = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; n_coef]));
+        dequant_dct8_broadcast_w::<R>(
             &self.client,
             h_qx,
             h_qy,
