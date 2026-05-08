@@ -913,7 +913,8 @@ impl<R: Runtime> LossyEncoder<R> {
 
         // EPF chain (decoder edge-preserving filter). Runs after
         // gab_smooth on the reconstructed XYB planes, before
-        // xyb_to_linear.
+        // xyb_to_linear. Fully persistent — inputs stay on GPU
+        // through padding + 2-iter EPF chain (step 1 + step 2).
         //
         // Qac→quant_field mapping: our pipeline carries per-block
         // float qac in `qac_vec`. EPF's compute_inv_sigma_map expects
@@ -924,8 +925,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // upstream's `q = 0.39`). We map `u8_qf = clamp(qac * 50,
         // 1, 255)` and `quant_scale = 0.01`, giving
         // `quant_scale * raw_quant ≈ qac / 2 ≈ qf_float_equivalent`.
-        // Sharpness is uniform 4 (mid LUT index, libjxl's default
-        // when per-block sharpness selection is not run).
+        // Sharpness uniform 4 (libjxl default).
         let nb_blocks = (self.padded_width / 8) as usize
             * (self.padded_height / 8) as usize;
         debug_assert_eq!(qac_vec.len(), nb_blocks);
@@ -934,34 +934,62 @@ impl<R: Runtime> LossyEncoder<R> {
             .map(|&q| (q * 50.0).round().clamp(1.0, 255.0) as u8)
             .collect();
         let sharpness = vec![4_u8; nb_blocks];
-        let inv_sigma = crate::forks::epf::compute_inv_sigma_map(
+        let inv_sigma_vec = crate::forks::epf::compute_inv_sigma_map(
             &qf_u8,
             &sharpness,
             0.01,
             (self.padded_width / 8) as usize,
             (self.padded_height / 8) as usize,
         );
-        // Download persistent XYB planes (one upload per encode is
-        // unavoidable here because apply_epf_chain_gpu is Vec-based).
-        let xyb_x_vec = enc.download_plane(&recon_x_p);
-        let xyb_y_vec = enc.download_plane(&recon_y_p);
-        let xyb_b_vec = enc.download_plane(&recon_b_p);
-        let [post_x, post_y, post_b] = crate::forks::epf::apply_epf_chain_gpu(
-            enc,
-            &xyb_x_vec,
-            &xyb_y_vec,
-            &xyb_b_vec,
-            &inv_sigma,
-            2, // 2 iters: step 1 + step 2 (step 0 is 3+ iters)
+        let inv_sigma_h = enc.upload_inv_sigma(&inv_sigma_vec);
+        let xsize_blocks = self.padded_width / 8;
+        let ysize_blocks = self.padded_height / 8;
+
+        // Step 1 (5×5 plus, 5-pos SAD): pad=2, sigma_scale=1.65
+        let pad1 = 2_u32;
+        let p1_x = enc.pad_plane_persistent(&recon_x_p, pad1);
+        let p1_y = enc.pad_plane_persistent(&recon_y_p, pad1);
+        let p1_b = enc.pad_plane_persistent(&recon_b_p, pad1);
+        let (s1_x, s1_y, s1_b) = enc.epf_step1_persistent(
+            &p1_x,
+            &p1_y,
+            &p1_b,
+            &inv_sigma_h,
             self.padded_width,
             self.padded_height,
-            self.padded_width / 8,
-            self.padded_height / 8,
+            xsize_blocks,
+            ysize_blocks,
+            pad1,
+            1.65,
+            crate::forks::epf::EPF_BORDER_SAD_MUL,
+        );
+
+        // Step 2 (3×3 plus, single-point SAD): pad=1, sigma_scale=10.725
+        let pad2 = 1_u32;
+        let p2_x = enc.pad_plane_persistent(&s1_x, pad2);
+        let p2_y = enc.pad_plane_persistent(&s1_y, pad2);
+        let p2_b = enc.pad_plane_persistent(&s1_b, pad2);
+        let (s2_x, s2_y, s2_b) = enc.epf_step2_persistent(
+            &p2_x,
+            &p2_y,
+            &p2_b,
+            &inv_sigma_h,
+            self.padded_width,
+            self.padded_height,
+            xsize_blocks,
+            ysize_blocks,
+            pad2,
+            crate::forks::epf::EPF_PASS2_SIGMA_SCALE * 1.65,
+            crate::forks::epf::EPF_BORDER_SAD_MUL,
         );
 
         let (rgb_r, rgb_g, rgb_b) =
-            enc.xyb_to_linear_rgb_planar(&post_x, &post_y, &post_b);
-        (rgb_r, rgb_g, rgb_b)
+            enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
+        (
+            enc.download_plane(&rgb_r),
+            enc.download_plane(&rgb_g),
+            enc.download_plane(&rgb_b),
+        )
     }
 }
 

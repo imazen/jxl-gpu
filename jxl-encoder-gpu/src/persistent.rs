@@ -64,7 +64,7 @@ use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, 
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
 use crate::launch::dequant::dequant_dct8;
-use crate::launch::epf::pad_plane;
+use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
 use crate::launch::fused_dct_quant::{dct8_quantize_fused_wide, dequant_idct8_fused_y_wide};
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
@@ -396,6 +396,141 @@ impl<R: Runtime> GpuEncoder<R> {
             height: dst_h,
             _r: core::marker::PhantomData,
         }
+    }
+
+    /// Persistent-API EPF step 1 (3×3 plus, 5-pos SAD). Inputs are
+    /// PADDED `GpuPlane`s (caller is responsible for padding via
+    /// [`Self::pad_plane_persistent`] with `pad = 2`). `inv_sigma` is
+    /// a per-(8×8)-block `Handle` of length `xsize_blocks *
+    /// ysize_blocks`. `width` / `height` are the UNPADDED output
+    /// dimensions. Returns three new unpadded `GpuPlane`s.
+    ///
+    /// Mirrors the shape of [`crate::forks::epf::apply_epf_step1_gpu`]
+    /// but skips upload/download — all I/O stays on GPU.
+    #[allow(clippy::too_many_arguments)]
+    pub fn epf_step1_persistent(
+        &self,
+        in_x: &GpuPlane<R>,
+        in_y: &GpuPlane<R>,
+        in_b: &GpuPlane<R>,
+        inv_sigma: &cubecl::server::Handle,
+        width: u32,
+        height: u32,
+        xsize_blocks: u32,
+        ysize_blocks: u32,
+        pad: u32,
+        sigma_scale: f32,
+        border_sigma_mul: f32,
+    ) -> (GpuPlane<R>, GpuPlane<R>, GpuPlane<R>) {
+        let n_out = (width as usize) * (height as usize);
+        let h_ox = self.client_ref().empty(n_out * 4);
+        let h_oy = self.client_ref().empty(n_out * 4);
+        let h_ob = self.client_ref().empty(n_out * 4);
+        epf_step1::<R>(
+            self.client_ref(),
+            in_x.handle.clone(),
+            in_y.handle.clone(),
+            in_b.handle.clone(),
+            h_ox.clone(),
+            h_oy.clone(),
+            h_ob.clone(),
+            inv_sigma.clone(),
+            width,
+            height,
+            xsize_blocks,
+            ysize_blocks,
+            pad,
+            sigma_scale,
+            border_sigma_mul,
+        );
+        (
+            GpuPlane {
+                handle: h_ox,
+                width,
+                height,
+                _r: core::marker::PhantomData,
+            },
+            GpuPlane {
+                handle: h_oy,
+                width,
+                height,
+                _r: core::marker::PhantomData,
+            },
+            GpuPlane {
+                handle: h_ob,
+                width,
+                height,
+                _r: core::marker::PhantomData,
+            },
+        )
+    }
+
+    /// Persistent-API EPF step 2 (3×3 plus, single-point SAD). Same
+    /// I/O shape as [`Self::epf_step1_persistent`] except `pad = 1`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn epf_step2_persistent(
+        &self,
+        in_x: &GpuPlane<R>,
+        in_y: &GpuPlane<R>,
+        in_b: &GpuPlane<R>,
+        inv_sigma: &cubecl::server::Handle,
+        width: u32,
+        height: u32,
+        xsize_blocks: u32,
+        ysize_blocks: u32,
+        pad: u32,
+        sigma_scale: f32,
+        border_sigma_mul: f32,
+    ) -> (GpuPlane<R>, GpuPlane<R>, GpuPlane<R>) {
+        let n_out = (width as usize) * (height as usize);
+        let h_ox = self.client_ref().empty(n_out * 4);
+        let h_oy = self.client_ref().empty(n_out * 4);
+        let h_ob = self.client_ref().empty(n_out * 4);
+        epf_step2::<R>(
+            self.client_ref(),
+            in_x.handle.clone(),
+            in_y.handle.clone(),
+            in_b.handle.clone(),
+            h_ox.clone(),
+            h_oy.clone(),
+            h_ob.clone(),
+            inv_sigma.clone(),
+            width,
+            height,
+            xsize_blocks,
+            ysize_blocks,
+            pad,
+            sigma_scale,
+            border_sigma_mul,
+        );
+        (
+            GpuPlane {
+                handle: h_ox,
+                width,
+                height,
+                _r: core::marker::PhantomData,
+            },
+            GpuPlane {
+                handle: h_oy,
+                width,
+                height,
+                _r: core::marker::PhantomData,
+            },
+            GpuPlane {
+                handle: h_ob,
+                width,
+                height,
+                _r: core::marker::PhantomData,
+            },
+        )
+    }
+
+    /// Upload an `inv_sigma` map as a raw `Handle` (no GpuPlane wrapper
+    /// because per-block layout differs from per-pixel `GpuPlane`).
+    /// Caller-managed lifetime — drop to release.
+    pub fn upload_inv_sigma(&self, inv_sigma: &[f32]) -> cubecl::server::Handle {
+        self.client_ref()
+            .create_from_slice(f32::as_bytes(inv_sigma))
     }
 
     /// Upload per-block coefficient data (e.g., a contiguous batch of
