@@ -127,30 +127,43 @@ pub fn nzeros_bits_term(num_nzeros: u32, k_zeros_mul: f32) -> f32 {
     k_zeros_mul * (ceil_log2_nonzero(nbits + 17) + nbits) as f32
 }
 
-/// Full upstream-shape per-block cost combiner — implements the
-/// estimate_entropy_full DCT8 fast path's final cost formula
-/// (lines 766-771 of `vardct/ac_strategy.rs`):
+/// Full upstream-shape per-block cost combiner — implements
+/// `estimate_entropy_full`'s final cost formula. Generic over
+/// `block_pixel_count` (= 64 for DCT8, 128 for DCT16x8/8x16, 256
+/// for DCT16x16, 1024 for DCT32x32, etc.), so the same combiner
+/// works for any rectangular DCT strategy.
 ///
 /// ```text
 ///   per_channel:
 ///     entropy += entropy_sum
 ///     entropy += k_zeros_mul * f(nzeros_sum)
 ///   final:
-///     loss_scalar = (total_pixel_loss / 64).sqrt().sqrt().sqrt() * 64 / quant
+///     n = block_pixel_count
+///     loss_scalar = (total_pixel_loss / n).sqrt().sqrt().sqrt() * n / quant
 ///     entropy *= entropy_mul
 ///     entropy += k_info_loss_mul * loss_scalar
 ///     return entropy
 /// ```
 ///
-/// Inputs are per-block arrays for entropy_sum and nzeros_sum across
-/// all 3 channels, plus per-block combined pixel loss (output of
-/// [`combine_pixel_loss_3channel`]). `scaled_constants` is the
-/// `(info_loss_mul, cost_delta, zeros_mul)` tuple from
-/// [`compute_scaled_constants`] (or [`COEFF_DOMAIN_CONSTANTS`]).
-/// `quant_for_coeffs` is the per-block raw quant value (the
-/// `quant_field` entry, not the scaled `qac`).
+/// Mirrors upstream:
+/// - DCT8 fast path (`vardct/ac_strategy.rs:737-771`): `n = 64`,
+///   `quant = quant_for_coeffs` (the per-block `quant_field` entry).
+/// - Generic path (`vardct/ac_strategy.rs:1099-1108`):
+///   `n = num_blocks * 64` (where `num_blocks = cx * cy`),
+///   `quant = quant_norm16` (the L2/L16-normalized quant used by
+///   the generic path). Caller is responsible for computing
+///   `quant_norm16` and passing it as `quant_for_coeffs`.
 ///
-/// All per-channel arrays must be the same length.
+/// **Caveat for non-DCT8 strategies**: upstream's generic path also
+/// applies an X-channel-only weighting `w = 1 + min(num_blocks/8, 3)`
+/// when `c == 0 && num_blocks >= 2 && use_pixel_domain`
+/// (`ac_strategy.rs:1047-1048`). That weighting is NOT applied here;
+/// callers that need full upstream parity for X channel on
+/// multi-block strategies must apply it before calling.
+///
+/// `scaled_constants` is the `(info_loss_mul, cost_delta, zeros_mul)`
+/// tuple from [`compute_scaled_constants`] (or
+/// [`COEFF_DOMAIN_CONSTANTS`]).
 #[allow(clippy::too_many_arguments)]
 pub fn per_block_upstream_cost(
     entropy_x: &[f32],
@@ -163,21 +176,23 @@ pub fn per_block_upstream_cost(
     entropy_mul: f32,
     scaled_constants: (f32, f32, f32),
     quant_for_coeffs: f32,
+    block_pixel_count: usize,
 ) -> Vec<f32> {
-    let n = entropy_x.len();
-    debug_assert_eq!(entropy_y.len(), n);
-    debug_assert_eq!(entropy_b.len(), n);
-    debug_assert_eq!(nzeros_x.len(), n);
-    debug_assert_eq!(nzeros_y.len(), n);
-    debug_assert_eq!(nzeros_b.len(), n);
-    debug_assert_eq!(pixel_loss_total.len(), n);
+    let n_blocks = entropy_x.len();
+    debug_assert_eq!(entropy_y.len(), n_blocks);
+    debug_assert_eq!(entropy_b.len(), n_blocks);
+    debug_assert_eq!(nzeros_x.len(), n_blocks);
+    debug_assert_eq!(nzeros_y.len(), n_blocks);
+    debug_assert_eq!(nzeros_b.len(), n_blocks);
+    debug_assert_eq!(pixel_loss_total.len(), n_blocks);
+    debug_assert!(block_pixel_count > 0);
 
     let (k_info_loss_mul, _cost_delta, k_zeros_mul) = scaled_constants;
-    const DCT_BLOCK_SIZE: f64 = 64.0;
+    let n_pix = block_pixel_count as f64;
     let inv_q = 1.0 / quant_for_coeffs as f64;
 
-    let mut out = Vec::with_capacity(n);
-    for b in 0..n {
+    let mut out = Vec::with_capacity(n_blocks);
+    for b in 0..n_blocks {
         // Per-channel entropy + nzeros bits cost.
         let mut entropy = entropy_x[b]
             + entropy_y[b]
@@ -188,7 +203,7 @@ pub fn per_block_upstream_cost(
 
         // Combined pixel-loss → 8th-root scalar.
         let p = pixel_loss_total[b];
-        let loss_scalar = (p / DCT_BLOCK_SIZE).sqrt().sqrt().sqrt() * DCT_BLOCK_SIZE * inv_q;
+        let loss_scalar = (p / n_pix).sqrt().sqrt().sqrt() * n_pix * inv_q;
 
         entropy *= entropy_mul;
         entropy += k_info_loss_mul * loss_scalar as f32;
@@ -666,6 +681,7 @@ pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
                 entropy_mul,
                 scaled_constants,
                 quant_for_coeffs,
+                64, // DCT8: block_pixel_count = 64
             )
         }
     }
@@ -868,10 +884,41 @@ mod tests {
             1.0,                       // entropy_mul
             (10.0, 5.0, 1.0),          // (info_loss_mul, cost_delta, zeros_mul)
             1.0,                       // quant_for_coeffs
+            64,                        // DCT8 block_pixel_count
         );
         // Expected: (15.0 + 21.0) * 1.0 + 10.0 * 0 = 36.0
         assert!((costs[0] - 36.0).abs() < 1e-3, "got {}", costs[0]);
         assert!((costs[1] - 36.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_per_block_upstream_cost_block_pixel_count_scaling() {
+        // Same loss with different block_pixel_count → different
+        // loss_scalar = (loss/n)^(1/8) * n / quant. For n=256
+        // (DCT16x16) the scalar is sqrt(sqrt(sqrt(loss/256))) * 256
+        // = (4)^(-1/8) × 4 × what we'd get for n=64.
+        let entropy = vec![0.0_f32];
+        let nzeros = vec![0.0_f32];
+        let loss = vec![1.0_f64];
+        let cost_dct8 = per_block_upstream_cost(
+            &entropy, &entropy, &entropy,
+            &nzeros, &nzeros, &nzeros,
+            &loss, 1.0, (1.0, 1.0, 0.0), 1.0, 64,
+        );
+        let cost_dct16 = per_block_upstream_cost(
+            &entropy, &entropy, &entropy,
+            &nzeros, &nzeros, &nzeros,
+            &loss, 1.0, (1.0, 1.0, 0.0), 1.0, 256,
+        );
+        // n=256: loss_scalar = (1/256)^(1/8) * 256 = 0.5612... * 256 ≈ 143.7
+        // n=64:  loss_scalar = (1/64)^(1/8)  * 64  = 0.6086... * 64  ≈ 38.95
+        // Ratio ~ 3.69; cost_dct16 should be > cost_dct8.
+        assert!(
+            cost_dct16[0] > cost_dct8[0],
+            "n=256 cost {} should be > n=64 cost {}",
+            cost_dct16[0],
+            cost_dct8[0]
+        );
     }
 
     #[test]
@@ -888,6 +935,7 @@ mod tests {
             1.0,
             (1.0, 1.0, 0.0), // info_loss_mul=1, zeros_mul=0 to isolate loss term
             1.0,
+            64,
         );
         // entropy = 0 + 0_zero_term*3 = 0, entropy *= 1.0 → 0
         // loss_scalar = (1/64).sqrt().sqrt().sqrt() * 64 / 1
