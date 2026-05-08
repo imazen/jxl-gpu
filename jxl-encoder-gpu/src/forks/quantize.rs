@@ -1120,6 +1120,94 @@ mod tests {
     }
 
     #[test]
+    fn test_adjust_quant_block_ac_host_matches_upstream() {
+        // G5.1 parity: feed the same inputs to BOTH our host orchestrator
+        // AND upstream's jxl_encoder::__internals::adjust_quant_block_ac_free
+        // (the wrapper around VarDctEncoder::adjust_quant_block_ac).
+        // Outputs (heuristics_fired, sum_of_vals, sum_of_error, activity)
+        // and the in/out (thresholds, quant) must all match.
+        use crate::forks::transform::{
+            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X32,
+            RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT8X16,
+        };
+
+        // Build several synthetic blocks across strategies + channels +
+        // quant levels to exercise different heuristic firings.
+        let strategies: &[(u8, usize, usize, usize, usize)] = &[
+            // (raw_strategy, block_w, block_h, xsize, ysize)
+            (RAW_STRATEGY_DCT, 8, 8, 1, 1),
+            (RAW_STRATEGY_DCT16X8, 8, 16, 1, 2),
+            (RAW_STRATEGY_DCT8X16, 16, 8, 2, 1),
+            (RAW_STRATEGY_DCT16X16, 16, 16, 2, 2),
+            (RAW_STRATEGY_DCT32X32, 32, 32, 4, 4),
+            (RAW_STRATEGY_DCT16X32, 32, 16, 4, 2),
+        ];
+        for &(raw_strategy, bw, bh, xs, ys) in strategies {
+            for &c in &[0_usize, 1, 2] {
+                for &qac in &[10.0_f32, 50.0, 200.0] {
+                    let n = bw * bh;
+                    // Synthetic coefficients: deterministic varied content.
+                    let coeffs: Vec<f32> = (0..n)
+                        .map(|i| ((i * 7) as f32 / n as f32 - 0.5) * 0.3)
+                        .collect();
+                    let weights: Vec<f32> = (0..n)
+                        .map(|i| 1.0 + 0.5 * (i as f32 * 0.013).sin())
+                        .collect();
+                    let qm_mul = if c == 0 { 1.5 } else if c == 2 { 0.7 } else { 1.0 };
+                    let initial_thresholds = [0.62_f32, 0.62, 0.62, 0.62];
+                    let initial_quant = 100_i32;
+
+                    // OUR host orchestrator.
+                    let mut t_ours = initial_thresholds;
+                    let mut q_ours = initial_quant;
+                    let our_outcome = adjust_quant_block_ac_host(
+                        &coeffs, &weights, qac, qm_mul, c, raw_strategy,
+                        bw, bh, xs, ys,
+                        &mut t_ours, &mut q_ours,
+                    );
+
+                    // UPSTREAM orchestrator (via __internals).
+                    let mut t_theirs = initial_thresholds;
+                    let mut q_theirs = initial_quant;
+                    let (their_fired, their_vals, their_err, their_act) =
+                        jxl_encoder::__internals::adjust_quant_block_ac_free(
+                            &coeffs, &weights, qac, qm_mul, c, raw_strategy,
+                            bw, bh, xs, ys,
+                            &mut t_theirs, &mut q_theirs,
+                        );
+
+                    // Compare all 4 outputs + (in/out) thresholds + quant.
+                    let ctx = format!(
+                        "strat={raw_strategy} c={c} qac={qac} bw={bw} bh={bh}"
+                    );
+                    assert_eq!(our_outcome.heuristics_fired, their_fired,
+                        "{ctx} fired mismatch");
+                    assert!(
+                        (our_outcome.sum_of_vals - their_vals).abs() < 1e-3,
+                        "{ctx} sum_of_vals: ours={} theirs={}",
+                        our_outcome.sum_of_vals, their_vals
+                    );
+                    assert!(
+                        (our_outcome.sum_of_error - their_err).abs() < 1e-3,
+                        "{ctx} sum_of_error: ours={} theirs={}",
+                        our_outcome.sum_of_error, their_err
+                    );
+                    assert_eq!(our_outcome.activity, their_act,
+                        "{ctx} activity mismatch");
+                    for k in 0..4 {
+                        assert!(
+                            (t_ours[k] - t_theirs[k]).abs() < 1e-4,
+                            "{ctx} threshold[{k}]: ours={} theirs={}",
+                            t_ours[k], t_theirs[k]
+                        );
+                    }
+                    assert_eq!(q_ours, q_theirs, "{ctx} quant mismatch");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_orchestrator_partial_block_kind_returns_zeros() {
         use crate::forks::transform::RAW_STRATEGY_DCT4X4;
         let coeffs = [0.5_f32; 64];
