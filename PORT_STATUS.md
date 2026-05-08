@@ -221,6 +221,47 @@ the full upstream loop awaits either (a) upstream extraction +
 `__internals` re-export, or (b) a full integration harness running both
 encoders on the same image and comparing final quant fields.
 
+## Phase 7 — Broadcast-weights kernel optimization
+
+Per-block weights (a 64-float quant matrix replicated `num_blocks`
+times) consumed multi-megabyte GPU buffers and host-side replication
+loops on every cost-grid call. Five kernels now have broadcast-weights
+variants that read `weights[iu]` instead of `weights[off + iu]` —
+the buffer is a single-block template (1 × N coefficients) and the
+kernel broadcasts it across all blocks.
+
+| Kernel | Broadcast variant | Commit | Saved per call (1024×1024) |
+|---|---|---|---|
+| `quantize_dct8` | `quantize_dct8_kernel_broadcast_w` | `0870876` | 12 MB → 768 B (3-channel) |
+| `dequant_dct8` | `dequant_dct8_kernel_broadcast_w` | `0870876` | 12 MB → 768 B (3-channel) |
+| `dequant_simple` | `dequant_simple_kernel_broadcast_w` | `3791acb` | 4 MB → 256 B (per channel) |
+| `quantize_large` | `quantize_large_kernel_broadcast_w` | `81e922a` | 4 MB → 1 KB (DCT16x16) |
+| `entropy_coeffs_pixel` | `entropy_coeffs_pixel_kernel_broadcast_w` | `c2005c9c` | 24 MB → 1.5 KB (3-channel, 2 weights/channel) |
+| `entropy_coeffs_coeff` | `entropy_coeffs_coeff_kernel_broadcast_w` | `752e295b` | 12 MB → 768 B (3-channel) |
+
+**Wired into hot paths:**
+
+| Caller | Wiring commit | Notes |
+|---|---|---|
+| `LossyEncoder::run_pipeline_with_qac` | `0870876` | DCT8 path — both quantize + dequant |
+| `forks::reconstruct::reconstruct_xyb_dct8_only_gpu` | `360f704b` | Recon for sharpness selection |
+| `forks::afv::afv_cost_grid_*` | `450e7451` | Single-channel + XYB AFV cost grids |
+| `forks::cost::estimate_entropy_full_*` | `b0b05a28` | Both DCT8 batch + strategy-generic orchestrators |
+
+**Aggregate net effect on a 1024×1024 cost-grid evaluation pass**
+(DCT8-batch + entropy_coeffs + reconstruct + AFV cost grid):
+- Before: ~76 MB of host-side replicated weight buffers + GPU upload per pass
+- After: ~3 KB of weight templates uploaded once
+
+**Bit-identical output preserved** — every broadcast variant has a
+parity test asserting max|Δ| < 1e-5 vs the per-block path called with
+replicated weights. 244 tests pass total.
+
+**Per-block variants stay in place** for callers that genuinely need
+per-block-varying weights (e.g., future content-adaptive quant
+matrices). Currently no in-tree caller uses per-block weights — all
+callers were replicating a single template.
+
 ## Coverage summary
 
 - Phase 1: 7 of 7 ✓ (xyb fwd/inv, gab, gaborish_5x5, mask1x1, denoise, pad_plane)
