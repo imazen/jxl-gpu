@@ -3345,3 +3345,192 @@ fn partition_16x16_cost(
         Partition16x16::FourSubBlocks(_) => f32::INFINITY,
     }
 }
+
+// =============================================================================
+// Phase 3 Component 3: Partition → block-strategy assignment
+// =============================================================================
+
+/// Per-block AC strategy assignment: for each first-block of a strategy,
+/// records the strategy code and where its top-left 8×8-block sits in
+/// the image's 8x8 grid.
+///
+/// Use this as the bridge between the host-side partition selector
+/// (`select_partitions_*`) and the GPU-side mixed-strategy reconstruct
+/// (`forks::reconstruct::reconstruct_mixed_strategy_gpu`). The
+/// `BlockRecipe` struct that reconstruct takes carries `coeffs`
+/// alongside `(bx, by, raw_strategy)`; this struct is the
+/// strategy-only metadata so callers can build coefficient batches
+/// per-strategy before assembling final recipes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StrategyAssignment {
+    /// Top-left 8×8-block coordinate (in the image's 8x8 grid).
+    pub bx: usize,
+    pub by: usize,
+    /// Strategy code (matching `forks::transform::RAW_STRATEGY_*`).
+    pub raw_strategy: u8,
+}
+
+/// Walk a `Vec<Partition16x16>` to a flat list of strategy assignments.
+/// Each Partition16x16 occupies 2×2 8×8-blocks in the image.
+///
+/// Mirrors libjxl's `AcStrategy::Set(bx, by, kind)` flat assignments —
+/// this is the GPU-side equivalent of the per-block strategy map that
+/// upstream stores in `AcStrategyMap`.
+///
+/// `xsize_blocks_8` / `ysize_blocks_8` are the image's 8x8-block
+/// grid dimensions. Both must be even (`select_partitions_16x16`
+/// already asserts this).
+///
+/// Note: `Partition16x16::FourSubBlocks` emits per-cell strategies
+/// (DCT8 / DCT4×4 / DCT4×8 / DCT8×4 / IDENTITY / DCT2X2). For the
+/// MVP we only walk DCT8 and DCT16x16; the other variants are
+/// translated to their `RAW_STRATEGY_*` codes for completeness so
+/// future Phase D work can drop in without touching this walker.
+pub fn partitions_16x16_to_assignments(
+    partitions: &[Partition16x16],
+    xsize_blocks_8: usize,
+    ysize_blocks_8: usize,
+) -> Vec<StrategyAssignment> {
+    use crate::forks::transform::{
+        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
+        RAW_STRATEGY_DCT8X4, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
+        RAW_STRATEGY_IDENTITY,
+    };
+
+    assert!(xsize_blocks_8.is_multiple_of(2));
+    assert!(ysize_blocks_8.is_multiple_of(2));
+    let xsize_blocks_16 = xsize_blocks_8 / 2;
+    let ysize_blocks_16 = ysize_blocks_8 / 2;
+    assert_eq!(partitions.len(), xsize_blocks_16 * ysize_blocks_16);
+
+    let mut out = Vec::with_capacity(xsize_blocks_8 * ysize_blocks_8);
+    for ry in 0..ysize_blocks_16 {
+        for rx in 0..xsize_blocks_16 {
+            let bx = rx * 2;
+            let by = ry * 2;
+            match partitions[ry * xsize_blocks_16 + rx] {
+                Partition16x16::Dct16x16 => {
+                    out.push(StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT16X16,
+                    });
+                }
+                Partition16x16::TwoDct16x8Horizontal => {
+                    // Two 16×8 (16 tall × 8 wide) blocks side-by-side.
+                    // Each occupies 1×2 in the 8x8 grid: (bx, by..by+1) and (bx+1, by..by+1).
+                    out.push(StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT16X8,
+                    });
+                    out.push(StrategyAssignment {
+                        bx: bx + 1,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT16X8,
+                    });
+                }
+                Partition16x16::TwoDct8x16Vertical => {
+                    // Two 8×16 (8 tall × 16 wide) blocks stacked.
+                    // Each occupies 2×1 in the 8x8 grid.
+                    out.push(StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT8X16,
+                    });
+                    out.push(StrategyAssignment {
+                        bx,
+                        by: by + 1,
+                        raw_strategy: RAW_STRATEGY_DCT8X16,
+                    });
+                }
+                Partition16x16::FourDct8x8 => {
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        out.push(StrategyAssignment {
+                            bx: bx + dx,
+                            by: by + dy,
+                            raw_strategy: RAW_STRATEGY_DCT,
+                        });
+                    }
+                }
+                Partition16x16::FourSubBlocks(subs) => {
+                    for ((dx, dy), sub) in
+                        [(0, 0), (1, 0), (0, 1), (1, 1)].iter().zip(subs.iter())
+                    {
+                        let raw = match sub {
+                            SubStrategy::Dct8 => RAW_STRATEGY_DCT,
+                            SubStrategy::Dct4x4 => RAW_STRATEGY_DCT4X4,
+                            SubStrategy::Dct4x8 => RAW_STRATEGY_DCT4X8,
+                            SubStrategy::Dct8x4 => RAW_STRATEGY_DCT8X4,
+                            SubStrategy::Identity => RAW_STRATEGY_IDENTITY,
+                            SubStrategy::Dct2x2 => RAW_STRATEGY_DCT2X2,
+                        };
+                        out.push(StrategyAssignment {
+                            bx: bx + dx,
+                            by: by + dy,
+                            raw_strategy: raw,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod strategy_assignment_tests {
+    use super::*;
+    use crate::forks::transform::{
+        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
+    };
+
+    #[test]
+    fn test_partitions_to_assignments_all_dct16() {
+        // 4×4 image (in 8x8 blocks) = 2×2 in 16x16 regions.
+        let partitions = vec![Partition16x16::Dct16x16; 4];
+        let out = partitions_16x16_to_assignments(&partitions, 4, 4);
+        assert_eq!(out.len(), 4);
+        for (i, a) in out.iter().enumerate() {
+            let rx = (i % 2) * 2;
+            let ry = (i / 2) * 2;
+            assert_eq!(a.bx, rx);
+            assert_eq!(a.by, ry);
+            assert_eq!(a.raw_strategy, RAW_STRATEGY_DCT16X16);
+        }
+    }
+
+    #[test]
+    fn test_partitions_to_assignments_four_dct8() {
+        // One 16x16 region = four 8x8 blocks.
+        let partitions = vec![Partition16x16::FourDct8x8];
+        let out = partitions_16x16_to_assignments(&partitions, 2, 2);
+        assert_eq!(out.len(), 4);
+        let coords: Vec<(usize, usize)> = out.iter().map(|a| (a.bx, a.by)).collect();
+        assert_eq!(coords, vec![(0, 0), (1, 0), (0, 1), (1, 1)]);
+        for a in &out {
+            assert_eq!(a.raw_strategy, RAW_STRATEGY_DCT);
+        }
+    }
+
+    #[test]
+    fn test_partitions_to_assignments_rectangular() {
+        // Test both rectangular variants in a 4×2 image (2×1 16x16-regions).
+        let partitions = vec![
+            Partition16x16::TwoDct16x8Horizontal,
+            Partition16x16::TwoDct8x16Vertical,
+        ];
+        let out = partitions_16x16_to_assignments(&partitions, 4, 2);
+        assert_eq!(out.len(), 4);
+        // First region: two DCT16x8 at (0,0) and (1,0)
+        assert_eq!(out[0].raw_strategy, RAW_STRATEGY_DCT16X8);
+        assert_eq!((out[0].bx, out[0].by), (0, 0));
+        assert_eq!(out[1].raw_strategy, RAW_STRATEGY_DCT16X8);
+        assert_eq!((out[1].bx, out[1].by), (1, 0));
+        // Second region: two DCT8x16 at (2,0) and (2,1)
+        assert_eq!(out[2].raw_strategy, RAW_STRATEGY_DCT8X16);
+        assert_eq!((out[2].bx, out[2].by), (2, 0));
+        assert_eq!(out[3].raw_strategy, RAW_STRATEGY_DCT8X16);
+        assert_eq!((out[3].bx, out[3].by), (2, 1));
+    }
+}
