@@ -596,19 +596,36 @@ pub struct RefineIterTrace {
 
 /// Empirically-derived distance threshold above which butteraugli
 /// refinement does not generalize as a quality win across the
-/// CLIC2025-1024 corpus. At `distance > REFINEMENT_DISTANCE_THRESHOLD`
-/// the corpus sweep showed mean refined butteraugli equal-to or
-/// worse-than the AQ baseline, with occasional severe per-image
-/// regressions (worst case: +1.021 score at d=4.0).
+/// CLIC2025-1024 corpus. The threshold is conservative: at higher
+/// distances refinement wins on the majority of images by a small
+/// margin, but the few losses can be catastrophic (worst case:
+/// +1.021 butteraugli score at d=4.0). Mean-vs-uniform regresses
+/// at d > 1.5 because the rare big losses dominate the small wins.
 ///
-/// Source data (`/mnt/v/output/jxl-encoder-gpu/butteraugli-refinement-sweep/
-/// sweep_clic_8imgs_2026-05-08.log`):
-/// - d=1.0: refined wins on 5/8 images, mean -5.7% vs uniform
-/// - d=2.0: refined matches uniform on average (mixed wins/losses)
-/// - d=4.0: refined matches AQ exactly, no improvement
+/// Source data (16-image CLIC2025-1024 sweep, archived at
+/// `/mnt/v/output/jxl-encoder-gpu/butteraugli-refinement-sweep/
+/// sweep_clic_16imgs_2026-05-08.log`):
 ///
-/// Use [`should_refine_at_distance`] to query, or [`refine_aq_field_gpu_auto`]
-/// for the full auto-gated wrapper.
+/// | dist | uniform µ | refined µ | rf<un wins | rf>un losses | worst loss |
+/// |------|-----------|-----------|------------|--------------|------------|
+/// | 1.0  | 1.2386    | 1.2105    | 7/16       | 9/16         | +0.133     |
+/// | 2.0  | 2.0245    | 2.1195    | 11/16      | 5/16         | +0.362     |
+/// | 4.0  | 3.2582    | 3.5160    | 12/16      | 3/16         | +1.021     |
+///
+/// At d=1.0 win rate is ~50/50 but worst loss is small (+0.133); at
+/// d≥2.0 win rate is 60–75% but worst losses balloon (+0.362, +1.021).
+/// Production code that can't tolerate occasional catastrophic
+/// regressions should keep this conservative threshold; benchmarks or
+/// content-known callers can override with [`refine_aq_field_gpu`].
+///
+/// A future per-content gating heuristic (e.g., skip refinement if
+/// initial AQ score > uniform score × 1.1, indicating the AQ field
+/// itself regresses uniform on this image) would give better win
+/// rates at higher distances. See the corpus sweep TSV for the
+/// per-image data.
+///
+/// Use [`should_refine_at_distance`] to query, or
+/// [`refine_aq_field_gpu_auto`] for the full auto-gated wrapper.
 pub const REFINEMENT_DISTANCE_THRESHOLD: f32 = 1.5;
 
 /// Returns `true` when butteraugli refinement is empirically expected
