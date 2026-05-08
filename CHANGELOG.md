@@ -2,6 +2,65 @@
 
 ## [Unreleased]
 
+### Butteraugli quant-refinement loop scaffold + helpers + integration (`11f33133`, `4d6ab397`, `9746a25f`, `2b33d6d0`, `87d1654a`)
+
+End-to-end GPU-substituted butteraugli refinement loop, mirroring
+upstream `jxl_encoder::vardct::butteraugli_loop::butteraugli_refine_quant_field`
+with the per-iteration distance compute on `zenmetrics/butteraugli-gpu`.
+
+`forks::butteraugli_loop` (gated behind the new `butteraugli-loop`
+cargo feature):
+
+1. `ButteraugliLoopGpu<R>` (`11f33133`) — persistent
+   `butteraugli_gpu::Butteraugli` wrapper. `set_reference` once per
+   encode caches the opsin/blur intermediates so per-iteration
+   `compute_with_reference` only runs the distorted side.
+2. `DeviationBounds::compute` (`4d6ab397`) — qf_lower/qf_higher derived
+   from initial float quant field via `sqrt(250 / ratio)`. Mirrors
+   upstream lines 105-122 exactly.
+3. `compute_tile_distances` + `AcStrategyInfo<'_>` (`4d6ab397`) —
+   AC-strategy-aware 16th-power-mean diffmap reduction matching
+   upstream lines 230-271. DCT8-only callers use the
+   `dct8_only_storage` / `dct8_only_info` helpers.
+4. `clamp_toward_initial` (`4d6ab397`) — `K_INIT_MUL = 0.6` blend
+   toward initial qf (kOriginalComparisonRound, upstream lines 314-336).
+5. `adjust_quant_field` (`4d6ab397`) — per-iter `cur_pow=0.2` /
+   `cur_pow=0.0` regimes with the integer-quantizer-step minimum bump
+   (upstream lines 338-406).
+6. `refine_quant_field_one_iter` + `RefineConfig` (`9746a25f`) —
+   composes the four helpers in upstream's per-iteration order.
+   Returns tile_dist for caller diagnostics.
+7. `refine_aq_field_gpu` + `RefineIterTrace` (`2b33d6d0`, `87d1654a`)
+   — multi-iter loop wiring `LossyEncoder::encode_one_adaptive`
+   together with the host-side adjustment helpers. Operates in
+   qac-domain (LossyEncoder takes per-block qac directly), so the
+   integer-step bump is neutered (no integer rounding in our
+   pipeline). Caller passes ORIGINAL sRGB U8 bytes as
+   butteraugli reference — round-tripping linear → IEC sRGB → linear
+   doesn't recover the input bytes when the input was linearized via
+   simplified `powf(2.4)`, which would inflate scores even on
+   bit-perfect reconstructions (same root-cause class as the CLAUDE.md
+   "PNG Color Metadata Causes Bogus Butteraugli Scores" note).
+8. `linear_f32_to_srgb_u8` + `linear_planar_to_srgb_u8_interleaved`
+   (`2b33d6d0`) — IEC 61966-2-1 piecewise transfer (linear toe at
+   0.04045) matching the inverse of butteraugli-gpu's
+   `srgb_byte_to_linear`.
+
+`examples/butteraugli_refinement_demo.rs` (`87d1654a`) — turnkey
+demo on a real CLIC2025 photo. Empirical finding (1024×1024 at
+distance=1.0, iters=2): baseline butteraugli is ~8.9 (target ~1.0),
+so the underlying GPU pipeline is the bottleneck — missing AC
+strategies beyond DCT8, EPF in the `run_pipeline_with_qac` path,
+proper sRGB linearization. The refinement loop runs end-to-end at
+~217 ms/iter; aq_field drifts substantially but score barely moves
+because the underlying pipeline can't deliver target quality. The
+loop infrastructure is correct (21 unit tests pass including a
+CUDA end-to-end smoke); pipeline gaps are the next priority.
+
+21 tests cover: 4 helpers individually, the per-iter composition,
+sRGB conversion round-trip + endpoints, and a CUDA-gated end-to-end
+smoke test that exercises the whole loop on a 64×64 gradient.
+
 ### Mixed-strategy reconstruct on GPU (`3359b065`, `53e47679`, `61ae5ae6`, `b7e55d15`)
 
 Closes the second-largest remaining gap. Builds out from the LLF
