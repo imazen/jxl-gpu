@@ -180,3 +180,65 @@ pub fn entropy_coeffs_coeff_kernel(
     output[oo + 2usize] = info_loss_sum;
     output[oo + 3usize] = info_loss2_sum;
 }
+
+/// Broadcast-weights variant of [`entropy_coeffs_coeff_kernel`].
+/// `inv_weights` is exactly `n` f32 (one inverse-quant matrix),
+/// broadcast across all blocks. Saves
+/// `(num_blocks - 1) * n * 4` bytes of upload traffic. Only one
+/// weight array (this kernel skips the error_coeffs writeback that
+/// the pixel-domain variant does), so half the savings of the pixel
+/// broadcast variant.
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn entropy_coeffs_coeff_kernel_broadcast_w(
+    block_c: &Array<f32>,
+    block_y: &Array<f32>,
+    inv_weights: &Array<f32>,
+    output: &mut Array<f32>,
+    n: u32,
+    cmap_factor: f32,
+    quant: f32,
+    k_cost_delta: f32,
+    k_cost2: f32,
+) {
+    let block_idx = ABSOLUTE_POS;
+    let n_per = n as usize;
+    let n_blocks = block_c.len() / n_per;
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * n_per;
+    let oo = block_idx * 4usize;
+
+    let mut entropy_sum = f32::new(0.0);
+    let mut nzeros_sum = f32::new(0.0);
+    let mut info_loss_sum = f32::new(0.0);
+    let mut info_loss2_sum = f32::new(0.0);
+    let mut i: u32 = 0u32;
+    while (i as usize) < n_per {
+        let iu = i as usize;
+        let val_in = block_c[off + iu];
+        let val_y = block_y[off + iu] * cmap_factor;
+        // Broadcast: inv_weights[iu] not inv_weights[off + iu].
+        let val = (val_in - val_y) * inv_weights[iu] * quant;
+        let rval = f32::round(val);
+        let diff = val - rval;
+        let q = f32::abs(rval);
+        entropy_sum = entropy_sum + f32::sqrt(q) * k_cost_delta;
+        if q != 0.0f32 {
+            nzeros_sum = nzeros_sum + 1.0f32;
+        }
+        let diff_abs = f32::abs(diff);
+        info_loss_sum = info_loss_sum + diff_abs;
+        info_loss2_sum = info_loss2_sum + diff_abs * diff_abs;
+        if q >= 1.5f32 {
+            entropy_sum = entropy_sum + k_cost2;
+        }
+        i += 1u32;
+    }
+
+    output[oo] = entropy_sum;
+    output[oo + 1usize] = nzeros_sum;
+    output[oo + 2usize] = info_loss_sum;
+    output[oo + 3usize] = info_loss2_sum;
+}

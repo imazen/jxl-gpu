@@ -47,7 +47,10 @@ use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
 use crate::launch::denoise::denoise as denoise_launch;
 use crate::launch::dequant::{dequant_dct8, dequant_dct8_broadcast_w};
-use crate::launch::entropy::{entropy_coeffs_pixel, entropy_coeffs_pixel_broadcast_w};
+use crate::launch::entropy::{
+    entropy_coeffs_coeff, entropy_coeffs_coeff_broadcast_w, entropy_coeffs_pixel,
+    entropy_coeffs_pixel_broadcast_w,
+};
 use crate::launch::epf::{epf_step0, epf_step1, epf_step2, pad_plane};
 use crate::launch::fuzzy_erosion::{fuzzy_erosion as fuzzy_erosion_launch, fuzzy_erosion_kmul};
 use crate::launch::gab::gab_smooth;
@@ -780,6 +783,104 @@ impl<R: Runtime> GpuEncoder<R> {
             f32::from_bytes(&out_bytes).to_vec(),
             f32::from_bytes(&err_bytes).to_vec(),
         )
+    }
+
+    /// Coefficient-domain entropy_coeffs (no error_coeffs writeback).
+    /// Computes per-block `[entropy_sum, nzeros_sum, info_loss_sum,
+    /// info_loss2_sum]` from quantized AC coefficient ranges. Used by
+    /// upstream's butteraugli iter loop in coefficient-domain mode.
+    #[allow(clippy::too_many_arguments)]
+    pub fn entropy_coeffs_coeff_blocks(
+        &self,
+        block_c: &[f32],
+        block_y: &[f32],
+        inv_weights: &[f32],
+        n_per_block: u32,
+        cmap_factor: f32,
+        quant: f32,
+        k_cost_delta: f32,
+        k_cost2: f32,
+    ) -> Vec<f32> {
+        let total = block_c.len();
+        let n = n_per_block as usize;
+        assert!(total.is_multiple_of(n));
+        let num_blocks = (total / n) as u32;
+        assert_eq!(block_y.len(), total);
+        assert_eq!(inv_weights.len(), total);
+        let h_c = self.client.create_from_slice(f32::as_bytes(block_c));
+        let h_y = self.client.create_from_slice(f32::as_bytes(block_y));
+        let h_iw = self.client.create_from_slice(f32::as_bytes(inv_weights));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; (num_blocks as usize) * 4]));
+        entropy_coeffs_coeff::<R>(
+            &self.client,
+            h_c,
+            h_y,
+            h_iw,
+            h_out.clone(),
+            num_blocks,
+            n_per_block,
+            cmap_factor,
+            quant,
+            k_cost_delta,
+            k_cost2,
+        );
+        let bytes = self.client.read_one(h_out).expect("read out");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Broadcast-weights variant of [`Self::entropy_coeffs_coeff_blocks`].
+    /// `inv_weights_template` is exactly `n_per_block` f32 (one
+    /// inverse-quant matrix); the kernel broadcasts across all blocks.
+    /// Saves `(num_blocks - 1) * n_per_block * 4` bytes of upload
+    /// traffic — half the savings of the pixel-domain broadcast
+    /// variant (which has two weight arrays).
+    #[allow(clippy::too_many_arguments)]
+    pub fn entropy_coeffs_coeff_blocks_broadcast_w(
+        &self,
+        block_c: &[f32],
+        block_y: &[f32],
+        inv_weights_template: &[f32],
+        n_per_block: u32,
+        cmap_factor: f32,
+        quant: f32,
+        k_cost_delta: f32,
+        k_cost2: f32,
+    ) -> Vec<f32> {
+        let total = block_c.len();
+        let n = n_per_block as usize;
+        assert!(total.is_multiple_of(n));
+        let num_blocks = (total / n) as u32;
+        assert_eq!(block_y.len(), total);
+        assert_eq!(
+            inv_weights_template.len(),
+            n,
+            "inv_weights_template must be exactly n_per_block = {n} entries"
+        );
+        let h_c = self.client.create_from_slice(f32::as_bytes(block_c));
+        let h_y = self.client.create_from_slice(f32::as_bytes(block_y));
+        let h_iw = self
+            .client
+            .create_from_slice(f32::as_bytes(inv_weights_template));
+        let h_out = self
+            .client
+            .create_from_slice(f32::as_bytes(&vec![0.0_f32; (num_blocks as usize) * 4]));
+        entropy_coeffs_coeff_broadcast_w::<R>(
+            &self.client,
+            h_c,
+            h_y,
+            h_iw,
+            h_out.clone(),
+            num_blocks,
+            n_per_block,
+            cmap_factor,
+            quant,
+            k_cost_delta,
+            k_cost2,
+        );
+        let bytes = self.client.read_one(h_out).expect("read out");
+        f32::from_bytes(&bytes).to_vec()
     }
 
     /// Broadcast-weights variant of [`Self::entropy_coeffs_pixel_blocks`].
@@ -1699,6 +1800,66 @@ mod tests {
             m > 1e-3,
             "IDENTITY and DCT2X2 should produce different coeffs (max|Δ|={m:.3e})"
         );
+    }
+
+    /// Verify entropy_coeffs_coeff_blocks_broadcast_w produces output
+    /// matching the per-block variant called with replicated inv_weights.
+    /// Coefficient-domain mode (info_loss + info_loss2 outputs are
+    /// non-zero, unlike pixel-domain).
+    #[test]
+    fn test_entropy_coeffs_coeff_broadcast_matches_perblock() {
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let n_blocks = 16usize;
+        let n_per_block = 64u32;
+        let n = n_per_block as usize;
+        let total = n_blocks * n;
+
+        let mut block_c = alloc::vec![0.0f32; total];
+        let mut block_y = alloc::vec![0.0f32; total];
+        for i in 0..total {
+            let v = ((i.wrapping_mul(31) % 251) as f32 / 251.0) - 0.5;
+            block_c[i] = 0.4 + 1.5 * v;
+            block_y[i] = -0.2 + 1.0 * v;
+        }
+        let mut inv_weights_template = alloc::vec![0.0f32; n];
+        for i in 0..n {
+            let w = 0.5 + 0.7 * ((i.wrapping_mul(17) % 251) as f32 / 251.0);
+            inv_weights_template[i] = 1.0 / w;
+        }
+        let mut inv_weights_replicated = alloc::vec![0.0f32; total];
+        for b in 0..n_blocks {
+            inv_weights_replicated[b * n..(b + 1) * n].copy_from_slice(&inv_weights_template);
+        }
+
+        let cmap_factor = 0.012f32;
+        let quant = 0.7f32;
+        let k_cost_delta = 1.83f32;
+        let k_cost2 = 2.5f32;
+
+        let out_p = enc.entropy_coeffs_coeff_blocks(
+            &block_c,
+            &block_y,
+            &inv_weights_replicated,
+            n_per_block,
+            cmap_factor,
+            quant,
+            k_cost_delta,
+            k_cost2,
+        );
+        let out_b = enc.entropy_coeffs_coeff_blocks_broadcast_w(
+            &block_c,
+            &block_y,
+            &inv_weights_template,
+            n_per_block,
+            cmap_factor,
+            quant,
+            k_cost_delta,
+            k_cost2,
+        );
+
+        assert_eq!(out_p.len(), out_b.len());
+        let m = max_abs_diff(&out_p, &out_b);
+        assert!(m < 1e-5, "max|Δ|={m:.3e} (expected < 1e-5)");
     }
 
     /// Verify entropy_coeffs_pixel_blocks_broadcast_w produces output
