@@ -78,6 +78,48 @@ LLF helpers in place, the dispatcher just needs to: read DC grid →
 call the right LLF restorer → write LLF positions into the
 coefficient block → run per-strategy IDCT → scatter.
 
+### G5.1 validation recovery (`e81accbe`, `c1ffd69e`, `2cf7eeec`, `6eb0faca`, `6de46b3a`, `a21872fd`, `b29cd555`, `632043ac`, `abb79093`)
+
+After noticing a pattern of helpers committed with property-only
+tests instead of upstream parity per zenmetrics G5.1 (validate
+against the published CPU crate, not a hand-rolled re-derivation),
+recovered the LLF restoration path and the `EntropyMulTable` to
+full G5.1 compliance without cross-repo work.
+
+The trick: upstream's `jxl_encoder::vardct::dct::dc_from_dct_*` are
+all `pub`, even though `restore_llf_from_dc` (their inverse) is
+private. So adding hand-rolled forward `dc_from_dct_*` host helpers
++ upstream-parity tests on those forwards + roundtrip tests
+(`restore_llf(dc_from_dct(llf)) == llf`) gives **both directions
+verified against upstream**, just transitively for the inverse.
+
+What landed:
+
+1. `e81accbe` — PORT_STATUS section honestly documenting the gap.
+2. `c1ffd69e`, `2cf7eeec`, `6eb0faca` — 8 hand-rolled forward
+   `dc_from_dct_*` helpers (DCT16x8/8x16, DCT16x16, DCT32x32,
+   DCT32x16, DCT16x32, DCT64x64, DCT64x32, DCT32x64) plus matched
+   private `idct1d_4` / `idct1d_8` IDCT primitives (bit-for-bit
+   ports of upstream `vardct::dct::inverse`). Each helper has a
+   roundtrip test with single-position-on, sign-mixed, and
+   arbitrary trial inputs.
+3. `a21872fd`, `b29cd555` — 8 upstream-parity tests calling
+   `jxl_encoder::vardct::dct::dc_from_dct_*` directly. All pass at
+   FP32 floor.
+4. `632043ac` — `EntropyMulTable::reference()` and `experimental()`
+   field-by-field parity vs `jxl_encoder::effort::EntropyMulTable`.
+5. `6de46b3a`, `abb79093` — validation gap doc reorganized with
+   per-helper status tables.
+
+**Currently G5.1-compliant**: 8 dc_from_dct + 9 restore_llf
+(transitive) + EntropyMulTable.
+
+**Still in-tree-only** (would need upstream visibility bumps):
+EPF Step 0 (inline copy-paste), AdjustQuantBlockAC heuristics
+(pub(crate) impl), compute_scaled_constants (pub(super)),
+ytox/ytob_ratio (pub fn in pub(crate) mod), INV_DC_QUANT (pub const
+in private mod).
+
 ### `compute_epf_sharpness_dct8_gpu` — end-to-end EPF sharpness picker on GPU (`9a8903dd`, `fe1bf69d`)
 
 Closes the EPF sharpness orchestrator gap for the DCT8-only path.
