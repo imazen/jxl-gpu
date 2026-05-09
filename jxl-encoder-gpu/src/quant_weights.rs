@@ -404,6 +404,15 @@ pub fn dct32x32_weights() -> Vec<f32> {
     )
 }
 
+/// Per-channel split: returns three 1024-float `Vec<f32>` slices for X/Y/B.
+pub fn dct32x32_weights_per_channel() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let all = dct32x32_weights();
+    let x = all[..1024].to_vec();
+    let y = all[1024..2048].to_vec();
+    let b = all[2048..3072].to_vec();
+    (x, y, b)
+}
+
 /// Generate DCT16x32 quant weights (16 rows × 32 cols = 512 per channel,
 /// 1536 total). Same table also used for DCT32x16.
 pub fn dct16x32_weights() -> Vec<f32> {

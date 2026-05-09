@@ -3478,6 +3478,98 @@ pub fn partitions_16x16_to_assignments(
     out
 }
 
+/// Convert a list of `Partition32x32` partitions (in 32×32-grid raster
+/// order) into a flat list of strategy assignments at the 8×8-block
+/// grid level.
+///
+/// Same shape as [`partitions_16x16_to_assignments`] but operates at
+/// the 32×32 tier. For `Sub16x16` partitions, recurses through the
+/// 4 contained `Partition16x16` choices via the existing 16×16 lowering.
+///
+/// `xsize_blocks_8` and `ysize_blocks_8` must both be multiples of 4
+/// (otherwise the 32×32 grid doesn't tile cleanly).
+pub fn partitions_32x32_to_assignments(
+    partitions: &[Partition32x32],
+    xsize_blocks_8: usize,
+    ysize_blocks_8: usize,
+) -> Vec<StrategyAssignment> {
+    use crate::forks::transform::{
+        RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32,
+    };
+
+    assert!(xsize_blocks_8.is_multiple_of(4));
+    assert!(ysize_blocks_8.is_multiple_of(4));
+    let xsize_blocks_32 = xsize_blocks_8 / 4;
+    let ysize_blocks_32 = ysize_blocks_8 / 4;
+    let xsize_blocks_16 = xsize_blocks_8 / 2;
+    assert_eq!(partitions.len(), xsize_blocks_32 * ysize_blocks_32);
+
+    let mut out = Vec::with_capacity(xsize_blocks_8 * ysize_blocks_8);
+    for ry in 0..ysize_blocks_32 {
+        for rx in 0..xsize_blocks_32 {
+            let bx = rx * 4;
+            let by = ry * 4;
+            match partitions[ry * xsize_blocks_32 + rx] {
+                Partition32x32::Dct32x32 => {
+                    out.push(StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT32X32,
+                    });
+                }
+                Partition32x32::TwoDct32x16Horizontal => {
+                    // Two 32×16 (32 tall × 16 wide) side-by-side. Each
+                    // covers 2×4 in the 8x8 grid.
+                    out.push(StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT32X16,
+                    });
+                    out.push(StrategyAssignment {
+                        bx: bx + 2,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT32X16,
+                    });
+                }
+                Partition32x32::TwoDct16x32Vertical => {
+                    // Two 16×32 (16 tall × 32 wide) stacked. Each covers
+                    // 4×2 in the 8x8 grid.
+                    out.push(StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT16X32,
+                    });
+                    out.push(StrategyAssignment {
+                        bx,
+                        by: by + 2,
+                        raw_strategy: RAW_STRATEGY_DCT16X32,
+                    });
+                }
+                Partition32x32::Sub16x16(subs) => {
+                    // Recurse: build a 2x2 mini-grid of Partition16x16
+                    // and call the 16x16 lowering on it. Position
+                    // ordering matches Partition16x16 conventions: TL,
+                    // TR, BL, BR within the 32×32 region.
+                    let mini = [subs[0], subs[1], subs[2], subs[3]];
+                    let mini_assignments =
+                        partitions_16x16_to_assignments(&mini, 4, 4);
+                    // mini_assignments is in 8×8-block coords relative to
+                    // a 4×4-block (= 32×32 pixel) region; offset by (bx, by).
+                    for a in mini_assignments {
+                        out.push(StrategyAssignment {
+                            bx: bx + a.bx,
+                            by: by + a.by,
+                            raw_strategy: a.raw_strategy,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let _ = xsize_blocks_16;
+    out
+}
+
 /// Group strategy assignments by `raw_strategy` code. Returns a
 /// `Vec<(raw_strategy, Vec<(bx, by)>)>` with strategies in
 /// ascending raw_strategy order — convenient for the per-strategy

@@ -1588,6 +1588,86 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
     (cost_dct8, cost_dct16x16)
 }
 
+/// Cost grid for DCT32x32, sharing inputs with the other strategy
+/// search helpers. Needs the padded plane to have both dims multiples
+/// of 32 (returns an empty Vec otherwise — caller skips the strategy).
+///
+/// libjxl entropy_mul for DCT32x32 = 1.34 (same as DCT16x16 in
+/// profile.entropy_mul_table).
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct32x32<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_x: &[f32],
+    xyb_y: &[f32],
+    xyb_b: &[f32],
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> Vec<f32> {
+    use crate::forks::transform::RAW_STRATEGY_DCT32X32;
+    if !padded_width.is_multiple_of(32) || !padded_height.is_multiple_of(32) {
+        return Vec::new();
+    }
+    let xb = padded_width / 32;
+    let yb = padded_height / 32;
+    let n_blocks = xb * yb;
+
+    let bx_p = repack_plane_to_blocks(xyb_x, padded_width, padded_height, 32, 32);
+    let by_p = repack_plane_to_blocks(xyb_y, padded_width, padded_height, 32, 32);
+    let bb_p = repack_plane_to_blocks(xyb_b, padded_width, padded_height, 32, 32);
+    let g_bx = enc.upload_blocks(&bx_p, n_blocks as u32, 1024);
+    let g_by = enc.upload_blocks(&by_p, n_blocks as u32, 1024);
+    let g_bb = enc.upload_blocks(&bb_p, n_blocks as u32, 1024);
+    let mask_row_base: Vec<u32> = (0..n_blocks)
+        .map(|i| {
+            let bx_i = i % xb;
+            let by_i = i / xb;
+            (by_i * 32 * padded_width + bx_i * 32) as u32
+        })
+        .collect();
+
+    // libjxl entropy_mul: profile.entropy_mul_table[DCT32X32] = 1.34
+    let entropy_mul = 1.34_f32;
+
+    estimate_entropy_full_strategy_batch_persistent(
+        enc,
+        &g_bx,
+        &g_by,
+        &g_bb,
+        RAW_STRATEGY_DCT32X32,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        &mask_row_base,
+        scaled_constants,
+        entropy_mul,
+        CostMode::Upstream {
+            quant_for_coeffs: quant_y,
+        },
+    )
+}
+
 /// Cost grid for one rectangular DCT16x8 or DCT8x16 strategy, sharing
 /// the inputs already prepared by [`strategy_search_costs_dct8_16x16`].
 ///
