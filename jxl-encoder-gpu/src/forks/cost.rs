@@ -1674,6 +1674,176 @@ pub fn strategy_search_costs_dct32x32<R: Runtime>(
     )
 }
 
+/// Cost grid for DCT64x64. Returns empty Vec when image dims aren't
+/// multiples of 64.
+///
+/// libjxl entropy_mul: profile.entropy_mul_table[DCT64X64] = 2.25
+/// (verified against jxl-encoder/src/effort.rs::EntropyMulTable::reference).
+/// As with DCT32x32, we use a higher tuned value pending the rest
+/// of the cost-model adjustments (see strategy_search_costs_dct32x32).
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct64x64<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_x: &[f32],
+    xyb_y: &[f32],
+    xyb_b: &[f32],
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> Vec<f32> {
+    use crate::forks::transform::RAW_STRATEGY_DCT64X64;
+    if !padded_width.is_multiple_of(64) || !padded_height.is_multiple_of(64) {
+        return Vec::new();
+    }
+    let xb = padded_width / 64;
+    let yb = padded_height / 64;
+    let n_blocks = xb * yb;
+    let coeff_count = 4096_u32;
+
+    let bx_p = repack_plane_to_blocks(xyb_x, padded_width, padded_height, 64, 64);
+    let by_p = repack_plane_to_blocks(xyb_y, padded_width, padded_height, 64, 64);
+    let bb_p = repack_plane_to_blocks(xyb_b, padded_width, padded_height, 64, 64);
+    let g_bx = enc.upload_blocks(&bx_p, n_blocks as u32, coeff_count);
+    let g_by = enc.upload_blocks(&by_p, n_blocks as u32, coeff_count);
+    let g_bb = enc.upload_blocks(&bb_p, n_blocks as u32, coeff_count);
+    let mask_row_base: Vec<u32> = (0..n_blocks)
+        .map(|i| {
+            let bx_i = i % xb;
+            let by_i = i / xb;
+            (by_i * 64 * padded_width + bx_i * 64) as u32
+        })
+        .collect();
+
+    // libjxl entropy_mul = 2.25; bumped here pending the rest of the
+    // cost-model adjustments. Same rationale as DCT32x32.
+    let entropy_mul = 3.5_f32;
+
+    estimate_entropy_full_strategy_batch_persistent(
+        enc,
+        &g_bx,
+        &g_by,
+        &g_bb,
+        RAW_STRATEGY_DCT64X64,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        &mask_row_base,
+        scaled_constants,
+        entropy_mul,
+        CostMode::Upstream {
+            quant_for_coeffs: quant_y,
+        },
+    )
+}
+
+/// Cost grid for DCT64x32 or DCT32x64 (rectangular DCT64 family).
+/// Returns empty Vec when image dims aren't aligned for the chosen
+/// strategy.
+///
+/// libjxl entropy_mul: profile.entropy_mul_table[DCT64X32] = 2.25
+/// (same as DCT64x64). Tuned higher here pending the rest of the
+/// cost-model adjustments.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct64x32_or_32x64<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_x: &[f32],
+    xyb_y: &[f32],
+    xyb_b: &[f32],
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    raw_strategy: u8,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> Vec<f32> {
+    use crate::forks::transform::{tile_dims_pixels, RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT64X32};
+    debug_assert!(
+        raw_strategy == RAW_STRATEGY_DCT64X32 || raw_strategy == RAW_STRATEGY_DCT32X64,
+        "this helper is for DCT64x32/DCT32x64 only; got {raw_strategy}"
+    );
+    let (tile_w, tile_h) = tile_dims_pixels(raw_strategy);
+    if !padded_width.is_multiple_of(tile_w) || !padded_height.is_multiple_of(tile_h) {
+        return Vec::new();
+    }
+    let bx = padded_width / tile_w;
+    let by = padded_height / tile_h;
+    let n_blocks = bx * by;
+    let coeff_count = (tile_w * tile_h) as u32;
+
+    let bx_p = repack_plane_to_blocks(xyb_x, padded_width, padded_height, tile_w, tile_h);
+    let by_p = repack_plane_to_blocks(xyb_y, padded_width, padded_height, tile_w, tile_h);
+    let bb_p = repack_plane_to_blocks(xyb_b, padded_width, padded_height, tile_w, tile_h);
+    let g_bx = enc.upload_blocks(&bx_p, n_blocks as u32, coeff_count);
+    let g_by = enc.upload_blocks(&by_p, n_blocks as u32, coeff_count);
+    let g_bb = enc.upload_blocks(&bb_p, n_blocks as u32, coeff_count);
+    let mask_row_base: Vec<u32> = (0..n_blocks)
+        .map(|i| {
+            let bx_i = i % bx;
+            let by_i = i / bx;
+            (by_i * tile_h * padded_width + bx_i * tile_w) as u32
+        })
+        .collect();
+
+    let entropy_mul = 3.5_f32;
+
+    estimate_entropy_full_strategy_batch_persistent(
+        enc,
+        &g_bx,
+        &g_by,
+        &g_bb,
+        raw_strategy,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        &mask_row_base,
+        scaled_constants,
+        entropy_mul,
+        CostMode::Upstream {
+            quant_for_coeffs: quant_y,
+        },
+    )
+}
+
 /// Cost grid for DCT32x16 or DCT16x32 (the rectangular DCT32 family).
 /// Returns empty Vec when image dims aren't compatible.
 ///

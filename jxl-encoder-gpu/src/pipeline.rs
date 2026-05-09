@@ -3570,6 +3570,93 @@ pub fn partitions_32x32_to_assignments(
     out
 }
 
+/// Convert a list of `Partition64x64` partitions (in 64×64-grid raster
+/// order) into a flat list of strategy assignments at the 8×8-block
+/// grid level.
+///
+/// Recurses through Sub32x32 → Partition32x32 via the existing
+/// [`partitions_32x32_to_assignments`] helper.
+///
+/// `xsize_blocks_8` and `ysize_blocks_8` must both be multiples of 8
+/// (otherwise the 64×64 grid doesn't tile cleanly).
+pub fn partitions_64x64_to_assignments(
+    partitions: &[Partition64x64],
+    xsize_blocks_8: usize,
+    ysize_blocks_8: usize,
+) -> Vec<StrategyAssignment> {
+    use crate::forks::transform::{
+        RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
+    };
+
+    assert!(xsize_blocks_8.is_multiple_of(8));
+    assert!(ysize_blocks_8.is_multiple_of(8));
+    let xsize_blocks_64 = xsize_blocks_8 / 8;
+    let ysize_blocks_64 = ysize_blocks_8 / 8;
+    assert_eq!(partitions.len(), xsize_blocks_64 * ysize_blocks_64);
+
+    let mut out = Vec::with_capacity(xsize_blocks_8 * ysize_blocks_8);
+    for ry in 0..ysize_blocks_64 {
+        for rx in 0..xsize_blocks_64 {
+            let bx = rx * 8;
+            let by = ry * 8;
+            match partitions[ry * xsize_blocks_64 + rx] {
+                Partition64x64::Dct64x64 => {
+                    out.push(StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT64X64,
+                    });
+                }
+                Partition64x64::TwoDct64x32Horizontal => {
+                    // Two 64×32 (64 tall × 32 wide) side-by-side. Each
+                    // covers 4×8 in the 8x8 grid.
+                    out.push(StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT64X32,
+                    });
+                    out.push(StrategyAssignment {
+                        bx: bx + 4,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT64X32,
+                    });
+                }
+                Partition64x64::TwoDct32x64Vertical => {
+                    // Two 32×64 (32 tall × 64 wide) stacked. Each covers
+                    // 8×4 in the 8x8 grid.
+                    out.push(StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: RAW_STRATEGY_DCT32X64,
+                    });
+                    out.push(StrategyAssignment {
+                        bx,
+                        by: by + 4,
+                        raw_strategy: RAW_STRATEGY_DCT32X64,
+                    });
+                }
+                Partition64x64::Sub32x32(subs) => {
+                    // Recurse: build 4 Partition32x32 entries in raster
+                    // order [TL, TR, BL, BR] within the 64×64 region
+                    // and call the 32x32 lowering on the 8×8-block-sized
+                    // mini-grid (8 blocks per side = 4×4 in 32x32-grid).
+                    let mini = [subs[0], subs[1], subs[2], subs[3]];
+                    let mini_assignments =
+                        partitions_32x32_to_assignments(&mini, 8, 8);
+                    for a in mini_assignments {
+                        out.push(StrategyAssignment {
+                            bx: bx + a.bx,
+                            by: by + a.by,
+                            raw_strategy: a.raw_strategy,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Group strategy assignments by `raw_strategy` code. Returns a
 /// `Vec<(raw_strategy, Vec<(bx, by)>)>` with strategies in
 /// ascending raw_strategy order — convenient for the per-strategy

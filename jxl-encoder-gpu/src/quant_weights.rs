@@ -709,6 +709,25 @@ pub fn afv_weights() -> Vec<f32> {
     weights
 }
 
+/// Per-channel split: returns three 4096-float `Vec<f32>` slices for X/Y/B.
+pub fn dct64x64_weights_per_channel() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let all = dct64x64_weights();
+    let x = all[..4096].to_vec();
+    let y = all[4096..8192].to_vec();
+    let b = all[8192..12288].to_vec();
+    (x, y, b)
+}
+
+/// Per-channel split: returns three 2048-float `Vec<f32>` slices for X/Y/B.
+/// Used by both DCT32x64 and DCT64x32 paths (shared band table).
+pub fn dct32x64_weights_per_channel() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let all = dct32x64_weights();
+    let x = all[..2048].to_vec();
+    let y = all[2048..4096].to_vec();
+    let b = all[4096..6144].to_vec();
+    (x, y, b)
+}
+
 /// Generate DCT32x64 quant weights (32 rows × 64 cols = 2048 per channel,
 /// 6144 total). Same table also used for DCT64x32.
 pub fn dct32x64_weights() -> Vec<f32> {
