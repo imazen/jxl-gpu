@@ -1009,46 +1009,17 @@ impl<R: Runtime> LossyEncoder<R> {
         );
         mark("cost_subblock_8x8");
 
-        // AFV0-3 cost grid. Isolated test
-        // (test_afv_isolated_reconstruct_uniform_input) confirms the
-        // reconstruct branch is correct on smooth content (RMSE 1.8e-3
-        // vs DCT8's 1.5e-2 on a gradient — AFV is GENUINELY better
-        // there). The real-image regression comes from over-selection
-        // on detailed content where AFV's corner-DCT basis doesn't fit.
-        // Try 10× anti-bias mul to suppress AFV picks on detailed content.
-        let mask_host_for_afv = enc.download_plane(&g_mask);
-        let mask_block_major =
-            crate::forks::cost::repack_plane_to_blocks(&mask_host_for_afv, pw, ph, 8, 8);
-        let (afv_wx_cg, afv_wy_cg, afv_wb_cg) =
-            crate::quant_weights::afv_weights_per_channel();
-        let qac_vec_for_afv = vec![qac; nb8];
-        let afv_costs = crate::forks::afv::afv_cost_grid_xyb_host(
-            enc,
-            &crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE,
-            &bx8_full,
-            &by8_full,
-            &bb8_full,
-            &afv_wx_cg,
-            &afv_wy_cg,
-            &afv_wb_cg,
-            &qac_vec_for_afv,
-            &qac_vec_for_afv,
-            &qac_vec_for_afv,
-            &self.thresholds_x,
-            &self.thresholds_y,
-            &self.thresholds_b,
-            &mask_block_major,
-        );
-        debug_assert_eq!(afv_costs.len(), 4 * nb8);
-        let afv_anti_bias = 100.0_f32 * dist_bias;
-        let mut cost_afv0 = afv_costs[0..nb8].to_vec();
-        let mut cost_afv1 = afv_costs[nb8..2 * nb8].to_vec();
-        let mut cost_afv2 = afv_costs[2 * nb8..3 * nb8].to_vec();
-        let mut cost_afv3 = afv_costs[3 * nb8..4 * nb8].to_vec();
-        for c in cost_afv0.iter_mut() { *c *= afv_anti_bias; }
-        for c in cost_afv1.iter_mut() { *c *= afv_anti_bias; }
-        for c in cost_afv2.iter_mut() { *c *= afv_anti_bias; }
-        for c in cost_afv3.iter_mut() { *c *= afv_anti_bias; }
+        // AFV0-3 cost grid: SKIPPED. With the 100× anti-bias needed to
+        // keep AFV from over-selecting on detailed content, AFV
+        // practically never wins on real photos. Computing the cost
+        // grid (~175 ms on 1024×1024) is wasted work for the rare
+        // case it would influence picks. Plumbing kept for re-enable
+        // once persistent AFV transforms (task #38) cut the cost to
+        // ~30 ms — at which point a lower anti-bias may also be tried.
+        let cost_afv0: Vec<f32> = Vec::new();
+        let cost_afv1: Vec<f32> = Vec::new();
+        let cost_afv2: Vec<f32> = Vec::new();
+        let cost_afv3: Vec<f32> = Vec::new();
         mark("cost_afv");
 
         // Distance-scaled anti-bias for sub-blocks (same scale as DCT16).
@@ -1262,17 +1233,19 @@ impl<R: Runtime> LossyEncoder<R> {
         // Stage 5: host-side selector + assignments. All 5 sub-block
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
         // reference) — same trick as DCT32 needed.
-        // AFV cost grids fed into selector with 10× anti-bias.
+        // AFV cost grids skipped (None) — see the cost-grid call site
+        // above. Plumbing kept for re-enable post #38.
+        let _ = (&cost_afv0, &cost_afv1, &cost_afv2, &cost_afv3);
         let sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: Some(&cost_dct4x4),
             dct4x8: Some(&cost_dct4x8),
             dct8x4: Some(&cost_dct8x4),
             identity: Some(&cost_identity),
             dct2x2: Some(&cost_dct2x2),
-            afv0: Some(&cost_afv0),
-            afv1: Some(&cost_afv1),
-            afv2: Some(&cost_afv2),
-            afv3: Some(&cost_afv3),
+            afv0: None,
+            afv1: None,
+            afv2: None,
+            afv3: None,
         };
         let extra16 = CostGrids16x16 {
             dct_16x8: Some(&cost_dct16x8),
