@@ -386,10 +386,41 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         let grid_h = tile_h as u32;
         let (llf_x, llf_y) = llf_dims_for_strategy(raw_strategy);
 
-        // Per-block qac at this strategy's first-block coord.
+        // Per-region qac. For multi-block transforms (DCT16x16, DCT32x32,
+        // DCT64x64, rectangular variants, etc.), take the MAX qac across
+        // all covered 8x8 sub-blocks of the region — not just the
+        // first-block coord. Higher qac = lighter quant = better quality;
+        // the butteraugli refinement loop bumps qac UP on perceptually-
+        // bad blocks. If we ignored sub-block qac for multi-block
+        // transforms, the loop's bumps would be discarded for 3/4 of the
+        // sub-blocks of a DCT16x16, 15/16 of a DCT32x32, etc., and the
+        // refined-strat pipeline would plateau (verified at d=1.5 in
+        // combined_strat_search_aq_demo before this fix).
+        //
+        // Single-block strategies (DCT8, DCT2x2, IDENTITY, DCT4x4,
+        // sub-block 8x8 family) have covered_blocks_xy = (1, 1) so the
+        // MAX over a single coord equals the first-block read — no
+        // behaviour change. AFV is single-block too (8x8 grid).
+        let cov_x = (tile_w as usize / 8).max(1);
+        let cov_y = (tile_h as usize / 8).max(1);
         let qac_for_strategy: Vec<f32> = coords
             .iter()
-            .map(|&(bx, by)| qac_per_8x8_block[by * xsize_blocks_8 + bx])
+            .map(|&(bx, by)| {
+                let mut q = qac_per_8x8_block[by * xsize_blocks_8 + bx];
+                for dy in 0..cov_y {
+                    for dx in 0..cov_x {
+                        let bxx = bx + dx;
+                        let byy = by + dy;
+                        if bxx < xsize_blocks_8 && byy < ysize_blocks_8 {
+                            let qq = qac_per_8x8_block[byy * xsize_blocks_8 + bxx];
+                            if qq > q {
+                                q = qq;
+                            }
+                        }
+                    }
+                }
+                q
+            })
             .collect();
 
         // Per-strategy quant matrix template (caller-supplied).
