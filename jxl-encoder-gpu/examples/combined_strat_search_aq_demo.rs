@@ -20,7 +20,8 @@ fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::butteraugli_loop::{
         ButteraugliLoopGpu, RefineIterTrace, linear_planar_to_srgb_u8_interleaved,
-        refine_aq_field_gpu, refine_aq_field_gpu_with_strategy_search,
+        refine_and_encode_best_of_both, refine_aq_field_gpu,
+        refine_aq_field_gpu_with_strategy_search,
     };
     use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
@@ -269,6 +270,46 @@ fn main() {
     let cost_overhead = dt_refine_ss.as_secs_f64() / dt_refine_un.as_secs_f64();
     println!(
         "  combined-mode encode cost:    {cost_overhead:.2}× refine+DCT8 cost"
+    );
+
+    // Pipeline 5: best-of-both (uncompromising-quality wrapper).
+    // Runs both pipelines, picks the lower-butteraugli winner.
+    let t = std::time::Instant::now();
+    let (_bob_r, _bob_g, _bob_b, bob_path, bob_scores) = refine_and_encode_best_of_both(
+        &enc,
+        &lossy,
+        &mut bg,
+        &r,
+        &g,
+        &b,
+        &pixels,
+        &initial_aq,
+        distance,
+        iters,
+    )
+    .expect("refine_and_encode_best_of_both");
+    let dt_bob = t.elapsed();
+
+    println!("\n=== Best-of-both pipeline (uncompromising mode) ===");
+    println!(
+        "  picked: {bob_path:?}  (DCT8: {:.4}, strat: {:.4}; pnorm_3 DCT8: {:.4}, strat: {:.4})",
+        bob_scores.dct8_score,
+        bob_scores.strat_search_score,
+        bob_scores.dct8_pnorm_3,
+        bob_scores.strat_search_pnorm_3,
+    );
+    let bob_score = bob_scores
+        .dct8_score
+        .min(bob_scores.strat_search_score);
+    println!(
+        "  winning score: {bob_score:.4}  ({:.0} ms total, {:.2}× refine+DCT8)",
+        dt_bob.as_secs_f64() * 1000.0,
+        dt_bob.as_secs_f64() / dt_refine_un.as_secs_f64(),
+    );
+    println!(
+        "  best-of-both vs refine+DCT8:  {:+.4} ({:+.2}%)",
+        bob_score - score_refine_un,
+        pct(bob_score, score_refine_un),
     );
 }
 
