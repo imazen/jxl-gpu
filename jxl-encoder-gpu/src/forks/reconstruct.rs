@@ -340,11 +340,8 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     channel: usize,
     out_plane: &mut [f32],
 ) {
-    use crate::forks::dequant::adjust_quant_bias;
-    use crate::forks::quantize::quantize_blocks_gpu_broadcast_w;
     use crate::forks::transform::{
-        apply_dct_batch_gpu, coeff_count_per_strategy, tile_dims_pixels,
-        RAW_STRATEGY_DCT,
+        apply_dct_batch_persistent, coeff_count_per_strategy, tile_dims_pixels, RAW_STRATEGY_DCT,
     };
     use crate::pipeline::group_assignments_by_strategy;
 
@@ -372,11 +369,6 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         let grid_h = tile_h as u32;
         let (llf_x, llf_y) = llf_dims_for_strategy(raw_strategy);
 
-        // Step 1: forward DCT (gather + dispatch in one).
-        let coeffs =
-            apply_dct_batch_gpu(enc, xyb_channel, padded_width, &coords, raw_strategy);
-        debug_assert_eq!(coeffs.len(), coords.len() * coeff_count);
-
         // Per-block qac at this strategy's first-block coord.
         let qac_for_strategy: Vec<f32> = coords
             .iter()
@@ -391,10 +383,25 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             "weights template for strategy {raw_strategy} must have {coeff_count} entries"
         );
 
-        // Step 2: quantize via broadcast-weights kernel.
-        let quant = quantize_blocks_gpu_broadcast_w(
-            enc,
-            &coeffs,
+        // Step 1: host-gather pixel blocks for this strategy + upload.
+        let n_blocks = coords.len();
+        let block_pixels = (tile_w * tile_h) as usize;
+        let mut batch = Vec::with_capacity(n_blocks * block_pixels);
+        for &(bx, by) in &coords {
+            let x0 = bx * 8;
+            let y0 = by * 8;
+            for dy in 0..tile_h as usize {
+                let src_off = (y0 + dy) * padded_width + x0;
+                batch.extend_from_slice(&xyb_channel[src_off..src_off + tile_w as usize]);
+            }
+        }
+        let g_pixels = enc.upload_blocks(&batch, n_blocks as u32, block_pixels as u32);
+
+        // Step 2: persistent forward DCT → quantize → dequant chain.
+        // Three GPU launches with no host roundtrips between them.
+        let g_coeffs = apply_dct_batch_persistent(enc, &g_pixels, raw_strategy);
+        let g_quant = enc.quantize_large_blocks_broadcast_w_persistent(
+            &g_coeffs,
             &weights_template,
             &qac_for_strategy,
             thresholds,
@@ -403,35 +410,23 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             llf_x,
             llf_y,
         );
+        let g_dequant = if raw_strategy == RAW_STRATEGY_DCT {
+            enc.dequant_strategy_dct8_persistent(
+                &g_quant,
+                &weights_template,
+                &qac_for_strategy,
+                channel,
+            )
+        } else {
+            enc.dequant_strategy_persistent(&g_quant, &weights_template, &qac_for_strategy)
+        };
 
-        // Step 3: dequant — host-side, with proper inv_qac scaling
-        // and (for DCT8 only) adjust_quant_bias. The GPU
-        // dequant_simple kernel produces `quant * weights` which is
-        // missing the inv_qac divisor and the bias correction;
-        // applying both on host produces upstream-faithful values.
-        //
-        // Formula (matches upstream dequant_dct8):
-        //   For DCT8:    dequant[i] = adjust_quant_bias(quant[i], channel) * weight[i] / qac
-        //   For others:  dequant[i] = quant[i] * weight[i] / qac
-        //
-        // (No CfL is applied here — Phase A has CfL=0 baked in. Phase
-        // B will add per-strategy CfL via dequant_dct8 for the DCT8
-        // group when we wire 3-channel encode through this path.)
-        let mut dequant = vec![0.0_f32; quant.len()];
-        let is_dct8 = raw_strategy == RAW_STRATEGY_DCT;
-        for (block_i, &(_bx, _by)) in coords.iter().enumerate() {
-            let inv_qac = 1.0 / qac_for_strategy[block_i];
-            let off = block_i * coeff_count;
-            for i in 0..coeff_count {
-                let q_int = quant[off + i];
-                let q_f32 = if is_dct8 {
-                    adjust_quant_bias(q_int, channel)
-                } else {
-                    q_int as f32
-                };
-                dequant[off + i] = q_f32 * weights_template[i] * inv_qac;
-            }
-        }
+        // Step 3: download dequant result for host LLF restore.
+        // (LLF restore is per-block scalar work; deferring to host
+        // avoids a separate GPU kernel per strategy. Future work could
+        // fuse this into a single launch.)
+        let mut dequant = enc.download_blocks(&g_dequant);
+        debug_assert_eq!(dequant.len(), n_blocks * coeff_count);
 
         // Step 4: per-block LLF restore. Pull this strategy's
         // (llf_x × llf_y) DC values from dc_grid_per_8x8_block at the
