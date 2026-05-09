@@ -59,7 +59,9 @@ use crate::launch::dc_restore::restore_dc;
 use crate::launch::dct4::{
     dct_4x4_full, dct_4x8_full, dct_8x4_full, idct_4x4_full, idct_4x8_full, idct_8x4_full,
 };
+use crate::launch::dct2x2::{dct2x2_forward, dct2x2_inverse};
 use crate::launch::dct8::{dct_8x8, dct_8x8_wide, idct_8x8, idct_8x8_wide};
+use crate::launch::identity::{identity_forward, identity_inverse};
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
@@ -946,6 +948,21 @@ impl<R: Runtime> GpuEncoder<R> {
             coeffs_per_block: out_coeffs_per_block,
             _r: core::marker::PhantomData,
         }
+    }
+
+    // ── IDENTITY + DCT2x2 (8×8 input, 64-float output, 8×8-class
+    //    sub-block strategies) ─────────────────────────────────────────
+    pub fn identity_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 64, 64, "Identity", identity_forward::<R>)
+    }
+    pub fn inverse_identity_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 64, 64, "InverseIdentity", identity_inverse::<R>)
+    }
+    pub fn dct2x2_persistent(&self, blocks: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(blocks, 64, 64, "DCT2x2", dct2x2_forward::<R>)
+    }
+    pub fn inverse_dct2x2_persistent(&self, c: &GpuBlocks<R>) -> GpuBlocks<R> {
+        self.run_per_block_kernel(c, 64, 64, "InverseDCT2x2", dct2x2_inverse::<R>)
     }
 
     // ── DCT/IDCT 4-family (sub-block DCTs operating on 8×8 input,

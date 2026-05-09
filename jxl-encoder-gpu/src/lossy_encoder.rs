@@ -969,11 +969,30 @@ impl<R: Runtime> LossyEncoder<R> {
             qac, qac, qac, 0, 0, scaled_constants, 1.72,
         );
 
-        // IDENTITY and DCT2x2 deferred: their forward/inverse kernels
-        // exist as Vec<f32> APIs but lack persistent variants
-        // (apply_dct_batch_persistent / apply_idct_batch_persistent
-        // would panic). Adding persistent variants is the next step.
-        // For now, treat them as not-considered in the selector.
+        // IDENTITY: libjxl reference 1.0428, bumped 2× for anti-bias
+        // (visible blocking on detailed content if under-penalized).
+        let (id_x, id_y, id_b) = identity_weights_per_channel();
+        let inv_id_x: Vec<f32> = id_x.iter().map(|w| 1.0 / w).collect();
+        let inv_id_y: Vec<f32> = id_y.iter().map(|w| 1.0 / w).collect();
+        let inv_id_b: Vec<f32> = id_b.iter().map(|w| 1.0 / w).collect();
+        let cost_identity = strategy_search_costs_subblock_8x8(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_IDENTITY,
+            &id_x, &id_y, &id_b,
+            &inv_id_x, &inv_id_y, &inv_id_b,
+            qac, qac, qac, 0, 0, scaled_constants, 2.09,
+        );
+
+        // DCT2X2: libjxl reference 0.95, bumped 2× for anti-bias.
+        let (d2_x, d2_y, d2_b) = dct2x2_weights_per_channel();
+        let inv_d2_x: Vec<f32> = d2_x.iter().map(|w| 1.0 / w).collect();
+        let inv_d2_y: Vec<f32> = d2_y.iter().map(|w| 1.0 / w).collect();
+        let inv_d2_b: Vec<f32> = d2_b.iter().map(|w| 1.0 / w).collect();
+        let cost_dct2x2 = strategy_search_costs_subblock_8x8(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT2X2,
+            &d2_x, &d2_y, &d2_b,
+            &inv_d2_x, &inv_d2_y, &inv_d2_b,
+            qac, qac, qac, 0, 0, scaled_constants, 1.90,
+        );
         mark("cost_subblock_8x8");
 
         let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16(
@@ -1171,15 +1190,15 @@ impl<R: Runtime> LossyEncoder<R> {
         };
         mark("cost_dct64_family");
 
-        // Stage 5: host-side selector + assignments. Sub-block strategies
-        // (DCT4x4/4x8/8x4) feed in with anti-bias entropy_muls (2× the
-        // libjxl reference) — same trick as DCT32 needed.
+        // Stage 5: host-side selector + assignments. All 5 sub-block
+        // strategies feed in with anti-bias entropy_muls (2× the libjxl
+        // reference) — same trick as DCT32 needed.
         let sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: Some(&cost_dct4x4),
             dct4x8: Some(&cost_dct4x8),
             dct8x4: Some(&cost_dct8x4),
-            identity: None,
-            dct2x2: None,
+            identity: Some(&cost_identity),
+            dct2x2: Some(&cost_dct2x2),
         };
         let extra16 = CostGrids16x16 {
             dct_16x8: Some(&cost_dct16x8),

@@ -281,6 +281,8 @@ pub fn apply_dct_batch_persistent<R: Runtime>(
         RAW_STRATEGY_DCT64X32 => enc.dct_64x32_persistent(blocks),
         RAW_STRATEGY_DCT32X64 => enc.dct_32x64_persistent(blocks),
         RAW_STRATEGY_DCT64X64 => enc.dct_64x64_persistent(blocks),
+        RAW_STRATEGY_IDENTITY => enc.identity_persistent(blocks),
+        RAW_STRATEGY_DCT2X2 => enc.dct2x2_persistent(blocks),
         _ => panic!("apply_dct_batch_persistent: unsupported strategy {raw_strategy}"),
     }
 }
@@ -306,6 +308,8 @@ pub fn apply_idct_batch_persistent<R: Runtime>(
         RAW_STRATEGY_DCT64X32 => enc.idct_64x32_persistent(coeffs),
         RAW_STRATEGY_DCT32X64 => enc.idct_32x64_persistent(coeffs),
         RAW_STRATEGY_DCT64X64 => enc.idct_64x64_persistent(coeffs),
+        RAW_STRATEGY_IDENTITY => enc.inverse_identity_persistent(coeffs),
+        RAW_STRATEGY_DCT2X2 => enc.inverse_dct2x2_persistent(coeffs),
         _ => panic!("apply_idct_batch_persistent: unsupported strategy {raw_strategy}"),
     }
 }
