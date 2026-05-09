@@ -1628,6 +1628,70 @@ mod tests {
         }
     }
 
+    /// Performance diagnostic: isolate host-side `repack_plane_to_blocks`
+    /// cost (per-channel, per-strategy) and synchronous GPU downloads
+    /// in the cost-grid pipeline. Helps choose between optimization
+    /// targets (host repack vs GPU sync overhead).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_strat_search_cost_grid_substage_timing() {
+        use crate::forks::cost::repack_plane_to_blocks;
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let pw = 1024_usize;
+        let ph = 1024_usize;
+        let plane: Vec<f32> = (0..pw * ph).map(|i| (i as f32 * 0.001).sin()).collect();
+
+        // Time: host repack (3 channels) for 8x8 tile shape
+        let t0 = std::time::Instant::now();
+        let _b8x = repack_plane_to_blocks(&plane, pw, ph, 8, 8);
+        let _b8y = repack_plane_to_blocks(&plane, pw, ph, 8, 8);
+        let _b8b = repack_plane_to_blocks(&plane, pw, ph, 8, 8);
+        let dt_repack8 = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        let _b16x = repack_plane_to_blocks(&plane, pw, ph, 16, 16);
+        let _b16y = repack_plane_to_blocks(&plane, pw, ph, 16, 16);
+        let _b16b = repack_plane_to_blocks(&plane, pw, ph, 16, 16);
+        let dt_repack16 = t1.elapsed();
+
+        let t2 = std::time::Instant::now();
+        let _br1x = repack_plane_to_blocks(&plane, pw, ph, 8, 16);
+        let _br1y = repack_plane_to_blocks(&plane, pw, ph, 8, 16);
+        let _br1b = repack_plane_to_blocks(&plane, pw, ph, 8, 16);
+        let _br2x = repack_plane_to_blocks(&plane, pw, ph, 16, 8);
+        let _br2y = repack_plane_to_blocks(&plane, pw, ph, 16, 8);
+        let _br2b = repack_plane_to_blocks(&plane, pw, ph, 16, 8);
+        let dt_repack_rect = t2.elapsed();
+
+        // Time: 3× synchronous DCT8 launches (with implicit downloads)
+        let blocks_per_strategy = (pw / 8) * (ph / 8) * 64;
+        let batch: Vec<f32> = vec![0.0_f32; blocks_per_strategy];
+        // warmup
+        let _ = enc.dct_8x8_blocks(&batch);
+        let t3 = std::time::Instant::now();
+        let _ = enc.dct_8x8_blocks(&batch);
+        let _ = enc.dct_8x8_blocks(&batch);
+        let _ = enc.dct_8x8_blocks(&batch);
+        let dt_dct8_3sync = t3.elapsed();
+
+        std::println!(
+            "[perf-diag] host repack_plane_to_blocks (3 channels):\n  \
+            8x8:    {:.2} ms\n  \
+            16x16:  {:.2} ms\n  \
+            16x8+8x16 (6 calls): {:.2} ms",
+            dt_repack8.as_secs_f64() * 1000.0,
+            dt_repack16.as_secs_f64() * 1000.0,
+            dt_repack_rect.as_secs_f64() * 1000.0,
+        );
+        std::println!(
+            "[perf-diag] 3× sync dct_8x8_blocks (Vec<f32> in/out, 1MB blocks each):\n  \
+            {:.2} ms (avg {:.2} ms/call)",
+            dt_dct8_3sync.as_secs_f64() * 1000.0,
+            dt_dct8_3sync.as_secs_f64() * 1000.0 / 3.0,
+        );
+    }
+
     /// Diagnostic: dump DCT8 and DCT16x16 forward-coeffs[0] for a
     /// uniform 0.4 input. Reveals the actual normalization convention
     /// used by this codebase's DCT kernels — needed to decide what the
