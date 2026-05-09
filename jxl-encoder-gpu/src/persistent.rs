@@ -149,6 +149,24 @@ impl<R: Runtime> GpuBlocks<R> {
     pub fn handle(&self) -> &Handle {
         &self.handle
     }
+
+    /// Wrap an externally-allocated GPU `Handle` as a `GpuBlocks`.
+    /// Caller is responsible for ensuring the handle's underlying
+    /// buffer holds at least `num_blocks * coeffs_per_block * 4`
+    /// bytes of `f32` data.
+    ///
+    /// Used by sub-modules that produce custom GPU outputs (e.g.,
+    /// `forks::afv::afv_transform_batch_persistent`) and want to hand
+    /// them back as the standard `GpuBlocks` type for use with the
+    /// rest of the persistent pipeline.
+    pub fn from_handle(handle: Handle, num_blocks: u32, coeffs_per_block: u32) -> Self {
+        Self {
+            handle,
+            num_blocks,
+            coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
 }
 
 /// Typed handle to GPU-resident per-block `i32` data — quantized

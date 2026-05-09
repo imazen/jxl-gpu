@@ -280,6 +280,81 @@ pub fn afv_transform_batch_gpu<R: Runtime>(
     out
 }
 
+/// Persistent variant of [`afv_transform_batch_gpu`]. Same inputs;
+/// returns `GpuBlocks<R>` (coeffs_per_block=64) instead of host
+/// `Vec<f32>`. Eliminates the 3 sync `read_one()` downloads — the
+/// 3 sub-block outputs (afv_dct_4x4, dct_4x4_raw, dct_4x8_raw) stay
+/// on GPU and are composed there via [`crate::launch::afv_compose`].
+///
+/// Saves ~9 ms per call (3 syncs at ~3 ms each on CUDA RTX 5070).
+/// In `afv_cost_grid_xyb_host` this is called 12 times (4 kinds × 3
+/// channels), so net savings ≈ 108 ms. Combined with the matching
+/// `inverse_afv_transform_batch_persistent` (TODO), the cost grid
+/// should drop from ~243 ms to ~35 ms (the original task #38 target).
+///
+/// Host-side work that's UNCHANGED:
+/// - per-block extract_afv_corner / extract_dct4_corner /
+///   extract_dct4x8_half (still needed because input is host
+///   `&[f32]`; if input becomes `GpuBlocks` in a future revision,
+///   add a GPU extract kernel).
+pub fn afv_transform_batch_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    basis_t: &[f32; 256],
+    pixel_blocks: &[f32],
+    afv_kind: AfvKind,
+) -> crate::persistent::GpuBlocks<R> {
+    use cubecl::prelude::*;
+
+    assert!(pixel_blocks.len().is_multiple_of(64));
+    let n_blocks = pixel_blocks.len() / 64;
+
+    // Per-block host extraction (same as afv_transform_batch_gpu).
+    let mut afv_corners = vec![0.0_f32; n_blocks * 16];
+    let mut dct4_corners = vec![0.0_f32; n_blocks * 16];
+    let mut dct4x8_halves = vec![0.0_f32; n_blocks * 32];
+    for b in 0..n_blocks {
+        let pix: &[f32; 64] = (&pixel_blocks[b * 64..b * 64 + 64]).try_into().unwrap();
+        let a = extract_afv_corner(pix, afv_kind);
+        let d = extract_dct4_corner(pix, afv_kind);
+        let h = extract_dct4x8_half(pix, afv_kind);
+        afv_corners[b * 16..b * 16 + 16].copy_from_slice(&a);
+        dct4_corners[b * 16..b * 16 + 16].copy_from_slice(&d);
+        dct4x8_halves[b * 32..b * 32 + 32].copy_from_slice(&h);
+    }
+
+    let client = enc.client_ref();
+    let nb_u32 = n_blocks as u32;
+
+    // 1. AFV 4×4 batched.
+    let h_in_a = client.create_from_slice(f32::as_bytes(&afv_corners));
+    let h_basis = client.create_from_slice(f32::as_bytes(basis_t));
+    let h_out_a = client.empty(n_blocks * 16 * 4);
+    crate::launch::afv::afv_dct_4x4::<R>(client, h_in_a, h_basis, h_out_a.clone(), nb_u32);
+
+    // 2. Raw DCT 4×4 batched.
+    let h_in_d = client.create_from_slice(f32::as_bytes(&dct4_corners));
+    let h_out_d = client.empty(n_blocks * 16 * 4);
+    crate::launch::dct4_raw::dct_4x4_raw::<R>(client, h_in_d, h_out_d.clone(), nb_u32);
+
+    // 3. Raw DCT 4×8 batched.
+    let h_in_8 = client.create_from_slice(f32::as_bytes(&dct4x8_halves));
+    let h_out_8 = client.empty(n_blocks * 32 * 4);
+    crate::launch::dct4_raw::dct_4x8_raw::<R>(client, h_in_8, h_out_8.clone(), nb_u32);
+
+    // 4. GPU compose into final 64-coef AFV layout + DC pack. NO sync.
+    let h_out = client.empty(n_blocks * 64 * 4);
+    crate::launch::afv_compose::afv_compose_forward::<R>(
+        client,
+        h_out_a,
+        h_out_d,
+        h_out_8,
+        h_out.clone(),
+        nb_u32,
+    );
+
+    crate::persistent::GpuBlocks::from_handle(h_out, nb_u32, 64)
+}
+
 /// Batched inverse AFV transform for many 8×8 blocks of the SAME
 /// `afv_kind`. Symmetric to [`afv_transform_batch_gpu`]. 3 GPU
 /// launches total: AFV 4×4 inverse + raw IDCT 4×4 + raw IDCT 4×8.
@@ -710,6 +785,42 @@ mod tests {
     use crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE;
 
     type B = cubecl::cuda::CudaRuntime;
+
+    /// `afv_transform_batch_persistent` must produce GPU-resident
+    /// output bit-exactly equal to the host-downloaded result of
+    /// `afv_transform_batch_gpu`. Checks all 4 AFV kinds across a
+    /// non-trivial batch.
+    #[test]
+    fn test_afv_transform_batch_persistent_matches_host() {
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let n_blocks = 17_usize; // odd, exercises tail thread
+        // Synthesize per-block pixels with non-trivial pattern.
+        let mut pixel_blocks = vec![0.0_f32; n_blocks * 64];
+        for b in 0..n_blocks {
+            for i in 0..64 {
+                let bx = i % 8;
+                let by = i / 8;
+                pixel_blocks[b * 64 + i] =
+                    (b as f32 * 0.13) + bx as f32 * 0.5 + by as f32 * 0.7
+                        - (bx * by) as f32 * 0.05;
+            }
+        }
+        for kind in 0_usize..4 {
+            let host = afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixel_blocks, kind);
+            let gpu_blocks =
+                afv_transform_batch_persistent(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixel_blocks, kind);
+            assert_eq!(gpu_blocks.num_blocks() as usize, n_blocks);
+            assert_eq!(gpu_blocks.coeffs_per_block(), 64);
+            let gpu_host = enc.download_blocks(&gpu_blocks);
+            assert_eq!(gpu_host.len(), host.len());
+            for (i, (&h, &g)) in host.iter().zip(gpu_host.iter()).enumerate() {
+                assert!(
+                    (h - g).abs() < 1e-4,
+                    "kind={kind} idx={i} host={h:.6} gpu={g:.6}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_extract_afv_corner_kinds() {

@@ -6,6 +6,7 @@
 
 pub mod adaptive_quant;
 pub mod afv;
+pub mod afv_compose;
 pub mod block_l2;
 pub mod cfl;
 pub mod dc_restore;
