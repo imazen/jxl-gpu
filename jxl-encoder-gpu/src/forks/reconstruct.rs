@@ -2214,7 +2214,6 @@ mod tests {
         // Smooth gradient input — reveals reconstruction bugs that
         // uniform input hides (uniform DCT-transforms-back-to-DC means
         // all AC coeffs are 0 and the output is just DC).
-        let m = 0.5_f32;
         let xyb: Vec<f32> = (0..pw * ph)
             .map(|i| {
                 let x = (i % pw) as f32 / pw as f32;
@@ -2226,7 +2225,7 @@ mod tests {
         let qac = alloc::vec![1.0_f32; nb8];
         let thresholds = [0.0_f32; 4];
 
-        let (afv_x, afv_y, afv_b) = afv_weights_per_channel();
+        let (_afv_x, afv_y, _afv_b) = afv_weights_per_channel();
         let weights_for = move |s: u8| -> Vec<f32> {
             match s {
                 RAW_STRATEGY_AFV0
@@ -2386,6 +2385,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_reconstruct_mixed_strategy_gpu_dct8_and_dct16x16() {
         // Mix two strategies: 3 DCT8 blocks + 2 DCT16x16 blocks at
         // non-overlapping positions.

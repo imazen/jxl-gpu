@@ -846,7 +846,6 @@ mod tests {
         assert!(costs.iter().any(|&c| c > 0.0));
     }
 
-    #[test]
     /// Empirical: for uniform input M = 1.0, what does forward AFV
     /// actually produce at coeffs[0],[1],[8] AFTER pack_afv_dcs? The
     /// values reveal the real DCT scaling and let us derive the
