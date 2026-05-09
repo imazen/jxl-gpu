@@ -1823,7 +1823,7 @@ pub fn strategy_search_costs_dct64x64<R: Runtime>(
     // lands. Same rationale as DCT32x32 (which is at 2.5 vs libjxl
     // 1.48). The proper fix is a content-aware gate (e.g. mask1x1
     // smoothness threshold) before DCT64 even enters the cost grid.
-    let entropy_mul = 8.0_f32;
+    let entropy_mul = 16.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
@@ -1912,7 +1912,7 @@ pub fn strategy_search_costs_dct64x32_or_32x64<R: Runtime>(
 
     // DCT64x32 / DCT32x64 — same suppression rationale as DCT64x64
     // (see the corpus-sweep note above). Bumped 3.5 → 8.0 May 9 2026.
-    let entropy_mul = 8.0_f32;
+    let entropy_mul = 16.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
