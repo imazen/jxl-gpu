@@ -847,6 +847,40 @@ mod tests {
     }
 
     #[test]
+    /// Empirical: for uniform input M = 1.0, what does forward AFV
+    /// actually produce at coeffs[0],[1],[8] AFTER pack_afv_dcs? The
+    /// values reveal the real DCT scaling and let us derive the
+    /// correct mean-DC LLF restore factors per AFV kind.
+    #[test]
+    fn test_afv_packed_dc_for_uniform_input() {
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let m: f32 = 1.0;
+        let pixels: [f32; 64] = [m; 64];
+
+        for kind in 0..4 {
+            let coeffs = afv_transform_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixels, kind);
+            std::println!(
+                "[afv-pack] kind={kind} M={m}: coeffs[0]={:.6}  coeffs[1]={:.6}  coeffs[8]={:.6}  (ratios: {:.6} / {:.6} / {:.6})",
+                coeffs[0], coeffs[1], coeffs[8],
+                coeffs[0] / m, coeffs[1] / m, coeffs[8] / m
+            );
+
+            // Verify: feeding these packed coeffs into inverse_afv
+            // should reconstruct the uniform input M exactly (within
+            // fp32 noise).
+            let recon = crate::forks::afv::inverse_afv_transform_gpu(
+                &enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs, kind,
+            );
+            let mut max_err = 0.0_f32;
+            for i in 0..64 {
+                max_err = max_err.max((recon[i] - m).abs());
+            }
+            std::println!(
+                "[afv-pack] kind={kind} roundtrip max-err vs M=1.0: {max_err:.6e}"
+            );
+        }
+    }
+
     /// Profile diagnostic: break down afv_cost_grid_xyb_host's 243ms
     /// (on 1024×1024 in LossyEncoder) into per-step GPU sync time, so
     /// the persistent-rewrite work (task #38) targets the right stage.

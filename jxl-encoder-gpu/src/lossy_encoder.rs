@@ -1009,9 +1009,10 @@ impl<R: Runtime> LossyEncoder<R> {
         );
         mark("cost_subblock_8x8");
 
-        // AFV0-3 cost grid: SKIPPED. Building it costs ~175 ms but
-        // can't drive selector picks until task #39 (pack_afv_dcs DC
-        // mismatch) lands. Bind empties so SubBlockCostGrids type-checks.
+        // AFV0-3 cost grid: SKIPPED. Until the AFV reconstruct branch
+        // produces correct output (separate bug from #39 LLF — see the
+        // _none assignment below), computing the cost grid is wasted
+        // work that adds ~175 ms to every strat-search call.
         let cost_afv0: Vec<f32> = Vec::new();
         let cost_afv1: Vec<f32> = Vec::new();
         let cost_afv2: Vec<f32> = Vec::new();
@@ -1229,14 +1230,14 @@ impl<R: Runtime> LossyEncoder<R> {
         // Stage 5: host-side selector + assignments. All 5 sub-block
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
         // reference) — same trick as DCT32 needed.
-        // AFV cost grids still NOT fed to selector — the 13/16 mean-DC
-        // factor (forks::reconstruct AFV branch) didn't fix the
-        // butteraugli regression (21.67 unchanged). The AFV transform
-        // scaling assumption underlying the 13/16 derivation may be
-        // wrong (assumed orthonormal small-N DCT; actual scaling is
-        // unverified). Need an empirical pack-then-unpack test to
-        // measure the real packed-coeffs0 value for uniform M input.
-        // Until that's nailed down, AFV cost grids stay disabled.
+        // AFV cost grids still NOT fed to selector. Even with the
+        // empirically-correct LLF factor 1.0
+        // (test_afv_packed_dc_for_uniform_input proved coeffs[0] = M
+        // for uniform M input), the butteraugli regression is identical
+        // (21.67 unchanged from any other factor). So the bug is NOT
+        // in the LLF restore — it's somewhere else in the AFV
+        // reconstruct branch (kind index? basis_t? dequant qac?
+        // scatter?). Need an isolated reconstruct test next.
         let _ = (&cost_afv0, &cost_afv1, &cost_afv2, &cost_afv3);
         let sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: Some(&cost_dct4x4),

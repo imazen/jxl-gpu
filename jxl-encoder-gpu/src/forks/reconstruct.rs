@@ -442,21 +442,17 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 &qac_for_strategy,
             );
             let mut dequant = enc.download_blocks(&g_dequant);
-            // LLF restore for AFV: pack_afv_dcs mixes 3 sub-block DCs
-            // (block00 / block01 / block10) into positions [0]/[1]/[8].
-            // Quantize zeros only position [0] (LLF threshold). For
-            // uniform input with sub-block DCs all = M, the packed
-            // coeffs[0] equals 13M/16 = 0.8125 * M (math worked out
-            // in commit message). Positions [1] and [8] keep their
-            // dequantized values from the forward pass.
+            // LLF restore for AFV: empirically (test_afv_packed_dc_for_uniform_input)
+            // the forward AFV transform on uniform M input produces
+            // packed coeffs[0] = M, coeffs[1] = 0, coeffs[8] = 0.
+            // (The AFV 4×4 sub-DCT is orthonormal but the DCT4-corner
+            // and DCT4×8 sub-DCTs are mean-scaled, and pack_afv_dcs's
+            // 3-way mix produces M at coeffs[0] for uniform input.)
             //
-            // This is a mean-DC approximation: assumes block00 ≈
-            // block01 ≈ block10 ≈ dc_grid_per_8x8_block (the spatial
-            // mean). For non-uniform content within the 8x8 block, the
-            // 3 sub-region DCs differ and this loses variation — but
-            // it's the best we can do without storing 3 DC values per
-            // block.
-            const AFV_PACKED_DC_MEAN_FACTOR: f32 = 13.0 / 16.0;
+            // So the LLF restore for AFV is simply coeffs[0] = mean —
+            // exactly like DCT8. Positions [1] and [8] keep their
+            // dequantized AC values from the forward pass.
+            const AFV_PACKED_DC_MEAN_FACTOR: f32 = 1.0;
             for (i, &(bx, by)) in coords.iter().enumerate() {
                 let mean = dc_grid_per_8x8_block[by * xsize_blocks_8 + bx];
                 dequant[i * 64] = AFV_PACKED_DC_MEAN_FACTOR * mean;
