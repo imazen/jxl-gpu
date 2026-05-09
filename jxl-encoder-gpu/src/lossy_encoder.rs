@@ -1169,6 +1169,14 @@ impl<R: Runtime> LossyEncoder<R> {
 
         // IDENTITY: libjxl reference 1.0428, bumped 2× for anti-bias
         // (visible blocking on detailed content if under-penalized).
+        // We tried adding libjxl's kFavor2X2AtHighQuality discount
+        // (`entropy_mul -= 0.4*((5-d)/5)^2` at d<5) on May 9 2026 —
+        // it caused CATASTROPHIC photo regressions (×10 butteraugli on
+        // 02809272 and 07b9f93f at d=1.0). The discount makes
+        // IDENT/DCT2X2 too cheap on textured content where they should
+        // never win. libjxl gets away with it because their cost model
+        // has counterweights we lack (TBD investigation). For now,
+        // fixed 2.09 anti-bias mul stays.
         let (id_x, id_y, id_b) = identity_weights_per_channel();
         let inv_id_x: Vec<f32> = id_x.iter().map(|w| 1.0 / w).collect();
         let inv_id_y: Vec<f32> = id_y.iter().map(|w| 1.0 / w).collect();
