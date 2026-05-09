@@ -1076,19 +1076,17 @@ impl<R: Runtime> LossyEncoder<R> {
         // Optional: DCT32x32 cost grid (only when padded dims are
         // multiples of 32). Returns empty Vec when ineligible; selector
         // sees this as "no DCT32x32 candidate" and falls back to the
-        // 16x16 tier.
+        // 16x16 tier. dct32_* are needed outside this block (weights_for
+        // closures); inv_32* are only needed inside.
         let (dct32_x, dct32_y, dct32_b);
-        let inv_32x: Vec<f32>;
-        let inv_32y: Vec<f32>;
-        let inv_32b: Vec<f32>;
         let cost_dct32x32 = if dct32_eligible {
             let (x, y, b) = dct32x32_weights_per_channel();
             dct32_x = x;
             dct32_y = y;
             dct32_b = b;
-            inv_32x = dct32_x.iter().map(|w| 1.0 / w).collect();
-            inv_32y = dct32_y.iter().map(|w| 1.0 / w).collect();
-            inv_32b = dct32_b.iter().map(|w| 1.0 / w).collect();
+            let inv_32x: Vec<f32> = dct32_x.iter().map(|w| 1.0 / w).collect();
+            let inv_32y: Vec<f32> = dct32_y.iter().map(|w| 1.0 / w).collect();
+            let inv_32b: Vec<f32> = dct32_b.iter().map(|w| 1.0 / w).collect();
             strategy_search_costs_dct32x32(
                 enc,
                 &xyb_x,
@@ -1114,9 +1112,6 @@ impl<R: Runtime> LossyEncoder<R> {
             dct32_x = Vec::new();
             dct32_y = Vec::new();
             dct32_b = Vec::new();
-            inv_32x = Vec::new();
-            inv_32y = Vec::new();
-            inv_32b = Vec::new();
             Vec::new()
         };
         mark("cost_dct32x32");
@@ -1129,17 +1124,14 @@ impl<R: Runtime> LossyEncoder<R> {
         // Optional: DCT32x16 + DCT16x32 cost grids (rectangular DCT32
         // family). Both feed into the 32x32-tier selector via CostGrids32x32.
         let (dct32x16_x, dct32x16_y, dct32x16_b);
-        let inv_32x16_x: Vec<f32>;
-        let inv_32x16_y: Vec<f32>;
-        let inv_32x16_b: Vec<f32>;
         let (cost_dct32x16, cost_dct16x32) = if dct32_eligible {
             let (x, y, b) = dct16x32_weights_per_channel();
             dct32x16_x = x;
             dct32x16_y = y;
             dct32x16_b = b;
-            inv_32x16_x = dct32x16_x.iter().map(|w| 1.0 / w).collect();
-            inv_32x16_y = dct32x16_y.iter().map(|w| 1.0 / w).collect();
-            inv_32x16_b = dct32x16_b.iter().map(|w| 1.0 / w).collect();
+            let inv_32x16_x: Vec<f32> = dct32x16_x.iter().map(|w| 1.0 / w).collect();
+            let inv_32x16_y: Vec<f32> = dct32x16_y.iter().map(|w| 1.0 / w).collect();
+            let inv_32x16_b: Vec<f32> = dct32x16_b.iter().map(|w| 1.0 / w).collect();
             let c_32x16 = strategy_search_costs_dct32x16_or_16x32(
                 enc, &xyb_x, &xyb_y, &xyb_b, pw, ph, &g_mask, RAW_STRATEGY_DCT32X16,
                 &dct32x16_x, &dct32x16_y, &dct32x16_b,
@@ -1157,9 +1149,6 @@ impl<R: Runtime> LossyEncoder<R> {
             dct32x16_x = Vec::new();
             dct32x16_y = Vec::new();
             dct32x16_b = Vec::new();
-            inv_32x16_x = Vec::new();
-            inv_32x16_y = Vec::new();
-            inv_32x16_b = Vec::new();
             (Vec::new(), Vec::new())
         };
         mark("cost_dct32x16_and_16x32");
@@ -1173,27 +1162,21 @@ impl<R: Runtime> LossyEncoder<R> {
         // All gated on dct64_eligible (image dims multiple of 64).
         let (dct64_x, dct64_y, dct64_b);
         let (dct64x32_x, dct64x32_y, dct64x32_b);
-        let inv_64x: Vec<f32>;
-        let inv_64y: Vec<f32>;
-        let inv_64b: Vec<f32>;
-        let inv_64x32_x: Vec<f32>;
-        let inv_64x32_y: Vec<f32>;
-        let inv_64x32_b: Vec<f32>;
         let (cost_dct64x64, cost_dct64x32, cost_dct32x64) = if dct64_eligible {
             let (x, y, b) = dct64x64_weights_per_channel();
             dct64_x = x;
             dct64_y = y;
             dct64_b = b;
-            inv_64x = dct64_x.iter().map(|w| 1.0 / w).collect();
-            inv_64y = dct64_y.iter().map(|w| 1.0 / w).collect();
-            inv_64b = dct64_b.iter().map(|w| 1.0 / w).collect();
+            let inv_64x: Vec<f32> = dct64_x.iter().map(|w| 1.0 / w).collect();
+            let inv_64y: Vec<f32> = dct64_y.iter().map(|w| 1.0 / w).collect();
+            let inv_64b: Vec<f32> = dct64_b.iter().map(|w| 1.0 / w).collect();
             let (x, y, b) = dct32x64_weights_per_channel();
             dct64x32_x = x;
             dct64x32_y = y;
             dct64x32_b = b;
-            inv_64x32_x = dct64x32_x.iter().map(|w| 1.0 / w).collect();
-            inv_64x32_y = dct64x32_y.iter().map(|w| 1.0 / w).collect();
-            inv_64x32_b = dct64x32_b.iter().map(|w| 1.0 / w).collect();
+            let inv_64x32_x: Vec<f32> = dct64x32_x.iter().map(|w| 1.0 / w).collect();
+            let inv_64x32_y: Vec<f32> = dct64x32_y.iter().map(|w| 1.0 / w).collect();
+            let inv_64x32_b: Vec<f32> = dct64x32_b.iter().map(|w| 1.0 / w).collect();
             let c64 = strategy_search_costs_dct64x64(
                 enc, &xyb_x, &xyb_y, &xyb_b, pw, ph, &g_mask,
                 &dct64_x, &dct64_y, &dct64_b,
@@ -1220,12 +1203,6 @@ impl<R: Runtime> LossyEncoder<R> {
             dct64x32_x = Vec::new();
             dct64x32_y = Vec::new();
             dct64x32_b = Vec::new();
-            inv_64x = Vec::new();
-            inv_64y = Vec::new();
-            inv_64b = Vec::new();
-            inv_64x32_x = Vec::new();
-            inv_64x32_y = Vec::new();
-            inv_64x32_b = Vec::new();
             (Vec::new(), Vec::new(), Vec::new())
         };
         mark("cost_dct64_family");
