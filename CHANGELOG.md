@@ -43,8 +43,13 @@ that's blocked on upstream API design and intentionally deferred.
 - 🚧 GPU histogram clustering (pair-merge / k-means-style — SIMT-
   friendly). Histogram counting primitive in place; clustering
   builds on top.
-- 🚧 Persistent AFV transforms (#38) — would let us re-enable the
-  AFV cost grid (currently skipped to save 175 ms).
+- ✅ **Persistent AFV transforms** (#38) — closes the last in_progress
+  task. `afv_transform_batch_persistent` and
+  `inverse_afv_transform_batch_persistent` keep all 3 sub-transform
+  outputs on GPU via new compose/unpack kernels (`kernels/afv_compose.rs`).
+  `afv_cost_grid_xyb_host` rewired to use both: 7 syncs/kind → 3.
+  Measured perf on 1024² (16k blocks): 243 ms → 52 ms (4.6× speedup,
+  near the original ~35 ms target). 281 lib tests passing.
 
 See CLAUDE.md "Architectural position vs jxl-encoder CPU" for the
 full rationale.
