@@ -1274,7 +1274,59 @@ impl<R: Runtime> LossyEncoder<R> {
                 xb8,
                 yb8,
             );
-            partitions_64x64_to_assignments(&partitions, xb8, yb8)
+            #[cfg(test)]
+            {
+                let mut h_dct64 = 0_usize;
+                let mut h_sub32 = 0_usize;
+                let mut h_other = 0_usize;
+                for p in &partitions {
+                    use crate::pipeline::Partition64x64 as P;
+                    match p {
+                        P::Dct64x64 => h_dct64 += 1,
+                        P::Sub32x32(_) => h_sub32 += 1,
+                        _ => h_other += 1,
+                    }
+                }
+                std::println!(
+                    "[strat-search] 64x64 partitions: dct64x64={h_dct64} sub32x32={h_sub32} other={h_other} (total={})",
+                    partitions.len()
+                );
+            }
+            let asn = partitions_64x64_to_assignments(&partitions, xb8, yb8);
+            #[cfg(test)]
+            {
+                use crate::forks::transform::*;
+                let mut counts = std::collections::BTreeMap::<u8, usize>::new();
+                for a in &asn {
+                    *counts.entry(a.raw_strategy).or_insert(0) += 1;
+                }
+                let strat_name = |s: u8| -> &'static str {
+                    match s {
+                        RAW_STRATEGY_DCT => "DCT8",
+                        RAW_STRATEGY_DCT16X8 => "DCT16x8",
+                        RAW_STRATEGY_DCT8X16 => "DCT8x16",
+                        RAW_STRATEGY_DCT16X16 => "DCT16x16",
+                        RAW_STRATEGY_DCT32X32 => "DCT32x32",
+                        RAW_STRATEGY_DCT4X8 => "DCT4x8",
+                        RAW_STRATEGY_DCT8X4 => "DCT8x4",
+                        RAW_STRATEGY_DCT4X4 => "DCT4x4",
+                        RAW_STRATEGY_DCT32X16 => "DCT32x16",
+                        RAW_STRATEGY_DCT16X32 => "DCT16x32",
+                        RAW_STRATEGY_DCT64X64 => "DCT64x64",
+                        RAW_STRATEGY_DCT64X32 => "DCT64x32",
+                        RAW_STRATEGY_DCT32X64 => "DCT32x64",
+                        RAW_STRATEGY_IDENTITY => "IDENT",
+                        RAW_STRATEGY_DCT2X2 => "DCT2x2",
+                        _ => "??",
+                    }
+                };
+                let mut report = std::string::String::from("[strat-search] strategy histogram:");
+                for (s, n) in &counts {
+                    report.push_str(&std::format!(" {}={n}", strat_name(*s)));
+                }
+                std::println!("{report}");
+            }
+            asn
         } else if dct32_eligible {
             // 32x32-tier selector picks per-32x32-region between
             // DCT32x32, two-DCT32x16, two-DCT16x32, and four sub-16x16
