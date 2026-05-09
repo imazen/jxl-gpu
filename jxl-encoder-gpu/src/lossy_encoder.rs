@@ -1201,13 +1201,28 @@ impl<R: Runtime> LossyEncoder<R> {
         );
         mark("cost_subblock_8x8");
 
-        // AFV0-3 cost grid: SKIPPED. With the 100× anti-bias needed to
-        // keep AFV from over-selecting on detailed content, AFV
-        // practically never wins on real photos. Computing the cost
-        // grid (~175 ms on 1024×1024) is wasted work for the rare
-        // case it would influence picks. Plumbing kept for re-enable
-        // once persistent AFV transforms (task #38) cut the cost to
-        // ~30 ms — at which point a lower anti-bias may also be tried.
+        // AFV0-3 cost grid: STILL SKIPPED (May 9 2026).
+        //
+        // Task #38 (persistent AFV transforms) is now COMPLETE — the
+        // cost grid measures ~52 ms on 1024×1024 (down from ~243 ms),
+        // close to the original ~35 ms target. So the perf objection
+        // to running it is gone.
+        //
+        // What's NOT done: lowering the 100× anti-bias mul. With the
+        // current mul, AFV would essentially never win even if we
+        // computed the cost — adding 52 ms for no quality change is
+        // a net regression. Re-enabling needs to be paired with an
+        // anti-bias retune (libjxl reference is 0.818; we'd need to
+        // sweep on a corpus to find a safe mul that doesn't catastrophic-
+        // regress on textured content the way kFavor2X2AtHighQuality
+        // did — see the May 9 commit `180b4fab` doc-warning for
+        // context). Risky without a corpus regression test as safety
+        // net (tracked as deferred work).
+        //
+        // For now, smart turnkey best-of-3 covers the cases where AFV
+        // picks would have helped (sharp-edge content) by falling
+        // back to uniform-DCT8 — so users aren't losing quality from
+        // this skip in production paths.
         let cost_afv0: Vec<f32> = Vec::new();
         let cost_afv1: Vec<f32> = Vec::new();
         let cost_afv2: Vec<f32> = Vec::new();
