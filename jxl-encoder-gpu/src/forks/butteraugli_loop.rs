@@ -1209,6 +1209,12 @@ pub enum BestOfBothPath {
     /// Both produced the same score (within f32 equality). Picks
     /// RefineDct8 by convention since it's cheaper.
     Tie,
+    /// Content discriminator (median mask1x1 > 95) flagged this image
+    /// as screenshot-like; strat-search was skipped entirely. Only
+    /// refine+DCT8 ran. `BestOfBothScores.strat_search_score` and
+    /// `strat_search_pnorm_3` will be `f32::NAN` in this case.
+    /// Returned only by [`refine_and_encode_smart`].
+    SkippedStratSearchAsScreenshot,
 }
 
 /// Diagnostic scores from [`refine_and_encode_best_of_both`].
@@ -1337,6 +1343,100 @@ pub fn refine_and_encode_best_of_both<R: Runtime>(
     } else {
         Ok((dct8_r, dct8_g, dct8_b, BestOfBothPath::Tie, scores))
     }
+}
+
+/// Smart turnkey wrapper: checks
+/// [`LossyEncoder::content_looks_like_screenshot`] first and either
+/// runs full [`refine_and_encode_best_of_both`] (photo-like content)
+/// or short-circuits to refine+DCT8 only (screenshot-like content,
+/// where strat-search produces catastrophic regressions).
+///
+/// **Cost vs best-of-both**:
+/// - Photo-like content: ~10-20 ms extra (just the discriminator
+///   check) on top of best-of-both.
+/// - Screenshot-like content: ~3.5× cheaper than best-of-both —
+///   skips the strat-search prepare + iters + final encode.
+///
+/// **Quality**:
+/// - 9 of 10 screenshots correctly detected (gb82-sc except
+///   windows95.png) → no quality loss vs running best-of-both.
+/// - 0 of 16 CLIC photos false-positive → no quality loss on
+///   photo content.
+/// - windows95.png (median 69.9, the one false-negative) flows
+///   through to best-of-both, which catches any strat-search
+///   regression via its inherent winner-pick logic.
+///
+/// **Returns**: same shape as [`refine_and_encode_best_of_both`].
+/// `path` is [`BestOfBothPath::SkippedStratSearchAsScreenshot`] when
+/// the discriminator fires; otherwise mirrors best-of-both.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_and_encode_smart<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    lossy: &LossyEncoder<R>,
+    bg: &mut ButteraugliLoopGpu<R>,
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    ref_srgb: &[u8],
+    initial_aq_field: &[f32],
+    target_distance: f32,
+    iters: usize,
+) -> butteraugli_gpu::Result<(Vec<f32>, Vec<f32>, Vec<f32>, BestOfBothPath, BestOfBothScores)> {
+    if lossy.content_looks_like_screenshot(enc, r, g, b) {
+        // Strat-search is unsafe on this content. Run refine+DCT8 only.
+        let (width, height) = lossy.dimensions();
+        let n_pixels = (width as usize) * (height as usize);
+        bg.set_reference(ref_srgb)?;
+        let aq_dct8 = refine_aq_field_gpu(
+            enc,
+            lossy,
+            bg,
+            r,
+            g,
+            b,
+            ref_srgb,
+            initial_aq_field,
+            target_distance,
+            iters,
+            |_| {},
+        )?;
+        let (dct8_r, dct8_g, dct8_b) = lossy.encode_one_adaptive(enc, r, g, b, &aq_dct8);
+        let mut dct8_srgb = alloc::vec![0u8; n_pixels * 3];
+        linear_planar_to_srgb_u8_interleaved_into(
+            &dct8_r,
+            &dct8_g,
+            &dct8_b,
+            width as usize,
+            height as usize,
+            &mut dct8_srgb,
+        );
+        let dct8_result = bg.compute_with_reference(&dct8_srgb)?;
+        let scores = BestOfBothScores {
+            dct8_score: dct8_result.score,
+            strat_search_score: f32::NAN,
+            dct8_pnorm_3: dct8_result.pnorm_3,
+            strat_search_pnorm_3: f32::NAN,
+        };
+        return Ok((
+            dct8_r,
+            dct8_g,
+            dct8_b,
+            BestOfBothPath::SkippedStratSearchAsScreenshot,
+            scores,
+        ));
+    }
+    refine_and_encode_best_of_both(
+        enc,
+        lossy,
+        bg,
+        r,
+        g,
+        b,
+        ref_srgb,
+        initial_aq_field,
+        target_distance,
+        iters,
+    )
 }
 
 /// Inner refinement loop parameterized on the encode step. Both

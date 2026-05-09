@@ -1955,6 +1955,70 @@ impl<R: Runtime> LossyEncoder<R> {
         block_means_to_qac_field(&block_means, distance)
     }
 
+    /// Empirically-derived median mask threshold above which content
+    /// is "screenshot-like" — large flat regions where strat-search
+    /// over-picks DCT16x16 and produces catastrophic butteraugli
+    /// regressions (graph.png at d=1.0: strat-search 4.66 vs uniform
+    /// 1.05, +343% worse).
+    ///
+    /// Source data: `mask1x1_content_stats` example run on
+    /// CLIC2025-1024 (16 photos) + gb82-sc (10 screenshots), May 9
+    /// 2026. ALL 16 CLIC photos had median(mask1x1) ≤ 87. 9 of 10
+    /// screenshots had median = 100.01 (the max signal value); the
+    /// only exception was windows95.png (median 69.9, mostly mid-tone
+    /// pixels — might or might not regress, untested).
+    ///
+    /// 95 sits well above the photo max (87) and below the screenshot
+    /// median (100), giving a clear gap. The 1 false-negative
+    /// (windows95.png) is acceptable because best-of-both still
+    /// catches it.
+    pub const SCREENSHOT_MEDIAN_MASK_THRESHOLD: f32 = 95.0;
+
+    /// Heuristic: is this image content "screenshot-like"? Returns
+    /// `true` if the median per-block mask1x1 value exceeds
+    /// [`Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD`].
+    ///
+    /// **When true**: callers should skip strat-search and use
+    /// uniform-DCT8 (refine+DCT8 or encode_one_adaptive). Strat-search
+    /// over-picks DCT16x16 on flat regions and produces catastrophic
+    /// quality loss on this content (×4-5 butteraugli vs uniform).
+    ///
+    /// **When false**: strat-search is safe to use. Combined mode
+    /// (refine_aq_field_gpu_with_strategy_search) or best-of-both
+    /// (refine_and_encode_best_of_both) are both viable.
+    ///
+    /// **Cost**: one mask1x1 GPU pass + sort over per-block means
+    /// (~10-20 ms on 1024² @ CUDA). Cheap enough to call before
+    /// deciding which encode pipeline to use.
+    ///
+    /// **Validation**: 9 of 10 screenshots correctly detected (all
+    /// of gb82-sc except windows95.png), 0 of 16 CLIC photos
+    /// false-positive. windows95.png (median 69.9) is the one
+    /// false-negative — the user should pair this with
+    /// [`forks::butteraugli_loop::refine_and_encode_best_of_both`]
+    /// for guaranteed correctness on edge cases.
+    ///
+    /// [`forks::butteraugli_loop::refine_and_encode_best_of_both`]:
+    ///   crate::forks::butteraugli_loop::refine_and_encode_best_of_both
+    pub fn content_looks_like_screenshot(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+    ) -> bool {
+        let block_means = self.compute_block_mask_means(enc, r, g, b);
+        if block_means.is_empty() {
+            return false;
+        }
+        // Median via partial sort. cheap on padded-block-count vectors
+        // (16k entries on 1024², ~150 µs).
+        let mut sorted = block_means;
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+        let median = sorted[sorted.len() / 2];
+        median > Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD
+    }
+
     /// Compute per-block mean of mask1x1 (one f32 per padded 8×8
     /// block). This is the input-dependent half of [`Self::compute_aq_field`]
     /// — exposed separately so batch encodes (e.g.,

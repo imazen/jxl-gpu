@@ -20,7 +20,7 @@ fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::butteraugli_loop::{
         ButteraugliLoopGpu, RefineIterTrace, linear_planar_to_srgb_u8_interleaved,
-        refine_and_encode_best_of_both, refine_aq_field_gpu,
+        refine_and_encode_best_of_both, refine_and_encode_smart, refine_aq_field_gpu,
         refine_aq_field_gpu_with_strategy_search,
     };
     use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
@@ -310,6 +310,47 @@ fn main() {
         "  best-of-both vs refine+DCT8:  {:+.4} ({:+.2}%)",
         bob_score - score_refine_un,
         pct(bob_score, score_refine_un),
+    );
+
+    // Pipeline 6: refine_and_encode_smart — content-discriminator
+    // wrapper that skips strat-search entirely on screenshot-like
+    // content (median(mask1x1) > 95). Same quality as best-of-both
+    // when the discriminator is correct, ~3.5× cheaper on screenshots.
+    let is_screenshot = lossy.content_looks_like_screenshot(&enc, &r, &g, &b);
+    let t = std::time::Instant::now();
+    let (_smart_r, _smart_g, _smart_b, smart_path, smart_scores) = refine_and_encode_smart(
+        &enc,
+        &lossy,
+        &mut bg,
+        &r,
+        &g,
+        &b,
+        &pixels,
+        &initial_aq,
+        distance,
+        iters,
+    )
+    .expect("refine_and_encode_smart");
+    let dt_smart = t.elapsed();
+    let smart_score = if smart_scores.strat_search_score.is_nan() {
+        smart_scores.dct8_score
+    } else {
+        smart_scores.dct8_score.min(smart_scores.strat_search_score)
+    };
+    println!("\n=== Smart pipeline (content-discriminator gate) ===");
+    println!(
+        "  content_looks_like_screenshot = {is_screenshot}  →  picked {smart_path:?}"
+    );
+    println!(
+        "  winning score: {smart_score:.4}  ({:.0} ms total, {:.2}× refine+DCT8)",
+        dt_smart.as_secs_f64() * 1000.0,
+        dt_smart.as_secs_f64() / dt_refine_un.as_secs_f64(),
+    );
+    println!(
+        "  smart vs best-of-both:        {:+.4} ({:+.2}%, cost ratio {:.2}×)",
+        smart_score - bob_score,
+        pct(smart_score, bob_score),
+        dt_smart.as_secs_f64() / dt_bob.as_secs_f64(),
     );
 }
 
