@@ -801,15 +801,26 @@ impl<R: Runtime> LossyEncoder<R> {
             dct32x32_weights_per_channel, dct8_weights_per_channel,
         };
 
-        // DCT32x32 wiring is staged but currently DISABLED pending a
-        // reconstruction-side investigation: enabling it produces
-        // butteraugli 12.4 vs uniform-qac 1.35 on the CLIC test image.
-        // The math in `restore_llf_dct32x32` was verified correct for
-        // mean-scale DC convention; the regression likely lives in
-        // either the DCT32x32 IDCT path of reconstruct_mixed_strategy_gpu
-        // or in the cost-grid scale (DCT32x32 may be over-selected
-        // relative to DCT16x16 sub-region totals). Revisit before
-        // re-enabling. Set to `true` to opt in for testing.
+        // DCT32x32 wiring: STAGED but DISABLED. Investigation found
+        // (commits during this session, especially the diag tests):
+        //   - Encoder/recon path correct (test_dct32x32_reconstruct_smooth_gradient
+        //     shows DCT32 RMSE 0.0016 < DCT8 RMSE 0.0076 on smooth content)
+        //   - partitions_32x32_to_assignments lowering correct
+        //   - When enabled on real CLIC photo: 79 of 1024 32x32 regions
+        //     pick DCT32, butteraugli regresses 1.35 → 12.4 despite
+        //     RMSE only 0.030 (= localized perceptual artifacts in the
+        //     79 DCT32 blocks)
+        //
+        // Root cause: this Phase A cost model lacks libjxl's per-strategy
+        // mul/bonus/penalty adjustments (kFavor2X2, kAvoidEntropyOfTransforms,
+        // mul8x8 vs mul16x16 vs mul32x32 ratios). Without those, raw
+        // entropy + pixel_loss systematically over-favors larger
+        // transforms on detailed content, producing perceptually-broken
+        // picks that L2 loss doesn't catch.
+        //
+        // Fix is in the cost model (forks/cost.rs) — apply per-strategy
+        // adjustments before returning the cost grid. Until then, keep
+        // DCT32x32 disabled to preserve the +0.36% baseline.
         let dct32_eligible = false
             && (self.padded_width as usize).is_multiple_of(32)
             && (self.padded_height as usize).is_multiple_of(32);
@@ -1007,6 +1018,32 @@ impl<R: Runtime> LossyEncoder<R> {
                 xb8,
                 yb8,
             );
+            // Histogram of Partition32x32 picks for diagnostic.
+            #[cfg(test)]
+            {
+                let mut h_dct32 = 0_usize;
+                let mut h_sub = 0_usize;
+                let mut h_other = 0_usize;
+                for p in &partitions {
+                    use crate::pipeline::Partition32x32 as P;
+                    match p {
+                        P::Dct32x32 => h_dct32 += 1,
+                        P::Sub16x16(_) => h_sub += 1,
+                        _ => h_other += 1,
+                    }
+                }
+                std::println!(
+                    "[strat-search] 32x32 partitions: dct32x32={h_dct32} sub16x16={h_sub} other={h_other}"
+                );
+                let s8 = cost_dct8.iter().copied().sum::<f32>() / cost_dct8.len() as f32;
+                let s16 = cost_dct16.iter().copied().sum::<f32>() / cost_dct16.len() as f32;
+                let s32 = cost_dct32x32.iter().copied().sum::<f32>() / cost_dct32x32.len() as f32;
+                std::println!(
+                    "[strat-search] avg per-block cost: dct8={s8:.3} dct16={s16:.3} dct32={s32:.3} (4*dct8={:.3} 4*dct16={:.3})",
+                    s8 * 16.0,
+                    s16 * 4.0,
+                );
+            }
             partitions_32x32_to_assignments(&partitions, xb8, yb8)
         } else {
             let partitions =
@@ -1715,6 +1752,52 @@ mod tests {
         for v in rr.iter().chain(&gg).chain(&bb) {
             assert!(v.is_finite());
         }
+    }
+
+    /// Diagnostic: run strat-search with DCT32 enabled on a real CLIC
+    /// image and report (a) Partition32x32 histogram and (b) per-channel
+    /// reconstruction RMSE vs the no-DCT32 baseline.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_strat_search_dct32_diag_on_real_image() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let img_path = "/home/lilith/work/codec-corpus/clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png";
+        let img = match image::open(img_path) {
+            Ok(i) => i.to_rgb8(),
+            Err(_) => {
+                std::println!("[skip] image not available: {img_path}");
+                return;
+            }
+        };
+        let (w, h) = img.dimensions();
+        let pixels: Vec<u8> = img.into_raw();
+        let n = (w * h) as usize;
+        let to_lin = |c: u8| {
+            let f = c as f32 / 255.0;
+            if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+        };
+        let mut r = Vec::with_capacity(n);
+        let mut g = Vec::with_capacity(n);
+        let mut b = Vec::with_capacity(n);
+        for c in pixels.chunks_exact(3) {
+            r.push(to_lin(c[0]));
+            g.push(to_lin(c[1]));
+            b.push(to_lin(c[2]));
+        }
+        let lossy = LossyEncoder::new(&enc, w, h);
+        let (rs, gs, bs) =
+            lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, 1.0);
+        // Compute RMSE vs original (linear).
+        let mut sse = 0.0_f64;
+        for i in 0..n {
+            let dr = (r[i] - rs[i]) as f64;
+            let dg = (g[i] - gs[i]) as f64;
+            let db = (b[i] - bs[i]) as f64;
+            sse += dr * dr + dg * dg + db * db;
+        }
+        let rmse = (sse / (n * 3) as f64).sqrt();
+        std::println!("[dct32-diag] strat-search RMSE = {rmse:.6}");
     }
 
     /// Performance diagnostic: isolate host-side `repack_plane_to_blocks`

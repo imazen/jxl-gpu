@@ -2080,6 +2080,96 @@ mod tests {
         }
     }
 
+    /// Diagnostic for the DCT32x32 quality regression: force ALL blocks
+    /// to DCT32x32 on a smooth gradient, reconstruct, and compare RMSE
+    /// against an all-DCT8 reconstruction. Both should give similar
+    /// (small) RMSE on smooth content. If DCT32x32 is much higher,
+    /// the encode_and_reconstruct path has a bug for that strategy.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dct32x32_reconstruct_smooth_gradient() {
+        use crate::forks::transform::{
+            coeff_count_per_strategy, RAW_STRATEGY_DCT, RAW_STRATEGY_DCT32X32,
+        };
+        use crate::pipeline::StrategyAssignment;
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        // 64×64 plane (= 2×2 grid of DCT32x32 blocks, or 8×8 grid of
+        // DCT8 blocks). Smooth gradient in [0.4, 0.7].
+        let pw = 64_usize;
+        let ph = 64_usize;
+        let xb8 = pw / 8;
+        let yb8 = ph / 8;
+        let nb8 = xb8 * yb8;
+        let xyb: Vec<f32> = (0..pw * ph)
+            .map(|i| {
+                let x = (i % pw) as f32 / pw as f32;
+                let y = (i / pw) as f32 / ph as f32;
+                0.4 + 0.15 * x + 0.15 * y
+            })
+            .collect();
+
+        let dc_grid = compute_dc_grid_per_8x8_block(&xyb, pw, ph);
+        let qac = alloc::vec![1.0_f32; nb8];
+        let thresholds = [0.0_f32; 4]; // no dead-zone
+
+        // All-DCT8 reconstruction (baseline).
+        let assignments_dct8: Vec<StrategyAssignment> = (0..yb8)
+            .flat_map(|by| {
+                (0..xb8).map(move |bx| StrategyAssignment {
+                    bx,
+                    by,
+                    raw_strategy: RAW_STRATEGY_DCT,
+                })
+            })
+            .collect();
+        let weights_for = |s: u8| -> Vec<f32> {
+            alloc::vec![1.0_f32; coeff_count_per_strategy(s)]
+        };
+        let mut out_dct8 = alloc::vec![0.0_f32; pw * ph];
+        encode_and_reconstruct_mixed_strategy_single_channel(
+            &enc, &xyb, pw, ph, &assignments_dct8, &weights_for, &qac, &thresholds,
+            &dc_grid, 1, &mut out_dct8,
+        );
+        let mut sse_dct8 = 0.0_f64;
+        for i in 0..pw * ph {
+            let d = (xyb[i] - out_dct8[i]) as f64;
+            sse_dct8 += d * d;
+        }
+        let rmse_dct8 = (sse_dct8 / (pw * ph) as f64).sqrt();
+
+        // All-DCT32x32 reconstruction (4 blocks at (0,0), (4,0), (0,4), (4,4)).
+        let assignments_dct32: Vec<StrategyAssignment> = (0..2)
+            .flat_map(|ry| {
+                (0..2).map(move |rx| StrategyAssignment {
+                    bx: rx * 4,
+                    by: ry * 4,
+                    raw_strategy: RAW_STRATEGY_DCT32X32,
+                })
+            })
+            .collect();
+        let mut out_dct32 = alloc::vec![0.0_f32; pw * ph];
+        encode_and_reconstruct_mixed_strategy_single_channel(
+            &enc, &xyb, pw, ph, &assignments_dct32, &weights_for, &qac, &thresholds,
+            &dc_grid, 1, &mut out_dct32,
+        );
+        let mut sse_dct32 = 0.0_f64;
+        for i in 0..pw * ph {
+            let d = (xyb[i] - out_dct32[i]) as f64;
+            sse_dct32 += d * d;
+        }
+        let rmse_dct32 = (sse_dct32 / (pw * ph) as f64).sqrt();
+
+        std::println!("[dct32-diag] all-DCT8  RMSE = {rmse_dct8:.6}");
+        std::println!("[dct32-diag] all-DCT32 RMSE = {rmse_dct32:.6}");
+        std::println!("[dct32-diag] sample pixels (ref / dct8 / dct32):");
+        for &i in &[0_usize, 33, 1024, 2047, 4095] {
+            std::println!("  [{i}] ref={:.4} dct8={:.4} dct32={:.4}",
+                xyb[i], out_dct8[i], out_dct32[i]);
+        }
+    }
+
     fn test_reconstruct_mixed_strategy_gpu_dct8_and_dct16x16() {
         // Mix two strategies: 3 DCT8 blocks + 2 DCT16x16 blocks at
         // non-overlapping positions.
