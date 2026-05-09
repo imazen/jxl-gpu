@@ -1009,13 +1009,9 @@ impl<R: Runtime> LossyEncoder<R> {
         );
         mark("cost_subblock_8x8");
 
-        // AFV0-3 cost grid: SKIPPED. Building the cost grid takes
-        // ~175 ms on 1024×1024 but the result currently can't drive
-        // selector picks — task #39 (pack_afv_dcs / LLF-restore DC
-        // mismatch) blocks the AFV reconstruct path. Until #39 is
-        // fixed, computing the AFV cost grid is wasted work that
-        // adds ~175 ms to every strat-search call.
-        // Bind empty Vecs so the SubBlockCostGrids type-checks below.
+        // AFV0-3 cost grid: SKIPPED. Building it costs ~175 ms but
+        // can't drive selector picks until task #39 (pack_afv_dcs DC
+        // mismatch) lands. Bind empties so SubBlockCostGrids type-checks.
         let cost_afv0: Vec<f32> = Vec::new();
         let cost_afv1: Vec<f32> = Vec::new();
         let cost_afv2: Vec<f32> = Vec::new();
@@ -1233,22 +1229,14 @@ impl<R: Runtime> LossyEncoder<R> {
         // Stage 5: host-side selector + assignments. All 5 sub-block
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
         // reference) — same trick as DCT32 needed.
-        // AFV cost grids computed but NOT fed to selector yet — the
-        // AFV reconstruct path has a pack_afv_dcs / LLF-restore
-        // interaction issue:
-        // - pack_afv_dcs mixes 3 sub-block DCs into positions [0],[1],[8]
-        //   of the 64-coeff layout
-        // - Quantize zeros position [0] (LLF threshold). Dequant gives 0.
-        // - The encode_and_reconstruct path's LLF restore writes
-        //   dc_grid_per_8x8_block (a SPATIAL MEAN) to position [0],
-        //   which is NOT the packed value the inverse AFV's unpack
-        //   logic expects. Result: butteraugli 21.67 (vs 1.35 baseline).
-        // Even at 4× anti-bias the score didn't improve — the picks
-        // are stable, the wrong-DC reconstruction is the issue.
-        // Fix paths: (a) pack the dc_grid mean approximately into
-        // [0]/[1]/[8] before LLF restore, (b) skip pack_afv_dcs in
-        // the encode side, (c) extend dc_grid to store 3 values per
-        // AFV block. Defer to a follow-up.
+        // AFV cost grids still NOT fed to selector — the 13/16 mean-DC
+        // factor (forks::reconstruct AFV branch) didn't fix the
+        // butteraugli regression (21.67 unchanged). The AFV transform
+        // scaling assumption underlying the 13/16 derivation may be
+        // wrong (assumed orthonormal small-N DCT; actual scaling is
+        // unverified). Need an empirical pack-then-unpack test to
+        // measure the real packed-coeffs0 value for uniform M input.
+        // Until that's nailed down, AFV cost grids stay disabled.
         let _ = (&cost_afv0, &cost_afv1, &cost_afv2, &cost_afv3);
         let sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: Some(&cost_dct4x4),
