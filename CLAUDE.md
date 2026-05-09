@@ -188,6 +188,44 @@ and reconstruction blow up to ~165 butteraugli (vs target ~1.3). Fix was
 **When porting CPU code to GPU, double-check the normalization convention
 before trusting any constant from libjxl reconstruct.cc / dct_scales.h.**
 
+## Strat-search distance limitation (May 8, 2026)
+
+LossyEncoder::encode_one_with_strategy_search_dct8_16 produces butteraugli
+at uniform-qac parity for d≤1, but degrades at higher distances:
+
+| d   | uniform | strat-search | Δ      |
+|-----|---------|--------------|--------|
+| 0.5 | 0.7006  | 0.7006       | 0%     |
+| 1.0 | 1.3456  | 1.3456       | 0%     |
+| 2.0 | 2.1525  | 2.2506       | +4.6%  |
+| 4.0 | 3.4407  | 9.1984       | +167%  |
+
+Investigation (commits this session, especially the cost-model tuning
+sequence in f7cdaa56 / b482813b / c4c62cef): the fixed 2× anti-bias
+muls (DCT32x32=2.5, DCT64=3.5, sub-blocks=2.16/1.72/2.09/1.90) were
+calibrated at d=1.0. At higher distances:
+- More aggressive quantization → more zeros in larger transforms →
+  larger transforms become artificially cheap in the cost model
+- Doubling the muls (5.0/7.0) had **no measurable effect** on the
+  d=4 regression — picks are stable across mul changes
+- Disabling sub-blocks at d=4 also didn't help — score stayed 9.1984
+
+Root cause appears structural: our cost grid formula has a different
+distance-scaling profile than libjxl's full cost model (kAvoidEntropyOfTransforms,
+X-channel multi-block weight, AdjustQuantBlockAC). Fixed muls work at
+the calibration point but the curves diverge at d≥2.
+
+Fix paths (deferred):
+1. **Distance-scaled muls**: `entropy_mul = base + scale * distance`
+   per strategy. Empirical fit needed.
+2. **Implement the missing libjxl counterweights** (X-channel weight,
+   kAvoidEntropyOfTransforms penalty). Then drop the 2× anti-bias and
+   use libjxl reference muls directly.
+
+For now, strat-search is best used at d≤1 where it matches uniform-qac
+exactly. The infrastructure (15/27 strategies, persistent GPU pipeline)
+generalizes; only the cost-model calibration is distance-fragile.
+
 ## Phase plan
 
 | Phase | Scope | Effort | Status |
