@@ -1051,6 +1051,152 @@ pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
     )
 }
 
+/// Smart-gated combined-mode refinement: strat-search transform picks
+/// + butteraugli AQ refinement, with content-aware fallback to safer
+/// pipelines when the loop is unlikely to win.
+///
+/// Mirrors [`refine_aq_field_gpu_smart`] but the encode step uses
+/// strat-search adaptive instead of uniform DCT8. Diagnostic
+/// measurements (initial_aq_score, uniform_score) are taken via the
+/// SAME strat-search-adaptive encoder for an apples-to-apples
+/// comparison — using uniform-DCT8 for the gate decision would be
+/// wrong for the strat-search pipeline (their cost models pick
+/// different blocks).
+///
+/// Returns a [`SmartGateOutcome`] with the selected aq_field plus
+/// diagnostics. The trace callback fires iff `path == Refined`.
+///
+/// **Cost** (CLIC 1024² @ d=1.0): one strat-search encode for AQ
+/// score (~95 ms) + one strat-search encode for uniform score (~95 ms)
+/// + plan reuse for the loop iters. Total adds ~95 ms diagnostic
+/// overhead on top of [`refine_aq_field_gpu_with_strategy_search`].
+/// The plan is computed once and reused across all 2 + iters encodes.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_aq_field_gpu_with_strategy_search_smart<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    lossy: &LossyEncoder<R>,
+    bg: &mut ButteraugliLoopGpu<R>,
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    ref_srgb: &[u8],
+    initial_aq_field: &[f32],
+    target_distance: f32,
+    iters: usize,
+    trace: impl FnMut(RefineIterTrace),
+) -> butteraugli_gpu::Result<SmartGateOutcome> {
+    refine_aq_field_gpu_with_strategy_search_smart_with_threshold(
+        enc,
+        lossy,
+        bg,
+        r,
+        g,
+        b,
+        ref_srgb,
+        initial_aq_field,
+        target_distance,
+        iters,
+        SMART_GATE_AQ_REGRESSION_RATIO,
+        trace,
+    )
+}
+
+/// Generalized combined-mode smart gate with explicit AQ-regression
+/// threshold. See [`refine_aq_field_gpu_smart_with_threshold`] for the
+/// threshold semantics — the same constants apply here.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_aq_field_gpu_with_strategy_search_smart_with_threshold<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    lossy: &LossyEncoder<R>,
+    bg: &mut ButteraugliLoopGpu<R>,
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    ref_srgb: &[u8],
+    initial_aq_field: &[f32],
+    target_distance: f32,
+    iters: usize,
+    aq_regression_ratio: f32,
+    trace: impl FnMut(RefineIterTrace),
+) -> butteraugli_gpu::Result<SmartGateOutcome> {
+    let (width, height) = lossy.dimensions();
+    bg.set_reference(ref_srgb)?;
+
+    // Prepare strat-search plan once — reused for both diagnostic
+    // encodes and (if path == Refined) the entire refinement loop.
+    let plan = lossy.prepare_strategy_search_plan(enc, r, g, b, target_distance);
+
+    // Diagnostic 1: strat-search at initial AQ field.
+    let (rec_r, rec_g, rec_b) =
+        lossy.encode_with_strategy_plan_adaptive(enc, &plan, initial_aq_field);
+    let recon_srgb = linear_planar_to_srgb_u8_interleaved(
+        &rec_r,
+        &rec_g,
+        &rec_b,
+        width as usize,
+        height as usize,
+    );
+    let s_aq = bg.compute_with_reference(&recon_srgb)?.score;
+
+    // Diagnostic 2: strat-search at uniform qac (= distance_to_qac(target)).
+    // Using the SAME plan is correct because cost grids depend on
+    // target_distance, not aq_field — the assignments are stable.
+    let qac_uniform = distance_to_qac(target_distance);
+    let nb = initial_aq_field.len();
+    let uniform_aq = alloc::vec![qac_uniform; nb];
+    let (rec_r, rec_g, rec_b) =
+        lossy.encode_with_strategy_plan_adaptive(enc, &plan, &uniform_aq);
+    let recon_srgb = linear_planar_to_srgb_u8_interleaved(
+        &rec_r,
+        &rec_g,
+        &rec_b,
+        width as usize,
+        height as usize,
+    );
+    let s_un = bg.compute_with_reference(&recon_srgb)?.score;
+
+    // Path 1: AQ regresses uniform — fall back to uniform regardless
+    // of distance.
+    if s_aq > s_un * aq_regression_ratio {
+        return Ok(SmartGateOutcome {
+            aq_field: uniform_aq,
+            path: SmartGatePath::AqRegressedFallToUniform,
+            initial_aq_score: Some(s_aq),
+            uniform_score: Some(s_un),
+        });
+    }
+
+    // Path 2: AQ acceptable but distance too high for refinement —
+    // use initial AQ as-is.
+    if !should_refine_at_distance(target_distance) {
+        return Ok(SmartGateOutcome {
+            aq_field: initial_aq_field.to_vec(),
+            path: SmartGatePath::DistanceGated,
+            initial_aq_score: Some(s_aq),
+            uniform_score: Some(s_un),
+        });
+    }
+
+    // Path 3: refine. Reuse the plan — already paid for in the
+    // diagnostic encodes above.
+    let refined = refine_aq_field_gpu_with_encode(
+        lossy,
+        bg,
+        ref_srgb,
+        initial_aq_field,
+        target_distance,
+        iters,
+        |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
+        trace,
+    )?;
+    Ok(SmartGateOutcome {
+        aq_field: refined,
+        path: SmartGatePath::Refined,
+        initial_aq_score: Some(s_aq),
+        uniform_score: Some(s_un),
+    })
+}
+
 /// Inner refinement loop parameterized on the encode step. Both
 /// [`refine_aq_field_gpu`] (uniform DCT8) and
 /// [`refine_aq_field_gpu_with_strategy_search`] delegate here. Keeps
