@@ -2154,8 +2154,13 @@ mod tests {
             b.push(to_lin(c[2]));
         }
         let lossy = LossyEncoder::new(&enc, w, h);
+        let distance: f32 = std::env::var("DISTANCE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0);
+        std::println!("[strat-diag] distance={distance}");
         let (rs, gs, bs) =
-            lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, 1.0);
+            lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, distance);
         // Compute RMSE vs original (linear).
         let mut sse = 0.0_f64;
         for i in 0..n {
