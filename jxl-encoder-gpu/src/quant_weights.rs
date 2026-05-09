@@ -674,6 +674,20 @@ const AFV_FREQS: [f64; 16] = [
 /// - other (even, even) cells with `x>=2 || y>=2`: interpolated band weight
 /// - odd-row cells: shared with DCT4×8 weights (row-duplicated layout)
 /// - (even-row, odd-col) cells: shared with DCT4×4 weights (replicated layout)
+/// Per-channel split: returns three 64-float `[f32; 64]` arrays for X/Y/B
+/// from `afv_weights()` (192 total). Same as `dct8_weights_per_channel`
+/// in shape, used by AFV cost grid producer.
+pub fn afv_weights_per_channel() -> ([f32; 64], [f32; 64], [f32; 64]) {
+    let all = afv_weights();
+    let mut x = [0.0_f32; 64];
+    let mut y = [0.0_f32; 64];
+    let mut b = [0.0_f32; 64];
+    x.copy_from_slice(&all[..64]);
+    y.copy_from_slice(&all[64..128]);
+    b.copy_from_slice(&all[128..192]);
+    (x, y, b)
+}
+
 pub fn afv_weights() -> Vec<f32> {
     let mut weights = vec![0.0_f32; 192];
     let weights4x8 = dct4x8_weights();

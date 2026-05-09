@@ -1008,6 +1008,23 @@ impl<R: Runtime> LossyEncoder<R> {
             qac, qac, qac, 0, 0, scaled_constants, 1.90,
         );
         mark("cost_subblock_8x8");
+
+        // AFV0-3 cost grid: STAGED but DISABLED. Initial measurement
+        // showed forks::afv::afv_cost_grid_xyb_host takes ~243 ms on
+        // 1024×1024 — a 2.3× total strat-search regression for cost
+        // grids that aren't even fed to the selector yet (gated on
+        // an AFV-supporting reconstruct path). Defer enabling until
+        // either (a) the cost grid is rewritten on the persistent
+        // pipeline (it's currently host-orchestrated with many sync
+        // downloads), or (b) we have an AFV reconstruct path so the
+        // expense can pay off in selector wins. Variables kept for
+        // doc; suppressed unused warnings via `_ = (...)` below.
+        let _ = (&bx8_full, &by8_full, &bb8_full); // kept for AFV producer when re-enabled
+        let cost_afv0: Vec<f32> = Vec::new();
+        let cost_afv1: Vec<f32> = Vec::new();
+        let cost_afv2: Vec<f32> = Vec::new();
+        let cost_afv3: Vec<f32> = Vec::new();
+
         // Distance-scaled anti-bias for sub-blocks (same scale as DCT16).
         let mut cost_dct4x4 = cost_dct4x4;
         let mut cost_dct4x8 = cost_dct4x8;
@@ -1219,13 +1236,18 @@ impl<R: Runtime> LossyEncoder<R> {
         // Stage 5: host-side selector + assignments. All 5 sub-block
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
         // reference) — same trick as DCT32 needed.
+        // AFV cost grids computed but NOT fed to selector yet — the
+        // encode_and_reconstruct path doesn't support AFV reconstruction
+        // (apply_dct/idct_batch_persistent panics on RAW_STRATEGY_AFV*).
+        // Set to None until step 3 of #36 lands. Suppress "unused"
+        // warnings on the cost vecs by binding them.
+        let _ = (&cost_afv0, &cost_afv1, &cost_afv2, &cost_afv3);
         let sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: Some(&cost_dct4x4),
             dct4x8: Some(&cost_dct4x8),
             dct8x4: Some(&cost_dct8x4),
             identity: Some(&cost_identity),
             dct2x2: Some(&cost_dct2x2),
-            // AFV cost grids deferred — wiring next loop.
             afv0: None,
             afv1: None,
             afv2: None,
