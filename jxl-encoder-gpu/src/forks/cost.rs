@@ -1647,10 +1647,18 @@ pub fn strategy_search_costs_dct32x32<R: Runtime>(
     // after corpus-sweep diagnostics found 2.5 still over-selects DCT32
     // on detailed content (image 2684452d: 40 DCT32 picks → +31%
     // butteraugli regression vs uniform). Same root cause as DCT64x64
-    // bump from 3.5 → 8.0 — missing libjxl pixel-loss penalty for
-    // large transforms on detailed content. Re-tune to 1.48 once the
-    // rest of the cost model lands.
-    let entropy_mul = 4.0_f32;
+    // band-aid — missing libjxl pixel-loss penalty for large transforms.
+    //
+    // 4.0 → 3.0 (May 9 2026, this commit): once the corpus regression
+    // test landed, bisected DCT32 mul on the 11-image corpus.
+    //   4 ✓ baseline, 3 ✓, 2 ✗ (07b9f93f -1.5% — gain that drifts
+    //   outside the 0.5% tolerance band, AND 22ea12c9 / 2684452d both
+    //   regress +2.4% / +2.0%; the strat-wins photos shift to
+    //   RefineDct8 because DCT32 picks on those images aren't quite
+    //   right yet at 2.0). Settled on 3.0 — strict score parity.
+    //
+    // Re-tune toward libjxl 1.48 when the missing pixel-loss term lands.
+    let entropy_mul = 3.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
