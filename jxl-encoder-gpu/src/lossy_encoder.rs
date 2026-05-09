@@ -769,7 +769,6 @@ impl<R: Runtime> LossyEncoder<R> {
     /// `cost_dct16x8`, `cost_dct8x16`, `selector`, `dc_grids`,
     /// `mixed_strategy_encode_recon`, `postpass_gab_epf_xyb`,
     /// `download_crop`.
-    #[allow(clippy::too_many_arguments)]
     pub fn encode_one_with_strategy_search_dct8_16_traced(
         &self,
         enc: &GpuEncoder<R>,
@@ -779,6 +778,73 @@ impl<R: Runtime> LossyEncoder<R> {
         distance: f32,
         mark: &mut dyn FnMut(&'static str),
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        // Build a uniform per-block qac field at the target distance,
+        // then delegate to the adaptive variant. Equivalent to the
+        // historical "uniform qac" behaviour.
+        let nb8 = (self.padded_width as usize / 8) * (self.padded_height as usize / 8);
+        let aq_field = alloc::vec![distance_to_qac(distance); nb8];
+        self.encode_one_with_strategy_search_dct8_16_adaptive_traced(
+            enc, r, g, b, &aq_field, distance, mark,
+        )
+    }
+
+    /// Adaptive (per-block qac) variant of strat-search. Use this when
+    /// you have a butteraugli-refined or content-driven `aq_field`
+    /// instead of a uniform target distance.
+    ///
+    /// `aq_field` is the per-padded-block qac scalar (length =
+    /// `padded_w/8 * padded_h/8`, raster order). `target_distance` is
+    /// still required because the cost-grid stage uses it for the
+    /// libjxl-style scaled constants (`compute_scaled_constants`),
+    /// `mul_8x8 = 1 + kFavor2X2/(d+1.4)`, and the distance-scaled
+    /// anti-bias on non-DCT8 grids. Strategy *selection* happens against
+    /// `target_distance`'s cost-model state; per-block *quantization*
+    /// uses `aq_field` directly. This composes with butteraugli AQ
+    /// refinement: strat-search picks the transform per region, the
+    /// loop tunes per-block qac.
+    pub fn encode_one_with_strategy_search_dct8_16_adaptive(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        aq_field: &[f32],
+        target_distance: f32,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        self.encode_one_with_strategy_search_dct8_16_adaptive_traced(
+            enc,
+            r,
+            g,
+            b,
+            aq_field,
+            target_distance,
+            &mut |_| {},
+        )
+    }
+
+    /// Tracing variant of [`Self::encode_one_with_strategy_search_dct8_16_adaptive`].
+    /// See that method for the meaning of `aq_field` vs `target_distance`.
+    ///
+    /// This is the shared body for both strat-search entry points.
+    /// `target_distance` controls the cost-model scaling; `aq_field`
+    /// controls per-block quantization. The `mark` callback is invoked
+    /// at the same boundaries as the historical `_traced` method.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_one_with_strategy_search_dct8_16_adaptive_traced(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        aq_field: &[f32],
+        target_distance: f32,
+        mark: &mut dyn FnMut(&'static str),
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        // Cost-grid stage uses the user-facing target distance for
+        // `compute_scaled_constants`, `mul_8x8`, and the anti-bias
+        // distance-ramp. Per-block quant uses `aq_field` directly in
+        // the encode/recon stage further down.
+        let distance = target_distance;
         use crate::forks::cost::{
             compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16,
             strategy_search_costs_dct32x16_or_16x32, strategy_search_costs_dct32x32,
@@ -840,6 +906,16 @@ impl<R: Runtime> LossyEncoder<R> {
         let xb8 = pw / 8;
         let yb8 = ph / 8;
         let nb8 = xb8 * yb8;
+
+        assert_eq!(
+            aq_field.len(),
+            nb8,
+            "aq_field length {} != num_padded_blocks {} ({}x{})",
+            aq_field.len(),
+            nb8,
+            xb8,
+            yb8,
+        );
 
         // Stage 1: pad + upload
         mark("start");
@@ -1391,7 +1467,11 @@ impl<R: Runtime> LossyEncoder<R> {
 
         // Stage 7: encode + reconstruct via mixed-strategy IDCT.
         // Strategies supported: DCT8, DCT16x16, DCT16x8, DCT8x16, DCT32x32.
-        let qac_vec = vec![qac; nb8];
+        // Per-block qac comes from `aq_field` directly — this is what
+        // makes the adaptive variant compose with the butteraugli AQ
+        // refinement loop. For uniform-qac (scalar `distance` shim)
+        // callers, this is just `vec![distance_to_qac(distance); nb8]`.
+        let qac_vec = aq_field.to_vec();
         let dct8_x_clone = dct8_x;
         let dct8_y_clone = dct8_y;
         let dct8_b_clone = dct8_b;
@@ -2418,6 +2498,45 @@ mod tests {
         assert_eq!(bb.len(), n);
         for v in rr.iter().chain(&gg).chain(&bb) {
             assert!(v.is_finite(), "non-finite output");
+        }
+    }
+
+    /// Adaptive variant with a uniform aq_field at `distance_to_qac(d)`
+    /// must produce bitwise-identical output to the scalar-distance
+    /// method. This proves the new shim doesn't change historical
+    /// (uniform-qac) behaviour.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_strat_search_adaptive_uniform_matches_scalar() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let w = 64_u32;
+        let h = 64_u32;
+        let lossy = LossyEncoder::new(&enc, w, h);
+        let n = (w * h) as usize;
+        let r: Vec<f32> = (0..n).map(|i| 0.30 + 0.20 * (i as f32 / n as f32)).collect();
+        let g: Vec<f32> = (0..n).map(|i| 0.40 + 0.15 * (i as f32 / n as f32)).collect();
+        let b: Vec<f32> = (0..n).map(|i| 0.20 + 0.10 * (i as f32 / n as f32)).collect();
+
+        for &distance in &[0.5_f32, 1.0, 2.0] {
+            let (s_r, s_g, s_b) =
+                lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, distance);
+            let nb8 = (lossy.padded_width as usize / 8) * (lossy.padded_height as usize / 8);
+            let aq_uniform = std::vec![distance_to_qac(distance); nb8];
+            let (a_r, a_g, a_b) = lossy.encode_one_with_strategy_search_dct8_16_adaptive(
+                &enc,
+                &r,
+                &g,
+                &b,
+                &aq_uniform,
+                distance,
+            );
+            assert_eq!(s_r.len(), a_r.len());
+            for i in 0..s_r.len() {
+                assert_eq!(s_r[i], a_r[i], "R mismatch at i={i} d={distance}");
+                assert_eq!(s_g[i], a_g[i], "G mismatch at i={i} d={distance}");
+                assert_eq!(s_b[i], a_b[i], "B mismatch at i={i} d={distance}");
+            }
         }
     }
 

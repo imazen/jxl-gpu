@@ -263,6 +263,10 @@ fn main() {
             dct8x4: Some(&cost_dct8x4),
             identity: Some(&cost_identity),
             dct2x2: Some(&cost_dct2x2),
+            afv0: None,
+            afv1: None,
+            afv2: None,
+            afv3: None,
         },
     };
     let parts = select_partitions_16x16_full(&cost_dct8, &cost_dct16x16, extra, xb8, yb8);
@@ -285,6 +289,13 @@ fn main() {
                         SubStrategy::Dct8x4 => 3,
                         SubStrategy::Identity => 4,
                         SubStrategy::Dct2x2 => 5,
+                        // AFV variants share the SubBlocks bucket with no
+                        // separate breakdown in this demo; treat as DCT8
+                        // for histogram purposes (rare in practice).
+                        SubStrategy::Afv0
+                        | SubStrategy::Afv1
+                        | SubStrategy::Afv2
+                        | SubStrategy::Afv3 => 0,
                     }] += 1;
                 }
             }
