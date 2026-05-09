@@ -232,7 +232,45 @@ refine+DCT8 even when quality wins are absent.
 behind explicit caller choice (no auto-promotion in turnkey APIs)
 until the cost-model regression at d≥1.5 is fixed.
 
-## Strat-search distance limitation (May 8, 2026)
+## Strat-search corpus quality (May 9, 2026, post DCT32/DCT64 retune)
+
+The previous "Strat-search distance limitation" entry below claimed
+parity at d≤1 — that was WRONG. It was based on cherry-picked single-
+image testing. A 16-image CLIC sweep at d=1.0 (combined_strat_search_aq_demo
++ histogram print) revealed strat-search was producing CATASTROPHIC
+quality regressions on >50% of CLIC images:
+
+  Pre-fix (DCT64 mul=3.5, DCT32 mul=2.5):
+    16 CLIC images @ d=1.0:
+    - 0 wins, 7 parity, 9 LOSSES (3 catastrophic +50% to +94%)
+    - Pattern: cost grids over-pick large transforms on detailed content
+
+The root cause: cost model lacks libjxl's pixel-loss penalty for
+large transforms. DCT64x64's "few-coefs" entropy advantage wins even
+when reconstruction is catastrophically blurry on detailed content.
+
+Quick fix (commit 73dab065 May 9 2026):
+- DCT64x64 entropy_mul: 3.5 → 8.0
+- DCT64x32 / DCT32x64 entropy_mul: 3.5 → 8.0
+- DCT32x32 entropy_mul: 2.5 → 4.0
+
+Post-fix:
+  16 CLIC images @ d=1.0:
+  - strat-search alone: ALL within ±0.1% of uniform (parity)
+  - refine+strat (combined mode) vs refine+DCT8:
+    * 3 WINS (-0.4% to -2.4%): 07b9f93f, 22ea12c9, 2684452d
+    * 11 parity
+    * 2 slight losses (+0.8%, +3.0%): 0c49a5cc, 11f2b039
+
+Combined mode is now a net quality win on diverse content.
+The proper long-term fix is porting libjxl's missing pixel-loss term
+for large transforms (kAvoidEntropyOfTransforms is the d>4 piece, but
+the d≤4 piece is via the per-strategy entropy_mul calibration). The
+band-aid muls work but suppress correct DCT64 picks on truly smooth
+content — re-tune to libjxl reference values once the missing
+counterweights land.
+
+## Strat-search distance limitation (May 8, 2026 — DEPRECATED)
 
 LossyEncoder::encode_one_with_strategy_search_dct8_16 produces butteraugli
 at uniform-qac parity for d≤1, but degrades at higher distances:
