@@ -26,6 +26,7 @@ pub mod fuzzy_erosion;
 pub mod gab;
 pub mod gaborish;
 pub mod gather;
+pub mod histogram;
 pub mod idct4_raw;
 pub mod identity;
 pub mod mask1x1;
