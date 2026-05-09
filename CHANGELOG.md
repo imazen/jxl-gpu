@@ -19,6 +19,12 @@ butteraugli refinement.
   encode/recon/postpass against a precomputed plan
 - `forks::butteraugli_loop::refine_aq_field_gpu_with_strategy_search`
   is the strat-search-flavoured refinement loop
+- `forks::butteraugli_loop::refine_aq_field_gpu_with_strategy_search_smart[_with_threshold]`
+  adds the production-ready smart-gate variant (AQ-regression
+  fallback, distance gate)
+- `forks::butteraugli_loop::refine_and_encode_best_of_both` runs both
+  refine+DCT8 and refine+strat pipelines and returns the lower-
+  butteraugli winner; provably never worse than refine+DCT8 alone
 
 **Key commits:**
 - `772a86f1` feat: adaptive variant takes per-block aq_field
@@ -31,6 +37,9 @@ butteraugli refinement.
 - `73dab065` fix: bump DCT32/DCT64 muls to suppress catastrophic over-
   selection on detailed CLIC content (16-image sweep: 9 of 9 regressions
   fixed; combined mode now wins on 3 of 16 images at d=1.0)
+- `79d7932e` fix: bump DCT64 mul 8 → 16 (eliminates last d=1.0 loss)
+- `1f77f6e5` feat: smart-gated combined-mode refinement
+- `82b9e1c2` feat: refine_and_encode_best_of_both (uncompromising mode)
 
 **Quality state** (16 CLIC 1024² @ d=1.0, 4-iter butteraugli refinement):
 - Strat-search alone: ALL 16 within ±0.1% of uniform (parity)
