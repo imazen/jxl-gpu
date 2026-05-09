@@ -78,6 +78,7 @@ pub mod lossy_encoder;
 pub mod persistent;
 #[cfg(feature = "encoder")]
 pub mod groups;
+#[cfg(feature = "encoder")]
 pub mod pipeline;
 pub mod quant_weights;
 
