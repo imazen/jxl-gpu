@@ -940,28 +940,33 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_4x4_x: Vec<f32> = dct4x4_x.iter().map(|w| 1.0 / w).collect();
         let inv_4x4_y: Vec<f32> = dct4x4_y.iter().map(|w| 1.0 / w).collect();
         let inv_4x4_b: Vec<f32> = dct4x4_b.iter().map(|w| 1.0 / w).collect();
+        // Empirical anti-bias mul: libjxl reference is 1.08, but feeding
+        // that into our cost model picks DCT4x4 too often, causing
+        // visible block-edge artifacts that L2 doesn't see. Bump 2× as
+        // a starting point — same trick used to make DCT32 work.
         let cost_dct4x4 = strategy_search_costs_subblock_8x8(
             enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT4X4,
             &dct4x4_x, &dct4x4_y, &dct4x4_b,
             &inv_4x4_x, &inv_4x4_y, &inv_4x4_b,
-            qac, qac, qac, 0, 0, scaled_constants, 1.08,
+            qac, qac, qac, 0, 0, scaled_constants, 2.16,
         );
 
         let (dct4x8_x, dct4x8_y, dct4x8_b) = dct4x8_weights_per_channel();
         let inv_4x8_x: Vec<f32> = dct4x8_x.iter().map(|w| 1.0 / w).collect();
         let inv_4x8_y: Vec<f32> = dct4x8_y.iter().map(|w| 1.0 / w).collect();
         let inv_4x8_b: Vec<f32> = dct4x8_b.iter().map(|w| 1.0 / w).collect();
+        // libjxl reference is 0.859316; bump 2× for the same anti-bias reason.
         let cost_dct4x8 = strategy_search_costs_subblock_8x8(
             enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT4X8,
             &dct4x8_x, &dct4x8_y, &dct4x8_b,
             &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
-            qac, qac, qac, 0, 0, scaled_constants, 0.859_316_37,
+            qac, qac, qac, 0, 0, scaled_constants, 1.72,
         );
         let cost_dct8x4 = strategy_search_costs_subblock_8x8(
             enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT8X4,
             &dct4x8_x, &dct4x8_y, &dct4x8_b,
             &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
-            qac, qac, qac, 0, 0, scaled_constants, 0.859_316_37,
+            qac, qac, qac, 0, 0, scaled_constants, 1.72,
         );
 
         // IDENTITY and DCT2x2 deferred: their forward/inverse kernels
@@ -1166,17 +1171,10 @@ impl<R: Runtime> LossyEncoder<R> {
         };
         mark("cost_dct64_family");
 
-        // Stage 5: host-side selector + assignments.
-        //
-        // Sub-block grids (DCT4x4/4x8/8x4) are computed above but NOT
-        // fed into the selector here: enabling them produces butteraugli
-        // 17.9 on CLIC test image (vs uniform 1.35) because our cost
-        // model under-penalizes their visible block-edge artifacts.
-        // Same pattern as the original DCT32x32 over-selection — fix is
-        // a higher entropy_mul anti-bias adjustment in the cost model
-        // (per-strategy mul/bonus tuning). See task #29 / #34 / unfiled
-        // cost-model-tuning task.
-        let _unused_sub_blocks = crate::pipeline::SubBlockCostGrids {
+        // Stage 5: host-side selector + assignments. Sub-block strategies
+        // (DCT4x4/4x8/8x4) feed in with anti-bias entropy_muls (2× the
+        // libjxl reference) — same trick as DCT32 needed.
+        let sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: Some(&cost_dct4x4),
             dct4x8: Some(&cost_dct4x8),
             dct8x4: Some(&cost_dct8x4),
@@ -1186,7 +1184,7 @@ impl<R: Runtime> LossyEncoder<R> {
         let extra16 = CostGrids16x16 {
             dct_16x8: Some(&cost_dct16x8),
             dct_8x16: Some(&cost_dct8x16),
-            sub_blocks: Default::default(),
+            sub_blocks,
         };
         let assignments = if dct64_eligible {
             let extra32 = CostGrids32x32 {
