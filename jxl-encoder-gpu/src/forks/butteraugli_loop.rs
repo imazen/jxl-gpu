@@ -1461,7 +1461,32 @@ pub fn refine_and_encode_smart<R: Runtime>(
             scores,
         ));
     }
-    refine_and_encode_best_of_both(
+    // Photo-like content path: best-of-3 (uniform + refine+DCT8 +
+    // refine+strat). The uniform pipeline is added to catch the
+    // ~10-20% of CLIC photos where refinement REGRESSES vs uniform
+    // (e.g., 0d154749 +4.3% regression, 1e2f9d41 +12% regression at
+    // d=1.0). best-of-both alone misses these because it only
+    // compares the two refined pipelines.
+    let (width, height) = lossy.dimensions();
+    let n_pixels = (width as usize) * (height as usize);
+    bg.set_reference(ref_srgb)?;
+
+    // Pipeline U: uniform DCT8 at distance.
+    let qac_uniform = distance_to_qac(target_distance);
+    let (un_r, un_g, un_b) = lossy.encode_one(enc, r, g, b, qac_uniform);
+    let mut un_srgb = alloc::vec![0u8; n_pixels * 3];
+    linear_planar_to_srgb_u8_interleaved_into(
+        &un_r,
+        &un_g,
+        &un_b,
+        width as usize,
+        height as usize,
+        &mut un_srgb,
+    );
+    let un_result = bg.compute_with_reference(&un_srgb)?;
+
+    // Best-of-both for the two refined candidates.
+    let (bob_r, bob_g, bob_b, bob_path, bob_scores) = refine_and_encode_best_of_both(
         enc,
         lossy,
         bg,
@@ -1472,7 +1497,29 @@ pub fn refine_and_encode_smart<R: Runtime>(
         initial_aq_field,
         target_distance,
         iters,
-    )
+    )?;
+
+    // Best-of-3: pick lowest-butteraugli winner among uniform vs the
+    // best-of-both winner. uniform_score isn't in BestOfBothScores
+    // (which only carries the two refine variants), so the pick is
+    // logically "uniform if un_result.score < bob_winner_score, else
+    // best-of-both winner". We preserve the bob path for telemetry
+    // when uniform doesn't win.
+    let bob_score = bob_scores
+        .dct8_score
+        .min(bob_scores.strat_search_score);
+    if un_result.score < bob_score {
+        // Uniform wins. Update scores so pnorm_3 reflects the winner.
+        let scores = BestOfBothScores {
+            dct8_score: un_result.score,
+            strat_search_score: bob_scores.strat_search_score,
+            dct8_pnorm_3: un_result.pnorm_3,
+            strat_search_pnorm_3: bob_scores.strat_search_pnorm_3,
+        };
+        Ok((un_r, un_g, un_b, BestOfBothPath::RefineDct8, scores))
+    } else {
+        Ok((bob_r, bob_g, bob_b, bob_path, bob_scores))
+    }
 }
 
 /// Inner refinement loop parameterized on the encode step. Both
