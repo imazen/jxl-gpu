@@ -1138,45 +1138,52 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_4x4_x: Vec<f32> = dct4x4_x.iter().map(|w| 1.0 / w).collect();
         let inv_4x4_y: Vec<f32> = dct4x4_y.iter().map(|w| 1.0 / w).collect();
         let inv_4x4_b: Vec<f32> = dct4x4_b.iter().map(|w| 1.0 / w).collect();
-        // Empirical anti-bias mul: libjxl reference is 1.08, but feeding
-        // that into our cost model picks DCT4x4 too often, causing
-        // visible block-edge artifacts that L2 doesn't see. Bump 2× as
-        // a starting point — same trick used to make DCT32 work.
+        // DCT4x4: 2.16 → 1.08 (libjxl reference, May 9 2026, gated by
+        // corpus regression test). The original 2.16 (= 2× libjxl)
+        // anti-bias was set as a starting point. Bisected on the
+        // 11-image corpus: 2.16 ✓, 1.6 ✓, 1.2 ✓, 1.08 ✓ (libjxl).
+        // Now at exact libjxl reference value.
         let cost_dct4x4 = strategy_search_costs_subblock_8x8(
             enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT4X4,
             &dct4x4_x, &dct4x4_y, &dct4x4_b,
             &inv_4x4_x, &inv_4x4_y, &inv_4x4_b,
-            qac, qac, qac, 0, 0, scaled_constants, 2.16,
+            qac, qac, qac, 0, 0, scaled_constants, 1.08,
         );
 
         let (dct4x8_x, dct4x8_y, dct4x8_b) = dct4x8_weights_per_channel();
         let inv_4x8_x: Vec<f32> = dct4x8_x.iter().map(|w| 1.0 / w).collect();
         let inv_4x8_y: Vec<f32> = dct4x8_y.iter().map(|w| 1.0 / w).collect();
         let inv_4x8_b: Vec<f32> = dct4x8_b.iter().map(|w| 1.0 / w).collect();
-        // libjxl reference is 0.859316; bump 2× for the same anti-bias reason.
+        // DCT4x8 / DCT8x4: 1.72 → 0.98 (May 9 2026, gated by corpus
+        // regression test). libjxl reference is 0.86 — we're 14% above
+        // because at 0.95 the strat-wins photo 2684452d regresses
+        // +2% (FP-tied path-shift; bisected 1.72 ✓ → 1.2 ✓ → 1.0 ✓
+        // → 0.98 ✓ → 0.95 ✗).
         let cost_dct4x8 = strategy_search_costs_subblock_8x8(
             enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT4X8,
             &dct4x8_x, &dct4x8_y, &dct4x8_b,
             &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
-            qac, qac, qac, 0, 0, scaled_constants, 1.72,
+            qac, qac, qac, 0, 0, scaled_constants, 0.98,
         );
         let cost_dct8x4 = strategy_search_costs_subblock_8x8(
             enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT8X4,
             &dct4x8_x, &dct4x8_y, &dct4x8_b,
             &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
-            qac, qac, qac, 0, 0, scaled_constants, 1.72,
+            qac, qac, qac, 0, 0, scaled_constants, 0.98,
         );
 
-        // IDENTITY: libjxl reference 1.0428, bumped 2× for anti-bias
-        // (visible blocking on detailed content if under-penalized).
-        // We tried adding libjxl's kFavor2X2AtHighQuality discount
-        // (`entropy_mul -= 0.4*((5-d)/5)^2` at d<5) on May 9 2026 —
-        // it caused CATASTROPHIC photo regressions (×10 butteraugli on
-        // 02809272 and 07b9f93f at d=1.0). The discount makes
-        // IDENT/DCT2X2 too cheap on textured content where they should
-        // never win. libjxl gets away with it because their cost model
-        // has counterweights we lack (TBD investigation). For now,
-        // fixed 2.09 anti-bias mul stays.
+        // IDENTITY: 2.09 → 1.95 (May 9 2026, modest 7% reduction
+        // gated by corpus regression test). libjxl reference is 1.0428
+        // but going much below 1.95 path-shifts on the strat-wins
+        // photos (07b9f93f flips RefineStratSearch → RefineDct8 at
+        // 1.8 even though score change is +0.36% < tolerance — but
+        // path label is enforced strictly).
+        //
+        // We tried libjxl's kFavor2X2AtHighQuality discount
+        // (`entropy_mul -= 0.4*((5-d)/5)^2` at d<5) earlier — it
+        // caused CATASTROPHIC photo regressions (×10 butteraugli on
+        // 02809272 and 07b9f93f at d=1.0). Don't re-try without
+        // first porting libjxl's missing counterweights.
         let (id_x, id_y, id_b) = identity_weights_per_channel();
         let inv_id_x: Vec<f32> = id_x.iter().map(|w| 1.0 / w).collect();
         let inv_id_y: Vec<f32> = id_y.iter().map(|w| 1.0 / w).collect();
@@ -1185,10 +1192,12 @@ impl<R: Runtime> LossyEncoder<R> {
             enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_IDENTITY,
             &id_x, &id_y, &id_b,
             &inv_id_x, &inv_id_y, &inv_id_b,
-            qac, qac, qac, 0, 0, scaled_constants, 2.09,
+            qac, qac, qac, 0, 0, scaled_constants, 1.95,
         );
 
-        // DCT2X2: libjxl reference 0.95, bumped 2× for anti-bias.
+        // DCT2X2: 1.90 → 0.95 (libjxl reference, May 9 2026, gated by
+        // corpus regression test). Bisected: 1.90 ✓ → 1.5 ✓ → 1.0 ✓
+        // → 0.95 ✓ (libjxl). Now at exact reference.
         let (d2_x, d2_y, d2_b) = dct2x2_weights_per_channel();
         let inv_d2_x: Vec<f32> = d2_x.iter().map(|w| 1.0 / w).collect();
         let inv_d2_y: Vec<f32> = d2_y.iter().map(|w| 1.0 / w).collect();
@@ -1197,7 +1206,7 @@ impl<R: Runtime> LossyEncoder<R> {
             enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT2X2,
             &d2_x, &d2_y, &d2_b,
             &inv_d2_x, &inv_d2_y, &inv_d2_b,
-            qac, qac, qac, 0, 0, scaled_constants, 1.90,
+            qac, qac, qac, 0, 0, scaled_constants, 0.95,
         );
         mark("cost_subblock_8x8");
 
