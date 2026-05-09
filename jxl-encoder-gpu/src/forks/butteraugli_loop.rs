@@ -1383,10 +1383,37 @@ pub fn refine_and_encode_smart<R: Runtime>(
     iters: usize,
 ) -> butteraugli_gpu::Result<(Vec<f32>, Vec<f32>, Vec<f32>, BestOfBothPath, BestOfBothScores)> {
     if lossy.content_looks_like_screenshot(enc, r, g, b) {
-        // Strat-search is unsafe on this content. Run refine+DCT8 only.
+        // Strat-search is unsafe on this content. Pick the best of
+        // {uniform DCT8, refine+DCT8} — both pipelines independently
+        // win on subsets of screenshots:
+        //   - gmessages, gui, terminal: uniform is best
+        //     (refine REGRESSES vs uniform: 0.93 → 1.08 etc.)
+        //   - imac_dark, imac_g3, windows: refine is best
+        //     (refine wins by 6-23% vs uniform).
+        // Running both and picking the winner guarantees we never
+        // ship worse than EITHER baseline. Cost: ~2× refine+DCT8
+        // (one uniform encode + one refine+DCT8 + 2 measures), still
+        // way cheaper than best-of-both's ~3.5× since strat-search is
+        // skipped.
         let (width, height) = lossy.dimensions();
         let n_pixels = (width as usize) * (height as usize);
         bg.set_reference(ref_srgb)?;
+
+        // Pipeline U: uniform DCT8 at distance.
+        let qac_uniform = distance_to_qac(target_distance);
+        let (un_r, un_g, un_b) = lossy.encode_one(enc, r, g, b, qac_uniform);
+        let mut un_srgb = alloc::vec![0u8; n_pixels * 3];
+        linear_planar_to_srgb_u8_interleaved_into(
+            &un_r,
+            &un_g,
+            &un_b,
+            width as usize,
+            height as usize,
+            &mut un_srgb,
+        );
+        let un_result = bg.compute_with_reference(&un_srgb)?;
+
+        // Pipeline R: refine + uniform DCT8.
         let aq_dct8 = refine_aq_field_gpu(
             enc,
             lossy,
@@ -1400,27 +1427,36 @@ pub fn refine_and_encode_smart<R: Runtime>(
             iters,
             |_| {},
         )?;
-        let (dct8_r, dct8_g, dct8_b) = lossy.encode_one_adaptive(enc, r, g, b, &aq_dct8);
-        let mut dct8_srgb = alloc::vec![0u8; n_pixels * 3];
+        let (rf_r, rf_g, rf_b) = lossy.encode_one_adaptive(enc, r, g, b, &aq_dct8);
+        let mut rf_srgb = alloc::vec![0u8; n_pixels * 3];
         linear_planar_to_srgb_u8_interleaved_into(
-            &dct8_r,
-            &dct8_g,
-            &dct8_b,
+            &rf_r,
+            &rf_g,
+            &rf_b,
             width as usize,
             height as usize,
-            &mut dct8_srgb,
+            &mut rf_srgb,
         );
-        let dct8_result = bg.compute_with_reference(&dct8_srgb)?;
+        let rf_result = bg.compute_with_reference(&rf_srgb)?;
+
+        // Pick the lower-scored. dct8_score field stores the WINNER's
+        // score so callers consuming it as 'the score' get the right
+        // value. dct8_pnorm_3 likewise.
+        let (out_r, out_g, out_b, win_score, win_pnorm_3) = if rf_result.score < un_result.score {
+            (rf_r, rf_g, rf_b, rf_result.score, rf_result.pnorm_3)
+        } else {
+            (un_r, un_g, un_b, un_result.score, un_result.pnorm_3)
+        };
         let scores = BestOfBothScores {
-            dct8_score: dct8_result.score,
+            dct8_score: win_score,
             strat_search_score: f32::NAN,
-            dct8_pnorm_3: dct8_result.pnorm_3,
+            dct8_pnorm_3: win_pnorm_3,
             strat_search_pnorm_3: f32::NAN,
         };
         return Ok((
-            dct8_r,
-            dct8_g,
-            dct8_b,
+            out_r,
+            out_g,
+            out_b,
             BestOfBothPath::SkippedStratSearchAsScreenshot,
             scores,
         ));
