@@ -368,6 +368,16 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     let mut coeff_buffers: Vec<(u8, Vec<(usize, usize)>, Vec<f32>)> =
         Vec::with_capacity(groups.len());
 
+    use crate::forks::transform::{
+        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
+    };
+    let is_afv = |s: u8| {
+        s == RAW_STRATEGY_AFV0
+            || s == RAW_STRATEGY_AFV1
+            || s == RAW_STRATEGY_AFV2
+            || s == RAW_STRATEGY_AFV3
+    };
+
     for (raw_strategy, coords) in groups {
         let coeff_count = coeff_count_per_strategy(raw_strategy);
         let (tile_w, tile_h) = tile_dims_pixels(raw_strategy);
@@ -401,6 +411,54 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 let src_off = (y0 + dy) * padded_width + x0;
                 batch.extend_from_slice(&xyb_channel[src_off..src_off + tile_w as usize]);
             }
+        }
+
+        // AFV path: forward + inverse use forks::afv (per-kind), not
+        // apply_dct/idct_batch_persistent. Quantize + dequant still use
+        // the persistent variants. Scatter directly into out_plane;
+        // skip pushing to coeff_buffers (reconstruct_mixed_strategy_gpu
+        // can't handle AFV anyway).
+        if is_afv(raw_strategy) {
+            let kind = (raw_strategy - RAW_STRATEGY_AFV0) as usize;
+            // Forward AFV (host-orchestrated, returns Vec<f32>).
+            let coeffs_host = crate::forks::afv::afv_transform_batch_gpu(
+                enc,
+                &crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE,
+                &batch,
+                kind,
+            );
+            // Persistent quant + dequant (8×8 grid, 1×1 LLF — same as DCT8 shape).
+            let g_coeffs = enc.upload_blocks(&coeffs_host, n_blocks as u32, 64);
+            let g_quant = enc.quantize_large_blocks_broadcast_w_persistent(
+                &g_coeffs,
+                &weights_template,
+                &qac_for_strategy,
+                thresholds,
+                8, 8, 1, 1,
+            );
+            let g_dequant = enc.dequant_strategy_persistent(
+                &g_quant,
+                &weights_template,
+                &qac_for_strategy,
+            );
+            let mut dequant = enc.download_blocks(&g_dequant);
+            // LLF restore: 1×1 (just write coeffs[0] = dc_grid).
+            for (i, &(bx, by)) in coords.iter().enumerate() {
+                dequant[i * 64] = dc_grid_per_8x8_block[by * xsize_blocks_8 + bx];
+            }
+            // Inverse AFV (host-orchestrated).
+            let pixels_host = crate::forks::afv::inverse_afv_transform_batch_gpu(
+                enc,
+                &crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE,
+                &dequant,
+                kind,
+            );
+            // Scatter: 8×8 region per block (AFV uses 8×8 tiles).
+            for (i, &(bx, by)) in coords.iter().enumerate() {
+                let src = &pixels_host[i * 64..i * 64 + 64];
+                scatter_block_to_plane(out_plane, src, bx, by, raw_strategy, padded_width);
+            }
+            continue;
         }
         let g_pixels = enc.upload_blocks(&batch, n_blocks as u32, block_pixels as u32);
 

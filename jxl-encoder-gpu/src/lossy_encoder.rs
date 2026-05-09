@@ -1009,21 +1009,49 @@ impl<R: Runtime> LossyEncoder<R> {
         );
         mark("cost_subblock_8x8");
 
-        // AFV0-3 cost grid: STAGED but DISABLED. Initial measurement
-        // showed forks::afv::afv_cost_grid_xyb_host takes ~243 ms on
-        // 1024×1024 — a 2.3× total strat-search regression for cost
-        // grids that aren't even fed to the selector yet (gated on
-        // an AFV-supporting reconstruct path). Defer enabling until
-        // either (a) the cost grid is rewritten on the persistent
-        // pipeline (it's currently host-orchestrated with many sync
-        // downloads), or (b) we have an AFV reconstruct path so the
-        // expense can pay off in selector wins. Variables kept for
-        // doc; suppressed unused warnings via `_ = (...)` below.
-        let _ = (&bx8_full, &by8_full, &bb8_full); // kept for AFV producer when re-enabled
-        let cost_afv0: Vec<f32> = Vec::new();
-        let cost_afv1: Vec<f32> = Vec::new();
-        let cost_afv2: Vec<f32> = Vec::new();
-        let cost_afv3: Vec<f32> = Vec::new();
+        // AFV0-3 cost grid (one host call returns all 4 kinds packed
+        // [kind * n_blocks + b]). Reuses 8x8 pre-gathered pixels +
+        // existing mask. Persistent quant+dequant inside (commit
+        // 1ef2552c). Currently 237 ms on 1024×1024 — 60% of strat-search
+        // budget at this image size. Persistent AFV transforms would
+        // cut another ~160 ms; deferred to a follow-up.
+        let mask_host_for_afv = enc.download_plane(&g_mask);
+        let mask_block_major =
+            crate::forks::cost::repack_plane_to_blocks(&mask_host_for_afv, pw, ph, 8, 8);
+        let (afv_wx_cg, afv_wy_cg, afv_wb_cg) =
+            crate::quant_weights::afv_weights_per_channel();
+        let qac_vec_for_afv = vec![qac; nb8];
+        let afv_costs = crate::forks::afv::afv_cost_grid_xyb_host(
+            enc,
+            &crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE,
+            &bx8_full,
+            &by8_full,
+            &bb8_full,
+            &afv_wx_cg,
+            &afv_wy_cg,
+            &afv_wb_cg,
+            &qac_vec_for_afv,
+            &qac_vec_for_afv,
+            &qac_vec_for_afv,
+            &self.thresholds_x,
+            &self.thresholds_y,
+            &self.thresholds_b,
+            &mask_block_major,
+        );
+        debug_assert_eq!(afv_costs.len(), 4 * nb8);
+        // Anti-bias mul: libjxl ref AFV = 0.818. Initial 2× (=1.636)
+        // produced butteraugli 21.67 on CLIC photo — AFV picked too
+        // often. Bump 4× (=3.27) and see if quality holds.
+        let afv_anti_bias = 3.27_f32 * dist_bias;
+        let mut cost_afv0 = afv_costs[0..nb8].to_vec();
+        let mut cost_afv1 = afv_costs[nb8..2 * nb8].to_vec();
+        let mut cost_afv2 = afv_costs[2 * nb8..3 * nb8].to_vec();
+        let mut cost_afv3 = afv_costs[3 * nb8..4 * nb8].to_vec();
+        for c in cost_afv0.iter_mut() { *c *= afv_anti_bias; }
+        for c in cost_afv1.iter_mut() { *c *= afv_anti_bias; }
+        for c in cost_afv2.iter_mut() { *c *= afv_anti_bias; }
+        for c in cost_afv3.iter_mut() { *c *= afv_anti_bias; }
+        mark("cost_afv");
 
         // Distance-scaled anti-bias for sub-blocks (same scale as DCT16).
         let mut cost_dct4x4 = cost_dct4x4;
@@ -1237,10 +1265,21 @@ impl<R: Runtime> LossyEncoder<R> {
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
         // reference) — same trick as DCT32 needed.
         // AFV cost grids computed but NOT fed to selector yet — the
-        // encode_and_reconstruct path doesn't support AFV reconstruction
-        // (apply_dct/idct_batch_persistent panics on RAW_STRATEGY_AFV*).
-        // Set to None until step 3 of #36 lands. Suppress "unused"
-        // warnings on the cost vecs by binding them.
+        // AFV reconstruct path has a pack_afv_dcs / LLF-restore
+        // interaction issue:
+        // - pack_afv_dcs mixes 3 sub-block DCs into positions [0],[1],[8]
+        //   of the 64-coeff layout
+        // - Quantize zeros position [0] (LLF threshold). Dequant gives 0.
+        // - The encode_and_reconstruct path's LLF restore writes
+        //   dc_grid_per_8x8_block (a SPATIAL MEAN) to position [0],
+        //   which is NOT the packed value the inverse AFV's unpack
+        //   logic expects. Result: butteraugli 21.67 (vs 1.35 baseline).
+        // Even at 4× anti-bias the score didn't improve — the picks
+        // are stable, the wrong-DC reconstruction is the issue.
+        // Fix paths: (a) pack the dc_grid mean approximately into
+        // [0]/[1]/[8] before LLF restore, (b) skip pack_afv_dcs in
+        // the encode side, (c) extend dc_grid to store 3 values per
+        // AFV block. Defer to a follow-up.
         let _ = (&cost_afv0, &cost_afv1, &cost_afv2, &cost_afv3);
         let sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: Some(&cost_dct4x4),
@@ -1412,7 +1451,20 @@ impl<R: Runtime> LossyEncoder<R> {
         let dct64x32_x_clone = dct64x32_x.clone();
         let dct64x32_y_clone = dct64x32_y.clone();
         let dct64x32_b_clone = dct64x32_b.clone();
+        let (afv_wx, afv_wy, afv_wb) = crate::quant_weights::afv_weights_per_channel();
+        let afv_wx_v: Vec<f32> = afv_wx.to_vec();
+        let afv_wy_v: Vec<f32> = afv_wy.to_vec();
+        let afv_wb_v: Vec<f32> = afv_wb.to_vec();
+        let is_afv_strategy = |s: u8| {
+            s == crate::forks::transform::RAW_STRATEGY_AFV0
+                || s == crate::forks::transform::RAW_STRATEGY_AFV1
+                || s == crate::forks::transform::RAW_STRATEGY_AFV2
+                || s == crate::forks::transform::RAW_STRATEGY_AFV3
+        };
         let weights_x_for = move |strat: u8| -> Vec<f32> {
+            if is_afv_strategy(strat) {
+                return afv_wx_v.clone();
+            }
             match strat {
                 RAW_STRATEGY_DCT => dct8_x_clone.to_vec(),
                 RAW_STRATEGY_DCT16X16 => dct16_x_clone.clone(),
@@ -1425,6 +1477,9 @@ impl<R: Runtime> LossyEncoder<R> {
             }
         };
         let weights_y_for = move |strat: u8| -> Vec<f32> {
+            if is_afv_strategy(strat) {
+                return afv_wy_v.clone();
+            }
             match strat {
                 RAW_STRATEGY_DCT => dct8_y_clone.to_vec(),
                 RAW_STRATEGY_DCT16X16 => dct16_y_clone.clone(),
@@ -1437,6 +1492,9 @@ impl<R: Runtime> LossyEncoder<R> {
             }
         };
         let weights_b_for = move |strat: u8| -> Vec<f32> {
+            if is_afv_strategy(strat) {
+                return afv_wb_v.clone();
+            }
             match strat {
                 RAW_STRATEGY_DCT => dct8_b_clone.to_vec(),
                 RAW_STRATEGY_DCT16X16 => dct16_b_clone.clone(),
