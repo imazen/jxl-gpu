@@ -892,7 +892,7 @@ impl<R: Runtime> LossyEncoder<R> {
         const K_FAVOR_2X2: f32 = -0.4;
         let mul_8x8 = 1.0 + K_FAVOR_2X2 / (distance + 1.4);
 
-        let (mut cost_dct8, cost_dct16) = strategy_search_costs_dct8_16x16(
+        let (mut cost_dct8, mut cost_dct16) = strategy_search_costs_dct8_16x16(
             enc,
             &xyb_x,
             &xyb_y,
@@ -924,6 +924,20 @@ impl<R: Runtime> LossyEncoder<R> {
             *c *= mul_8x8;
         }
         mark("cost_dct8_dct16");
+
+        // Distance-scaled anti-bias for non-DCT8 cost grids. Diagnostic
+        // (force-all-DCT8) confirmed the d=4 regression is purely in
+        // cost-model picks — not the encode/recon path. The fixed muls
+        // (2.5/3.5 for DCT32/64) work at d=1 but break at d=4 because
+        // larger transforms have far fewer non-zero coeffs at heavy
+        // quantization, making them artificially cheap.
+        // Formula: mul_at_d = base_mul * (1 + (d - 1) * scale_factor)
+        // ensures d=1 unchanged; d>1 ramps up the bias.
+        let bias_scale = (distance - 1.0).max(0.0) * 0.6;
+        let dist_bias = 1.0 + bias_scale;
+        for c in cost_dct16.iter_mut() {
+            *c *= dist_bias;
+        }
 
         // 8x8 sub-block strategies (DCT4x4, DCT4x8, DCT8x4, IDENTITY,
         // DCT2x2). All extract 8x8 tiles → 64 coefs. We pre-gather
@@ -994,6 +1008,17 @@ impl<R: Runtime> LossyEncoder<R> {
             qac, qac, qac, 0, 0, scaled_constants, 1.90,
         );
         mark("cost_subblock_8x8");
+        // Distance-scaled anti-bias for sub-blocks (same scale as DCT16).
+        let mut cost_dct4x4 = cost_dct4x4;
+        let mut cost_dct4x8 = cost_dct4x8;
+        let mut cost_dct8x4 = cost_dct8x4;
+        let mut cost_identity = cost_identity;
+        let mut cost_dct2x2 = cost_dct2x2;
+        for c in cost_dct4x4.iter_mut() { *c *= dist_bias; }
+        for c in cost_dct4x8.iter_mut() { *c *= dist_bias; }
+        for c in cost_dct8x4.iter_mut() { *c *= dist_bias; }
+        for c in cost_identity.iter_mut() { *c *= dist_bias; }
+        for c in cost_dct2x2.iter_mut() { *c *= dist_bias; }
 
         let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16(
             enc,
@@ -1042,6 +1067,11 @@ impl<R: Runtime> LossyEncoder<R> {
         );
 
         mark("cost_dct8x16");
+        // Distance-scaled anti-bias (same as DCT16x16).
+        let mut cost_dct16x8 = cost_dct16x8;
+        let mut cost_dct8x16 = cost_dct8x16;
+        for c in cost_dct16x8.iter_mut() { *c *= dist_bias; }
+        for c in cost_dct8x16.iter_mut() { *c *= dist_bias; }
 
         // Optional: DCT32x32 cost grid (only when padded dims are
         // multiples of 32). Returns empty Vec when ineligible; selector
@@ -1090,6 +1120,11 @@ impl<R: Runtime> LossyEncoder<R> {
             Vec::new()
         };
         mark("cost_dct32x32");
+        // Distance-scaled anti-bias for DCT32x32 (1.5× the DCT16
+        // factor since DCT32 over-selection at high d is more severe).
+        let mut cost_dct32x32 = cost_dct32x32;
+        let dist_bias_32 = 1.0 + bias_scale * 1.5;
+        for c in cost_dct32x32.iter_mut() { *c *= dist_bias_32; }
 
         // Optional: DCT32x16 + DCT16x32 cost grids (rectangular DCT32
         // family). Both feed into the 32x32-tier selector via CostGrids32x32.
@@ -1128,6 +1163,11 @@ impl<R: Runtime> LossyEncoder<R> {
             (Vec::new(), Vec::new())
         };
         mark("cost_dct32x16_and_16x32");
+        // Distance-scaled anti-bias for rectangular DCT32 (same as DCT32x32).
+        let mut cost_dct32x16 = cost_dct32x16;
+        let mut cost_dct16x32 = cost_dct16x32;
+        for c in cost_dct32x16.iter_mut() { *c *= dist_bias_32; }
+        for c in cost_dct16x32.iter_mut() { *c *= dist_bias_32; }
 
         // Optional: DCT64x64 + DCT64x32 + DCT32x64 cost grids.
         // All gated on dct64_eligible (image dims multiple of 64).
@@ -1189,6 +1229,15 @@ impl<R: Runtime> LossyEncoder<R> {
             (Vec::new(), Vec::new(), Vec::new())
         };
         mark("cost_dct64_family");
+        // Distance-scaled anti-bias for DCT64 (2× the DCT16 factor —
+        // most extreme over-selection at high d).
+        let mut cost_dct64x64 = cost_dct64x64;
+        let mut cost_dct64x32 = cost_dct64x32;
+        let mut cost_dct32x64 = cost_dct32x64;
+        let dist_bias_64 = 1.0 + bias_scale * 2.0;
+        for c in cost_dct64x64.iter_mut() { *c *= dist_bias_64; }
+        for c in cost_dct64x32.iter_mut() { *c *= dist_bias_64; }
+        for c in cost_dct32x64.iter_mut() { *c *= dist_bias_64; }
 
         // Stage 5: host-side selector + assignments. All 5 sub-block
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
