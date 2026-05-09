@@ -1160,6 +1160,168 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
     }
 }
 
+/// Persistent variant of [`estimate_entropy_full_strategy_batch_gpu`]:
+/// takes pre-uploaded `GpuBlocks` for per-channel pixel inputs and a
+/// `GpuPlane` for the mask. Same drop-in semantics for the cost grid
+/// output. Avoids ~8 sync downloads per call (forward DCT × 3,
+/// entropy err × 3, IDCT err × 3 — minus what shares stats).
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_entropy_full_strategy_batch_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    pixel_blocks_x: &crate::persistent::GpuBlocks<R>,
+    pixel_blocks_y: &crate::persistent::GpuBlocks<R>,
+    pixel_blocks_b: &crate::persistent::GpuBlocks<R>,
+    raw_strategy: u8,
+    weights_x_per_block: &[f32],
+    weights_y_per_block: &[f32],
+    weights_b_per_block: &[f32],
+    inv_weights_x_per_block: &[f32],
+    inv_weights_y_per_block: &[f32],
+    inv_weights_b_per_block: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    mask_plane: &crate::persistent::GpuPlane<R>,
+    mask_row_base: &[u32],
+    scaled_constants: (f32, f32, f32),
+    entropy_mul: f32,
+    mode: CostMode,
+) -> Vec<f32> {
+    use crate::forks::cfl::{ytob_ratio, ytox_ratio};
+    use crate::forks::transform::{
+        apply_dct_batch_persistent, apply_idct_batch_persistent, coeff_count_per_strategy,
+        tile_dims_pixels,
+    };
+
+    let coeff_count = coeff_count_per_strategy(raw_strategy);
+    let (block_w, block_h) = tile_dims_pixels(raw_strategy);
+    let block_pixels = block_w * block_h;
+
+    let n_blocks = pixel_blocks_x.num_blocks() as usize;
+    debug_assert_eq!(pixel_blocks_x.num_blocks(), pixel_blocks_y.num_blocks());
+    debug_assert_eq!(pixel_blocks_x.num_blocks(), pixel_blocks_b.num_blocks());
+    debug_assert_eq!(pixel_blocks_x.coeffs_per_block() as usize, block_pixels);
+    debug_assert_eq!(mask_row_base.len(), n_blocks);
+    debug_assert_eq!(weights_x_per_block.len(), coeff_count);
+    debug_assert_eq!(weights_y_per_block.len(), coeff_count);
+    debug_assert_eq!(weights_b_per_block.len(), coeff_count);
+    debug_assert_eq!(inv_weights_x_per_block.len(), coeff_count);
+    debug_assert_eq!(inv_weights_y_per_block.len(), coeff_count);
+    debug_assert_eq!(inv_weights_b_per_block.len(), coeff_count);
+    let (_info_loss_mul, cost_delta, _zeros_mul) = scaled_constants;
+
+    // Step 1: forward DCT each channel (no sync).
+    let dct_x = apply_dct_batch_persistent(enc, pixel_blocks_x, raw_strategy);
+    let dct_y = apply_dct_batch_persistent(enc, pixel_blocks_y, raw_strategy);
+    let dct_b = apply_dct_batch_persistent(enc, pixel_blocks_b, raw_strategy);
+
+    // Step 2: per-channel entropy + error-coef writeback (no sync).
+    let (g_y_stats, g_y_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+        &dct_y,
+        &dct_y,
+        weights_y_per_block,
+        inv_weights_y_per_block,
+        0.0,
+        quant_y,
+        cost_delta,
+    );
+    let (g_x_stats, g_x_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+        &dct_x,
+        &dct_y,
+        weights_x_per_block,
+        inv_weights_x_per_block,
+        ytox_ratio(ytox),
+        quant_x,
+        cost_delta,
+    );
+    let (g_b_stats, g_b_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+        &dct_b,
+        &dct_y,
+        weights_b_per_block,
+        inv_weights_b_per_block,
+        ytob_ratio(ytob),
+        quant_b,
+        cost_delta,
+    );
+
+    // Step 3: per-strategy IDCT of error coefficients (no sync).
+    let g_pix_err_x = apply_idct_batch_persistent(enc, &g_x_err, raw_strategy);
+    let g_pix_err_y = apply_idct_batch_persistent(enc, &g_y_err, raw_strategy);
+    let g_pix_err_b = apply_idct_batch_persistent(enc, &g_b_err, raw_strategy);
+
+    // Step 4: per-channel masked 8th-power pixel loss (no sync).
+    let g_loss_x = enc.pixel_loss_blocks_persistent(
+        &g_pix_err_x,
+        mask_plane,
+        mask_row_base,
+        MASK_CHANNEL_OFFSET[0],
+        block_w as u32,
+        block_h as u32,
+    );
+    let g_loss_y = enc.pixel_loss_blocks_persistent(
+        &g_pix_err_y,
+        mask_plane,
+        mask_row_base,
+        MASK_CHANNEL_OFFSET[1],
+        block_w as u32,
+        block_h as u32,
+    );
+    let g_loss_b = enc.pixel_loss_blocks_persistent(
+        &g_pix_err_b,
+        mask_plane,
+        mask_row_base,
+        MASK_CHANNEL_OFFSET[2],
+        block_w as u32,
+        block_h as u32,
+    );
+
+    // Step 5: download only the small final stats and losses.
+    let x_stats = enc.download_blocks(&g_x_stats);
+    let y_stats = enc.download_blocks(&g_y_stats);
+    let b_stats = enc.download_blocks(&g_b_stats);
+    let mut loss_x = enc.download_blocks_f64(&g_loss_x);
+    let loss_y = enc.download_blocks_f64(&g_loss_y);
+    let loss_b = enc.download_blocks_f64(&g_loss_b);
+
+    // Step 6: extract per-block entropy + apply X-channel multi-block weight.
+    let entropy_x = extract_per_block_entropy(&x_stats, n_blocks);
+    let entropy_y = extract_per_block_entropy(&y_stats, n_blocks);
+    let entropy_b = extract_per_block_entropy(&b_stats, n_blocks);
+    if matches!(mode, CostMode::Upstream { .. }) {
+        let covered_blocks = block_pixels / 64;
+        apply_x_multiblock_weight_to_loss(&mut loss_x, covered_blocks);
+    }
+
+    // Step 7: combine + final cost.
+    let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
+    match mode {
+        CostMode::Simple => {
+            let entropy_total = sum_per_block_entropy_3channel(&entropy_x, &entropy_y, &entropy_b);
+            per_block_total_cost(&entropy_total, &pixel_loss_total, entropy_mul)
+        }
+        CostMode::Upstream { quant_for_coeffs } => {
+            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            per_block_upstream_cost(
+                &entropy_x,
+                &entropy_y,
+                &entropy_b,
+                &nzeros_x,
+                &nzeros_y,
+                &nzeros_b,
+                &pixel_loss_total,
+                entropy_mul,
+                scaled_constants,
+                quant_for_coeffs,
+                block_pixels,
+            )
+        }
+    }
+}
+
 /// Per-block entropy estimation in the pixel-domain — wraps
 /// [`GpuEncoder::entropy_coeffs_pixel_blocks`].
 ///
@@ -1332,11 +1494,17 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
     let xsize_blocks_8 = padded_width / 8;
     let ysize_blocks_8 = padded_height / 8;
 
-    // DCT8 cost grid: gather 8×8 blocks, run estimate_entropy_full.
+    // Upload mask once (shared across both strategies).
+    let g_mask = enc.upload_plane(mask1x1, padded_width as u32, padded_height as u32);
+
+    // DCT8 cost grid: host repack + upload, then persistent pipeline.
     let bx8 = repack_plane_to_blocks(xyb_x, padded_width, padded_height, 8, 8);
     let by8 = repack_plane_to_blocks(xyb_y, padded_width, padded_height, 8, 8);
     let bb8 = repack_plane_to_blocks(xyb_b, padded_width, padded_height, 8, 8);
     let n_blocks_8 = xsize_blocks_8 * ysize_blocks_8;
+    let g_bx8 = enc.upload_blocks(&bx8, n_blocks_8 as u32, 64);
+    let g_by8 = enc.upload_blocks(&by8, n_blocks_8 as u32, 64);
+    let g_bb8 = enc.upload_blocks(&bb8, n_blocks_8 as u32, 64);
     let mask_row_base_8: Vec<u32> = (0..n_blocks_8)
         .map(|i| {
             let bx = i % xsize_blocks_8;
@@ -1346,13 +1514,12 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
         .collect();
 
     // libjxl entropy_mul for DCT8: profile.entropy_mul_table[DCT8] = 0.8
-    // Phase A: hard-code 0.8 (matches PORT_STATUS Phase 6 entropy table).
     let dct8_entropy_mul = 0.8_f32;
-    let cost_dct8 = estimate_entropy_full_dct8_batch_gpu(
+    let cost_dct8 = estimate_entropy_full_dct8_batch_persistent(
         enc,
-        &bx8,
-        &by8,
-        &bb8,
+        &g_bx8,
+        &g_by8,
+        &g_bb8,
         weights_dct8_x.try_into().expect("64-float DCT8 weights X"),
         weights_dct8_y.try_into().expect("64-float DCT8 weights Y"),
         weights_dct8_b.try_into().expect("64-float DCT8 weights B"),
@@ -1364,9 +1531,8 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
         quant_b,
         ytox,
         ytob,
-        mask1x1,
+        &g_mask,
         &mask_row_base_8,
-        padded_width as u32,
         scaled_constants,
         dct8_entropy_mul,
         CostMode::Upstream {
@@ -1381,6 +1547,9 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
     let by16 = repack_plane_to_blocks(xyb_y, padded_width, padded_height, 16, 16);
     let bb16 = repack_plane_to_blocks(xyb_b, padded_width, padded_height, 16, 16);
     let n_blocks_16 = xsize_blocks_16 * ysize_blocks_16;
+    let g_bx16 = enc.upload_blocks(&bx16, n_blocks_16 as u32, 256);
+    let g_by16 = enc.upload_blocks(&by16, n_blocks_16 as u32, 256);
+    let g_bb16 = enc.upload_blocks(&bb16, n_blocks_16 as u32, 256);
     let mask_row_base_16: Vec<u32> = (0..n_blocks_16)
         .map(|i| {
             let bx = i % xsize_blocks_16;
@@ -1391,11 +1560,11 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
 
     // libjxl entropy_mul for DCT16x16: profile.entropy_mul_table[DCT16X16] = 1.34
     let dct16x16_entropy_mul = 1.34_f32;
-    let cost_dct16x16 = estimate_entropy_full_strategy_batch_gpu(
+    let cost_dct16x16 = estimate_entropy_full_strategy_batch_persistent(
         enc,
-        &bx16,
-        &by16,
-        &bb16,
+        &g_bx16,
+        &g_by16,
+        &g_bb16,
         crate::forks::transform::RAW_STRATEGY_DCT16X16,
         weights_dct16x16_x,
         weights_dct16x16_y,
@@ -1408,9 +1577,8 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
         quant_b,
         ytox,
         ytob,
-        mask1x1,
+        &g_mask,
         &mask_row_base_16,
-        padded_width as u32,
         scaled_constants,
         dct16x16_entropy_mul,
         CostMode::Upstream {
@@ -1473,6 +1641,11 @@ pub fn strategy_search_costs_dct16x8_or_8x16<R: Runtime>(
     let bx_p = repack_plane_to_blocks(xyb_x, padded_width, padded_height, tile_w, tile_h);
     let by_p = repack_plane_to_blocks(xyb_y, padded_width, padded_height, tile_w, tile_h);
     let bb_p = repack_plane_to_blocks(xyb_b, padded_width, padded_height, tile_w, tile_h);
+    let coeff_count = (tile_w * tile_h) as u32;
+    let g_bx = enc.upload_blocks(&bx_p, n_blocks as u32, coeff_count);
+    let g_by = enc.upload_blocks(&by_p, n_blocks as u32, coeff_count);
+    let g_bb = enc.upload_blocks(&bb_p, n_blocks as u32, coeff_count);
+    let g_mask = enc.upload_plane(mask1x1, padded_width as u32, padded_height as u32);
     let mask_row_base: Vec<u32> = (0..n_blocks)
         .map(|i| {
             let bx_i = i % bx;
@@ -1484,11 +1657,11 @@ pub fn strategy_search_costs_dct16x8_or_8x16<R: Runtime>(
     // libjxl entropy_mul: profile.entropy_mul_table[DCT16X8 / DCT8X16] = 1.21
     let entropy_mul = 1.21_f32;
 
-    estimate_entropy_full_strategy_batch_gpu(
+    estimate_entropy_full_strategy_batch_persistent(
         enc,
-        &bx_p,
-        &by_p,
-        &bb_p,
+        &g_bx,
+        &g_by,
+        &g_bb,
         raw_strategy,
         weights_x,
         weights_y,
@@ -1501,9 +1674,8 @@ pub fn strategy_search_costs_dct16x8_or_8x16<R: Runtime>(
         quant_b,
         ytox,
         ytob,
-        mask1x1,
+        &g_mask,
         &mask_row_base,
-        padded_width as u32,
         scaled_constants,
         entropy_mul,
         CostMode::Upstream {

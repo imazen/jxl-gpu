@@ -1975,21 +1975,22 @@ mod tests {
         assert!((r1 - llf1).abs() < 1e-5, "got {r1} expected {llf1}");
     }
 
-    #[cfg(feature = "cuda")]
-    #[test]
-    /// DC grid mean × 8 invariant: uniform plane → all blocks same DC.
+    /// DC grid mean invariant: uniform plane → all blocks same DC =
+    /// mean of the block. (Was previously `sum/8`; corrected in commit
+    /// ac88dc1c to match this codebase's mean-scale DCT convention.)
     #[test]
     fn test_compute_dc_grid_uniform() {
         let plane = alloc::vec![0.5_f32; 16 * 16];
         let dc = compute_dc_grid_per_8x8_block(&plane, 16, 16);
-        // 4 blocks (2×2 grid). Each block: 64 × 0.5 = 32, ×0.125 = 4.0.
+        // 4 blocks (2×2 grid). Each block: mean = 0.5.
         assert_eq!(dc.len(), 4);
         for v in &dc {
-            assert!((v - 4.0).abs() < 1e-5, "got {v}");
+            assert!((v - 0.5).abs() < 1e-5, "got {v}");
         }
     }
 
-    /// DC grid varies with content: gradient → distinct per-block DCs.
+    /// DC grid varies with content: gradient → distinct per-block DCs
+    /// (each = block mean).
     #[test]
     fn test_compute_dc_grid_gradient() {
         // 16x8 plane with gradient: pixel value = x.
@@ -2000,13 +2001,13 @@ mod tests {
             }
         }
         let dc = compute_dc_grid_per_8x8_block(&plane, 16, 8);
-        // Two blocks. Block (0,0): pixels 0..7 each row, sum = 28*8 = 224, dc = 28.
-        // Block (1,0): pixels 8..15, sum = (8+15)*8/2*8 = 92*8 = 736 -- wait let me recompute.
-        // pixels x=8..15: 8+9+10+11+12+13+14+15 = 92. × 8 rows = 736. × 0.125 = 92.
-        // Block (0,0): 0..7 = 28. × 8 rows = 224. × 0.125 = 28.
+        // Two blocks.
+        // Block (0,0): pixels x=0..7, mean = (0+1+..+7)/8 = 28/8 = 3.5
+        //   (every row identical, so block mean = row mean).
+        // Block (1,0): pixels x=8..15, mean = (8+9+..+15)/8 = 92/8 = 11.5.
         assert_eq!(dc.len(), 2);
-        assert!((dc[0] - 28.0).abs() < 1e-4);
-        assert!((dc[1] - 92.0).abs() < 1e-4);
+        assert!((dc[0] - 3.5).abs() < 1e-4, "block0: got {} expected 3.5", dc[0]);
+        assert!((dc[1] - 11.5).abs() < 1e-4, "block1: got {} expected 11.5", dc[1]);
     }
 
     /// Smoke test: encode_and_reconstruct_mixed_strategy_single_channel
