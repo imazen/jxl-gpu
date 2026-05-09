@@ -340,6 +340,47 @@ refine+DCT8 even when quality wins are absent.
 behind explicit caller choice (no auto-promotion in turnkey APIs)
 until the cost-model regression at d≥1.5 is fixed.
 
+## Cost-model muls retuned via corpus regression (May 9, 2026 evening)
+
+Once the corpus regression test framework (`tests/corpus_regression.rs`,
+`corpus` cargo feature) landed, all the band-aid muls became safe to
+bisect downward toward libjxl reference values. 11-image corpus
+covers all 4 BestOfBothPath variants + DCT64-sensitive + strat-wins
+photos. Bisected each mul to the lowest value that still passes
+strict score parity (0.5% tolerance) AND path-stable.
+
+**Final state vs the May 9 morning band-aids vs libjxl reference:**
+
+| Strategy             | morning | post-bisect | libjxl ref | gap remaining |
+|----------------------|---------|-------------|------------|---------------|
+| DCT4x4               | 2.16    | **1.08**    | 1.08       | 0% — match    |
+| DCT4x8 / DCT8x4      | 1.72    | **0.98**    | 0.86       | 14% high      |
+| IDENTITY             | 2.09    | **1.95**    | 1.0428     | 87% high      |
+| DCT2X2               | 1.90    | **0.95**    | 0.95       | 0% — match    |
+| DCT16x16             | 1.34    | 1.34        | 1.34       | 0% — match    |
+| DCT16x8 / DCT8x16    | 1.21    | 1.21        | 1.21       | 0% — match    |
+| DCT32x32             | 4.0     | **3.0**     | 1.48       | 103% high     |
+| DCT32x16 / DCT16x32  | 2.5     | **2.2**     | 1.49       | 48% high      |
+| DCT64x64             | 16.0    | **6.0**     | 2.25       | 167% high     |
+| DCT64x32 / DCT32x64  | 16.0    | **6.0**     | 2.25       | 167% high     |
+
+**Three muls now at exact libjxl reference (DCT4x4, DCT2X2 +
+DCT8/DCT16/DCT16x8 already there).** Five muls still above libjxl
+because lowering further triggers regressions on the strat-wins
+photos in the corpus (22ea12c9 / 2684452d) — they need stronger
+suppression of large transforms than libjxl's reference values
+provide, presumably because libjxl has counterweights we lack
+(missing pixel-loss term for large transforms, AdjustQuantBlockAC,
+etc.).
+
+**The bisection bracket per strategy is documented in source
+comments** (lossy_encoder.rs sub-blocks, cost.rs DCT32+/DCT64+),
+so future me can resume the experiment if/when missing
+counterweights land.
+
+Quality unchanged: 11 corpus images all within 0.5% tolerance
+across all retunes.
+
 ## Strat-search corpus quality (May 9, 2026, post DCT32/DCT64 retune)
 
 The previous "Strat-search distance limitation" entry below claimed
