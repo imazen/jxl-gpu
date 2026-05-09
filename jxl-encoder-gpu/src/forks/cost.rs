@@ -1809,21 +1809,30 @@ pub fn strategy_search_costs_dct64x64<R: Runtime>(
         })
         .collect();
 
-    // libjxl entropy_mul = 2.25; bumped to 8.0 (May 9 2026) after
-    // corpus-sweep diagnostics found 3.5 still produced catastrophic
-    // regressions on 3 of 16 CLIC photos at d=1.0 — DCT64x64 picked
-    // 50+ regions on detailed content (e.g., image 1cba10ad with 52
-    // DCT64 picks → +94% butteraugli vs uniform DCT8 1.28 → 2.48).
+    // libjxl entropy_mul = 2.25; ours is 6.0 — sequence of band-aid
+    // bumps:
+    //   3.5 → 8.0 (May 9 2026): catastrophic regressions on 3/16
+    //     CLIC photos (1cba10ad +94% butteraugli vs uniform).
+    //   8.0 → 16.0 (May 9 2026): one image still leaked DCT64
+    //     picks at 8.0 (11f2b039 +3% loss).
+    //   16.0 → 6.0 (May 9 2026, this commit): now safe to lower with
+    //     the corpus regression test as guard. 11-image corpus
+    //     covers 1cba10ad / 11f2b039 (DCT64-sensitive) + the strat-
+    //     wins photos 22ea12c9 / 2684452d. Bisected:
+    //       16 ✓, 12 ✓, 8 ✓, 6 ✓, 5 path-shifts on 1cba10ad
+    //       (FP-tied score, refine wins by epsilon), 4 ✗ (22ea12c9
+    //       regresses by +2.4%). Settled on 6.0 — strict score
+    //       parity AND path-stable.
     //
-    // The cost model misses libjxl's pixel-loss penalty for large
-    // transforms on detailed content — without that counterweight,
-    // DCT64's "few-coefs" entropy advantage wins even when
-    // reconstruction is catastrophically blurry. Suppressing DCT64
-    // via 8.0 mul is a band-aid until the missing pixel-loss term
-    // lands. Same rationale as DCT32x32 (which is at 2.5 vs libjxl
-    // 1.48). The proper fix is a content-aware gate (e.g. mask1x1
+    // The cost model still misses libjxl's pixel-loss penalty for
+    // large transforms on detailed content — without that
+    // counterweight, DCT64's "few-coefs" entropy advantage wins
+    // even when reconstruction is catastrophically blurry.
+    // Suppressing DCT64 via 6.0 mul is still a band-aid until the
+    // missing pixel-loss term lands. Same rationale as DCT32x32.
+    // The proper fix is a content-aware gate (e.g. mask1x1
     // smoothness threshold) before DCT64 even enters the cost grid.
-    let entropy_mul = 16.0_f32;
+    let entropy_mul = 6.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
@@ -1911,8 +1920,10 @@ pub fn strategy_search_costs_dct64x32_or_32x64<R: Runtime>(
         .collect();
 
     // DCT64x32 / DCT32x64 — same suppression rationale as DCT64x64
-    // (see the corpus-sweep note above). Bumped 3.5 → 8.0 May 9 2026.
-    let entropy_mul = 16.0_f32;
+    // (see the corpus-sweep note above). Bumped 3.5 → 8.0 (May 9 2026),
+    // then 8.0 → 16.0, then 16.0 → 6.0 once the corpus regression
+    // test landed as a safety net. Stays in lockstep with DCT64x64.
+    let entropy_mul = 6.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
