@@ -1638,8 +1638,11 @@ pub fn strategy_search_costs_dct32x32<R: Runtime>(
         })
         .collect();
 
-    // libjxl entropy_mul: profile.entropy_mul_table[DCT32X32] = 1.34
-    let entropy_mul = 1.34_f32;
+    // libjxl entropy_mul: profile.entropy_mul_table[DCT32X32] is a
+    // distance-scaled value; rough effective value at d=1 is ~2.5.
+    // Phase A used 1.34 (same as DCT16), which over-selects DCT32x32
+    // on detailed content. Try 2.5 here as a calibration anchor.
+    let entropy_mul = 2.5_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,

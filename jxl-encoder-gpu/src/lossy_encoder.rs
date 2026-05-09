@@ -821,8 +821,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // Fix is in the cost model (forks/cost.rs) — apply per-strategy
         // adjustments before returning the cost grid. Until then, keep
         // DCT32x32 disabled to preserve the +0.36% baseline.
-        let dct32_eligible = false
-            && (self.padded_width as usize).is_multiple_of(32)
+        let dct32_eligible = (self.padded_width as usize).is_multiple_of(32)
             && (self.padded_height as usize).is_multiple_of(32);
 
         let (w, h) = (self.width as usize, self.height as usize);
@@ -874,7 +873,15 @@ impl<R: Runtime> LossyEncoder<R> {
         // libjxl effort 7+ default base constants for compute_scaled_constants
         let scaled_constants = compute_scaled_constants(distance, (1.2, 9.308_906, 10.833_273));
 
-        let (cost_dct8, cost_dct16) = strategy_search_costs_dct8_16x16(
+        // libjxl per-strategy cost adjustment: mul_8x8 = 1 + kFavor2X2/(d+1.4)
+        // where kFavor2X2 = -0.4. At d=1.0 this gives ~0.833 — DCT8 cost
+        // is reduced by ~17%, making it competitive with larger transforms.
+        // This is the "DCT8 favoritism" that prevents over-selection of
+        // DCT16/DCT32 on detailed content. Other strategies use mul=1.0.
+        const K_FAVOR_2X2: f32 = -0.4;
+        let mul_8x8 = 1.0 + K_FAVOR_2X2 / (distance + 1.4);
+
+        let (mut cost_dct8, cost_dct16) = strategy_search_costs_dct8_16x16(
             enc,
             &xyb_x,
             &xyb_y,
@@ -901,6 +908,10 @@ impl<R: Runtime> LossyEncoder<R> {
             0,
             scaled_constants,
         );
+        // Apply mul_8x8 to DCT8 cost grid (libjxl kFavor2X2).
+        for c in cost_dct8.iter_mut() {
+            *c *= mul_8x8;
+        }
         mark("cost_dct8_dct16");
 
         let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16(
