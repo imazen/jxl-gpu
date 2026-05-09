@@ -2,17 +2,20 @@
 
 ## [Unreleased]
 
-### AC strategy search — full GPU pipeline + 15-strategy palette (May 8, 2026)
+### AC strategy search — full GPU pipeline + content-aware selectivity (May 8-9, 2026)
 
 Multi-day effort delivering a working AC strategy search on GPU,
 matching libjxl's algorithm at quality parity with uniform-qac.
 
 **End state:** `LossyEncoder::encode_one_with_strategy_search_dct8_16`
-runs in 170 ms on a 1024×1024 image at d=1.0 (vs 305 ms baseline,
-**1.8× speedup**), produces butteraugli identical to uniform-qac
-across d ∈ {0.5, 1.0, 2.0, 4.0}, and considers 15 of 27 strategies.
+runs in 175 ms on a 1024×1024 image at d=1.0 (vs 305 ms baseline,
+**1.7× speedup**), produces butteraugli identical to uniform-qac
+across d ∈ {0.5, 1.0, 2.0, 4.0}, and **content-aware selectivity
+verified** in both directions:
+- CLIC photo at d=1.0 → 98.4% DCT8 (correct on detailed content)
+- 256×256 smooth gradient at d ∈ {1, 2, 4} → 100% DCT64x64
 
-**Key commits:**
+**Key commits (chronological):**
 - `ac88dc1c` fix: GPU DCT mean-scale convention (DC grid sum/8 → sum/64)
 - `79e034707` feat: EPF in postpass closes +6% butteraugli gap
 - `13be0049` perf: persistent cost-grid pipeline (6× faster)
@@ -23,22 +26,37 @@ across d ∈ {0.5, 1.0, 2.0, 4.0}, and considers 15 of 27 strategies.
 - `c4c62cef` feat: IDENTITY + DCT2x2 (full sub-block palette)
 - `9ae995d3` feat: thread CostGrids16x16 through 32x32 + 64x64 selectors
 - `ba9eed75` fix: distance-scaled anti-bias preserves quality d=0.5..d=4
+- `a2555659/675f7b02/78021128` feat: AFV0-3 plumbing (steps 1-3)
+- `1ef2552c` perf: AFV cost grid persistent quant+dequant (358→237ms)
+- `6c3cd0fa` fix: isolated AFV reconstruct correct + 100× anti-bias
+- `8c335f13` chore: skip AFV cost grid (175ms saved when AFV ~never wins)
+- `30d22977` fix: halve distance-bias slope (0.6 → 0.3)
+- `626f655c/43e173a1` test: parameterized + smooth selectivity validation
 - `da647cc8` chore: 12 → 0 build warnings
 
-**Active strategies (15 of 27):** DCT8, DCT4x4, DCT4x8, DCT8x4,
-IDENTITY, DCT2x2, DCT16x16, DCT16x8, DCT8x16, DCT32x32, DCT32x16,
-DCT16x32, DCT64x64, DCT64x32, DCT32x64. Remaining: AFV0-3 (corner-DCT,
-separate forks::afv path), DCT128+ (libjxl never selects).
-
-**Selectivity validated** on CLIC photo at d=1.0: 16100 DCT8 picks
-(98.4%), 59 DCT16x16 (1.4% area), 3 DCT32x32 (0.3% area). Strat-search
-picks larger transforms only where they genuinely win.
+**Active strategies (15 of 27 selectable + 4 wired-but-dormant):**
+- 8x8 family: DCT8, DCT4x4, DCT4x8, DCT8x4, IDENTITY, DCT2x2
+- 16-tier: DCT16x16, DCT16x8, DCT8x16
+- 32-tier: DCT32x32, DCT32x16, DCT16x32
+- 64-tier: DCT64x64, DCT64x32, DCT32x64
+- AFV0-3 (plumbing complete; cost grid call skipped pending #38
+  persistent AFV transforms — would otherwise add 175ms per call)
+- DCT128+ (libjxl never selects)
 
 **Distance robustness:** the cost-model anti-bias muls are
-distance-scaled — `bias = 1 + max(0, d-1) * 0.6` for DCT16, 1.5× for
+distance-scaled — `bias = 1 + max(0, d-1) * 0.3` for DCT16, 1.5× for
 DCT32, 2× for DCT64. At d=1 unchanged from calibration; at d=4
-prevents the over-selection that produced butteraugli 9.2 (commit
-`ba9eed75` debug).
+prevents the over-selection that produced butteraugli 9.2 with
+fixed-mul approach.
+
+**Validation tests** (all in `lossy_encoder.rs` / `forks/reconstruct.rs`):
+- `test_dct_scale_convention_diag` — proves GPU DCT uses mean-scale
+- `test_lossy_encoder_strat_search_vs_encode_one_diag` — RMSE parity
+- `test_dct32x32_reconstruct_smooth_gradient` — DCT32 isolation
+- `test_strat_search_dct32_diag_on_real_image` — histogram on CLIC photo
+- `test_strat_search_selectivity_on_smooth_synthetic` — histogram on smooth
+- `test_afv_isolated_reconstruct_uniform_input` — AFV reconstruct correct
+- `test_afv_packed_dc_for_uniform_input` — empirical AFV pack measurement
 
 **Foundation that future work depends on:**
 - 6 new persistent GpuEncoder kernels (entropy_coeffs, pixel_loss,
@@ -49,6 +67,9 @@ prevents the over-selection that produced butteraugli 9.2 (commit
   32x32_with_extras16, 64x64_with_extras16)
 - 4 lowering helpers (partitions_16x16/32x32/64x64_to_assignments
   + recursive Sub16x16 / Sub32x32)
+- AFV reconstruct branch in encode_and_reconstruct_mixed_strategy_single_channel
+  (host-orchestrated, ready for the cost-grid call to be re-enabled
+  when #38 makes it affordable)
 
 ### Tunable smart-gate threshold + per-metric optima sweep (`69e22df1`, `fee20969`)
 
