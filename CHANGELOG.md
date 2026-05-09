@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+### Combined-mode: strat-search + butteraugli AQ refinement (May 9, 2026)
+
+Lands the integration that the strat-search + butteraugli refinement
+loop work was building toward: a single encode pipeline that picks
+per-region transforms via strat-search AND tunes per-block qac via
+butteraugli refinement.
+
+**API additions:**
+- `LossyEncoder::encode_one_with_strategy_search_dct8_16_adaptive[_traced]`
+  takes `&[f32]` per-block qac instead of scalar distance
+- `StrategySearchPlan` struct caches the cost-grid output for reuse
+- `LossyEncoder::prepare_strategy_search_plan[_traced]` runs cost-grid
+  stage once, returns plan
+- `LossyEncoder::encode_with_strategy_plan_adaptive[_traced]` runs
+  encode/recon/postpass against a precomputed plan
+- `forks::butteraugli_loop::refine_aq_field_gpu_with_strategy_search`
+  is the strat-search-flavoured refinement loop
+
+**Key commits:**
+- `772a86f1` feat: adaptive variant takes per-block aq_field
+- `a8b2211b` feat: refine_aq_field_gpu_with_strategy_search
+- `6ba983a6` fix: per-region qac takes MAX over covered 8x8 sub-blocks
+  (critical correctness bug — refinement loop was discarding 3-of-4
+  qac bumps for DCT16x16 regions, 15-of-16 for DCT32x32, etc.)
+- `f52f2428` perf: split prepare/encode + cache plan in butteraugli loop
+  (4.7× → 2.2× cost overhead, 51% faster)
+- `73dab065` fix: bump DCT32/DCT64 muls to suppress catastrophic over-
+  selection on detailed CLIC content (16-image sweep: 9 of 9 regressions
+  fixed; combined mode now wins on 3 of 16 images at d=1.0)
+
+**Quality state** (16 CLIC 1024² @ d=1.0, 4-iter butteraugli refinement):
+- Strat-search alone: ALL 16 within ±0.1% of uniform (parity)
+- Combined mode (refine+strat) vs refine+DCT8:
+  - 3 wins (-0.4% to -2.4%)
+  - 11 parity
+  - 2 slight losses (+0.8%, +3.0%)
+
+**Cost** (CLIC 1024² @ 4 iters): combined mode is 2.2× refine+DCT8
+(485 ms vs 220 ms). Down from 4.7× pre-caching. Per-iter encode is
+~95 ms (down from ~210 ms before plan caching).
+
 ### AC strategy search — full GPU pipeline + content-aware selectivity (May 8-9, 2026)
 
 Multi-day effort delivering a working AC strategy search on GPU,
