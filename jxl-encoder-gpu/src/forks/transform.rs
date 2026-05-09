@@ -85,6 +85,14 @@ pub const RAW_STRATEGY_IDENTITY: u8 = 15;
 /// raw_strategy=16 → DCT2X2 (hierarchical 2×2 Hadamard at S=8/4/2).
 /// Mirrors libjxl `kDCT2X2`.
 pub const RAW_STRATEGY_DCT2X2: u8 = 16;
+/// raw_strategy=17..20 → AFV0..AFV3 (corner-affine variable transform).
+/// 8×8 input → 64 coeffs. Forward/inverse via `forks::afv` (host-orchestrated
+/// 3 GPU launches per direction). NOT handled by apply_dct/idct_batch_persistent
+/// — the encode_and_reconstruct path special-cases these.
+pub const RAW_STRATEGY_AFV0: u8 = 17;
+pub const RAW_STRATEGY_AFV1: u8 = 18;
+pub const RAW_STRATEGY_AFV2: u8 = 19;
+pub const RAW_STRATEGY_AFV3: u8 = 20;
 
 /// Number of coefficient floats produced per block by each strategy.
 ///
@@ -113,17 +121,18 @@ pub fn coeff_count_per_strategy(raw_strategy: u8) -> usize {
         | RAW_STRATEGY_DCT8X4
         | RAW_STRATEGY_DCT4X4
         | RAW_STRATEGY_IDENTITY
-        | RAW_STRATEGY_DCT2X2 => 64,
+        | RAW_STRATEGY_DCT2X2
+        | RAW_STRATEGY_AFV0
+        | RAW_STRATEGY_AFV1
+        | RAW_STRATEGY_AFV2
+        | RAW_STRATEGY_AFV3 => 64,
         RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => 128,
         RAW_STRATEGY_DCT16X16 => 256,
         RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => 512,
         RAW_STRATEGY_DCT32X32 => 1024,
         RAW_STRATEGY_DCT64X32 | RAW_STRATEGY_DCT32X64 => 2048,
         RAW_STRATEGY_DCT64X64 => 4096,
-        _ => panic!(
-            "unsupported strategy {raw_strategy} \
-             (use forks::afv::afv_transform_batch_gpu for AFV0-3)"
-        ),
+        _ => panic!("unsupported strategy {raw_strategy}"),
     }
 }
 
@@ -147,7 +156,11 @@ fn tile_dims(raw_strategy: u8) -> (usize, usize) {
         | RAW_STRATEGY_DCT8X4
         | RAW_STRATEGY_DCT4X4
         | RAW_STRATEGY_IDENTITY
-        | RAW_STRATEGY_DCT2X2 => (8, 8),
+        | RAW_STRATEGY_DCT2X2
+        | RAW_STRATEGY_AFV0
+        | RAW_STRATEGY_AFV1
+        | RAW_STRATEGY_AFV2
+        | RAW_STRATEGY_AFV3 => (8, 8),
         RAW_STRATEGY_DCT16X8 => (8, 16), // 8 wide × 16 tall
         RAW_STRATEGY_DCT8X16 => (16, 8), // 16 wide × 8 tall
         RAW_STRATEGY_DCT16X16 => (16, 16),

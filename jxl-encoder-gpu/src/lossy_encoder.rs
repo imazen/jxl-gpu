@@ -1225,6 +1225,11 @@ impl<R: Runtime> LossyEncoder<R> {
             dct8x4: Some(&cost_dct8x4),
             identity: Some(&cost_identity),
             dct2x2: Some(&cost_dct2x2),
+            // AFV cost grids deferred — wiring next loop.
+            afv0: None,
+            afv1: None,
+            afv2: None,
+            afv3: None,
         };
         let extra16 = CostGrids16x16 {
             dct_16x8: Some(&cost_dct16x8),

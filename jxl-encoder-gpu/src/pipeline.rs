@@ -2753,6 +2753,13 @@ pub enum SubStrategy {
     Dct8x4,
     Identity,
     Dct2x2,
+    /// AFV (corner-affine variable) — 4 variants for 4 corner orientations.
+    /// 8×8 input → 64 coeffs. Reconstruction is host-orchestrated via
+    /// `forks::afv::inverse_afv_transform_batch_gpu`.
+    Afv0,
+    Afv1,
+    Afv2,
+    Afv3,
 }
 
 /// Optional per-cell 8×8-tier cost grids for use with
@@ -2768,6 +2775,13 @@ pub struct SubBlockCostGrids<'a> {
     pub dct8x4: Option<&'a [f32]>,
     pub identity: Option<&'a [f32]>,
     pub dct2x2: Option<&'a [f32]>,
+    /// AFV0..AFV3 cost grids — same per-8x8 layout. `forks::afv::afv_cost_grid_xyb_host`
+    /// returns one Vec covering all 4 kinds; caller can split it into
+    /// these 4 slices via `[kind * n_blocks .. (kind+1) * n_blocks]`.
+    pub afv0: Option<&'a [f32]>,
+    pub afv1: Option<&'a [f32]>,
+    pub afv2: Option<&'a [f32]>,
+    pub afv3: Option<&'a [f32]>,
 }
 
 /// Pick the lowest-cost 8×8-tier strategy for each of the 4 cells in a
@@ -2815,6 +2829,26 @@ pub fn pick_subblock_strategies(
         if let Some(g) = extra.dct2x2 {
             if g[idx] < best.0 {
                 best = (g[idx], SubStrategy::Dct2x2);
+            }
+        }
+        if let Some(g) = extra.afv0 {
+            if g[idx] < best.0 {
+                best = (g[idx], SubStrategy::Afv0);
+            }
+        }
+        if let Some(g) = extra.afv1 {
+            if g[idx] < best.0 {
+                best = (g[idx], SubStrategy::Afv1);
+            }
+        }
+        if let Some(g) = extra.afv2 {
+            if g[idx] < best.0 {
+                best = (g[idx], SubStrategy::Afv2);
+            }
+        }
+        if let Some(g) = extra.afv3 {
+            if g[idx] < best.0 {
+                best = (g[idx], SubStrategy::Afv3);
             }
         }
         best
@@ -3472,6 +3506,26 @@ fn partition_16x16_cost_with_extras(
                         .dct2x2
                         .map(|g| g[idx])
                         .unwrap_or(f32::INFINITY),
+                    SubStrategy::Afv0 => extra
+                        .sub_blocks
+                        .afv0
+                        .map(|g| g[idx])
+                        .unwrap_or(f32::INFINITY),
+                    SubStrategy::Afv1 => extra
+                        .sub_blocks
+                        .afv1
+                        .map(|g| g[idx])
+                        .unwrap_or(f32::INFINITY),
+                    SubStrategy::Afv2 => extra
+                        .sub_blocks
+                        .afv2
+                        .map(|g| g[idx])
+                        .unwrap_or(f32::INFINITY),
+                    SubStrategy::Afv3 => extra
+                        .sub_blocks
+                        .afv3
+                        .map(|g| g[idx])
+                        .unwrap_or(f32::INFINITY),
                 }
             };
             pick_one(subs[0], 0, 0)
@@ -3528,6 +3582,7 @@ pub fn partitions_16x16_to_assignments(
     ysize_blocks_8: usize,
 ) -> Vec<StrategyAssignment> {
     use crate::forks::transform::{
+        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
         RAW_STRATEGY_DCT, RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
         RAW_STRATEGY_DCT8X4, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
         RAW_STRATEGY_IDENTITY,
@@ -3600,6 +3655,10 @@ pub fn partitions_16x16_to_assignments(
                             SubStrategy::Dct8x4 => RAW_STRATEGY_DCT8X4,
                             SubStrategy::Identity => RAW_STRATEGY_IDENTITY,
                             SubStrategy::Dct2x2 => RAW_STRATEGY_DCT2X2,
+                            SubStrategy::Afv0 => RAW_STRATEGY_AFV0,
+                            SubStrategy::Afv1 => RAW_STRATEGY_AFV1,
+                            SubStrategy::Afv2 => RAW_STRATEGY_AFV2,
+                            SubStrategy::Afv3 => RAW_STRATEGY_AFV3,
                         };
                         out.push(StrategyAssignment {
                             bx: bx + dx,
