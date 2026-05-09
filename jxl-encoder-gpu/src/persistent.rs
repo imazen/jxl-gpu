@@ -1773,6 +1773,66 @@ mod tests {
         let _ = enc.histogram_count_pow2(&tokens, 100);
     }
 
+    /// `sse_reduce_3channel` GPU kernel must match the trivial host
+    /// `for i in 0..64 { sum += (dx² + dy² + db²) * mask }` reduction
+    /// per block. Bit-exact within fp32 rounding (1e-4 tolerance).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_sse_reduce_3channel_matches_host() {
+        use cubecl::prelude::*;
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let n_blocks = 23_usize; // odd, exercises tail thread
+        let n = n_blocks * 64;
+        // Synthesize per-pixel data with non-trivial pattern.
+        let orig_x: Vec<f32> = (0..n).map(|i| ((i * 7) as f32).sin() * 16.0 + 64.0).collect();
+        let orig_y: Vec<f32> = (0..n).map(|i| ((i * 11) as f32).sin() * 24.0 + 80.0).collect();
+        let orig_b: Vec<f32> = (0..n).map(|i| ((i * 13) as f32).sin() * 12.0 + 48.0).collect();
+        let recon_x: Vec<f32> = orig_x.iter().enumerate().map(|(i, &v)| v + ((i * 3) as f32 * 0.1).sin()).collect();
+        let recon_y: Vec<f32> = orig_y.iter().enumerate().map(|(i, &v)| v + ((i * 5) as f32 * 0.1).sin()).collect();
+        let recon_b: Vec<f32> = orig_b.iter().enumerate().map(|(i, &v)| v + ((i * 17) as f32 * 0.1).sin()).collect();
+        let mask: Vec<f32> = (0..n).map(|i| 0.5 + 0.4 * ((i as f32 * 0.07).cos())).collect();
+
+        // Host reference.
+        let mut host_costs = vec![0.0_f32; n_blocks];
+        for b in 0..n_blocks {
+            let mut s = 0.0_f32;
+            let r0 = b * 64;
+            for i in 0..64 {
+                let dx = orig_x[r0 + i] - recon_x[r0 + i];
+                let dy = orig_y[r0 + i] - recon_y[r0 + i];
+                let db = orig_b[r0 + i] - recon_b[r0 + i];
+                let m = mask[r0 + i];
+                s += (dx * dx + dy * dy + db * db) * m;
+            }
+            host_costs[b] = s;
+        }
+
+        // GPU run.
+        let client = enc.client_ref();
+        let h_ox = client.create_from_slice(f32::as_bytes(&orig_x));
+        let h_oy = client.create_from_slice(f32::as_bytes(&orig_y));
+        let h_ob = client.create_from_slice(f32::as_bytes(&orig_b));
+        let h_rx = client.create_from_slice(f32::as_bytes(&recon_x));
+        let h_ry = client.create_from_slice(f32::as_bytes(&recon_y));
+        let h_rb = client.create_from_slice(f32::as_bytes(&recon_b));
+        let h_m = client.create_from_slice(f32::as_bytes(&mask));
+        let h_out = client.empty(n_blocks * 4);
+        crate::launch::sse_reduce::sse_reduce_3channel::<B>(
+            client, h_ox, h_oy, h_ob, h_rx, h_ry, h_rb, h_m, h_out.clone(), n_blocks as u32,
+        );
+        let bytes = client.read_one(h_out).expect("sse download");
+        let gpu_costs: &[f32] = f32::from_bytes(&bytes);
+        assert_eq!(gpu_costs.len(), n_blocks);
+        for (b, (&h, &g)) in host_costs.iter().zip(gpu_costs.iter()).enumerate() {
+            let rel = ((h - g) / h.max(1e-9)).abs();
+            assert!(
+                rel < 1e-4 || (h - g).abs() < 1e-4,
+                "block {b} host={h:.6} gpu={g:.6} rel={rel:.6}"
+            );
+        }
+    }
+
     /// Persistent dequant_strategy (no bias) must match the host-side
     /// `quant * weight / qac` formula bit-exactly within fp32 rounding.
     #[cfg(feature = "cuda")]

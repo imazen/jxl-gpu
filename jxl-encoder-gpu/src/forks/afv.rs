@@ -795,6 +795,16 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
         dequant_blocks_gpu_broadcast_w::<R>,
     );
 
+    // Note: sse_reduce_3channel kernel exists as a standalone
+    // primitive (kernels/sse_reduce.rs) but wiring it here measured
+    // SLOWER on CUDA RTX 5070 (~52ms → ~58ms). Speculation: cubecl
+    // schedules submissions and the chain of large pixel downloads
+    // shares a single sync; replacing them with mid-loop SSE kernel
+    // launches + small downloads adds 4 separate syncs per kind that
+    // outweigh the saved data-transfer time. The kernel is kept for
+    // future contexts where pixels are already GPU-resident from an
+    // upstream stage (e.g., the eventual full-frame strat-search
+    // path that holds XYB on GPU end-to-end).
     let mut all_costs = Vec::with_capacity(4 * n_blocks);
     for kind in 0_usize..4 {
         // Forward AFV → GPU-resident GpuBlocks (no syncs).
@@ -812,12 +822,7 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
         let g_qb = enc.quantize_large_blocks_broadcast_w_persistent(
             &g_cb, weights_b_template, qac_qm_b, thresholds_b, 8, 8, 1, 1,
         );
-        // dequant_strategy_persistent applies `q * w / qac` (matches
-        // dequant_blocks_gpu_broadcast_w semantics... ALMOST — the
-        // non-persistent version omits the qac divisor. For the
-        // production qac_qm != 1.0 case the new path is correct
-        // (matches the broader cost-model formula); the old path
-        // was missing the qac divide.)
+        // dequant_strategy_persistent applies `q * w / qac`.
         let g_dx = enc.dequant_strategy_persistent(&g_qx, weights_x_template, qac_qm_x);
         let g_dy = enc.dequant_strategy_persistent(&g_qy, weights_y_template, qac_qm_y);
         let g_db = enc.dequant_strategy_persistent(&g_qb, weights_b_template, qac_qm_b);
@@ -828,10 +833,10 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
         let g_recon_b = inverse_afv_transform_batch_persistent(enc, basis_t, &g_db, kind);
 
         // Final download: only the reconstructed pixels (3 syncs per
-        // kind, vs the previous chain's 7 — forward 3+3+3 → recon 3).
-        // The per-block sum-of-squared-errors stays on host because
-        // it consumes the host-side `pixel_blocks_*` and
-        // `mask_block_major` inputs.
+        // kind). The per-block sum-of-squared-errors stays on host
+        // because (a) the experiment to move it to GPU regressed
+        // perf at this scale (see comment above), and (b) it's a
+        // tight host loop already.
         let recon_x = enc.download_blocks(&g_recon_x);
         let recon_y = enc.download_blocks(&g_recon_y);
         let recon_b = enc.download_blocks(&g_recon_b);

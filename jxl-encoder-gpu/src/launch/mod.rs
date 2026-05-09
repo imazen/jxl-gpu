@@ -33,4 +33,5 @@ pub mod identity;
 pub mod mask1x1;
 pub mod pixel_loss;
 pub mod quantize;
+pub mod sse_reduce;
 pub mod xyb;
