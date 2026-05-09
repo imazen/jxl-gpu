@@ -64,6 +64,9 @@ use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, 
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
 use crate::launch::dequant::{dequant_dct8, dequant_dct8_broadcast_w};
+use crate::launch::dequant_simple::{
+    dequant_strategy_broadcast_w, dequant_strategy_broadcast_w_dct8,
+};
 use crate::launch::entropy::entropy_coeffs_pixel_broadcast_w;
 use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
 use crate::launch::fused_dct_quant::{dct8_quantize_fused_wide, dequant_idct8_fused_y_wide};
@@ -1215,6 +1218,97 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Persistent strategy dequant (no bias). Same semantics as the
+    /// host-side dequant loop in
+    /// `forks/reconstruct.rs::encode_and_reconstruct_mixed_strategy_single_channel`
+    /// for non-DCT8 strategies: `output[i] = quant[i] * weight[i] / qac[block]`
+    /// with per-block qac and broadcast weights.
+    ///
+    /// LLF positions are NOT zeroed — caller is expected to overwrite
+    /// them via `dispatch_restore_llf` (or its GPU variant) on the
+    /// downloaded buffer.
+    pub fn dequant_strategy_persistent(
+        &self,
+        quant: &GpuI32Blocks<R>,
+        weights_template: &[f32],
+        qac_per_block: &[f32],
+    ) -> GpuBlocks<R> {
+        let bs = quant.coeffs_per_block as usize;
+        assert_eq!(weights_template.len(), bs);
+        assert_eq!(qac_per_block.len() as u32, quant.num_blocks);
+        let n = quant.total_ints();
+        let h_w = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(weights_template));
+        let h_q = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(qac_per_block));
+        let h_o = self.client_ref().empty(n * 4);
+        dequant_strategy_broadcast_w::<R>(
+            self.client_ref(),
+            quant.handle.clone(),
+            h_w,
+            h_q,
+            h_o.clone(),
+            quant.num_blocks,
+            quant.coeffs_per_block,
+        );
+        GpuBlocks {
+            handle: h_o,
+            num_blocks: quant.num_blocks,
+            coeffs_per_block: quant.coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// DCT8 variant of [`Self::dequant_strategy_persistent`] that
+    /// applies `adjust_quant_bias` for the given channel. `channel`
+    /// is `0` (X), `1` (Y), or `2` (B).
+    pub fn dequant_strategy_dct8_persistent(
+        &self,
+        quant: &GpuI32Blocks<R>,
+        weights_template: &[f32],
+        qac_per_block: &[f32],
+        channel: usize,
+    ) -> GpuBlocks<R> {
+        const BIAS_X: f32 = 0.945_349_93;
+        const BIAS_Y: f32 = 0.929_945_5;
+        const BIAS_B: f32 = 0.950_064_9;
+        let channel_bias = match channel {
+            0 => BIAS_X,
+            1 => BIAS_Y,
+            2 => BIAS_B,
+            _ => panic!("dequant_strategy_dct8_persistent: channel must be 0, 1, or 2; got {channel}"),
+        };
+        let bs = quant.coeffs_per_block as usize;
+        assert_eq!(weights_template.len(), bs);
+        assert_eq!(qac_per_block.len() as u32, quant.num_blocks);
+        let n = quant.total_ints();
+        let h_w = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(weights_template));
+        let h_q = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(qac_per_block));
+        let h_o = self.client_ref().empty(n * 4);
+        dequant_strategy_broadcast_w_dct8::<R>(
+            self.client_ref(),
+            quant.handle.clone(),
+            h_w,
+            h_q,
+            h_o.clone(),
+            quant.num_blocks,
+            quant.coeffs_per_block,
+            channel_bias,
+        );
+        GpuBlocks {
+            handle: h_o,
+            num_blocks: quant.num_blocks,
+            coeffs_per_block: quant.coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Persistent-API 3-channel DCT8 dequant. Takes quantized i32
     /// blocks for each channel + per-coefficient weights + per-block
     /// scale + CfL factors. Returns 3 `GpuBlocks` (X, Y, B) of
@@ -1496,6 +1590,84 @@ impl<R: Runtime> GpuEncoder<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Persistent dequant_strategy (no bias) must match the host-side
+    /// `quant * weight / qac` formula bit-exactly within fp32 rounding.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dequant_strategy_persistent_matches_host_formula() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        for &block_size in &[64u32, 128, 256, 1024] {
+            let nb = 8u32;
+            let total = (nb * block_size) as usize;
+            let quant: Vec<i32> = (0..total).map(|i| (i as i32 % 13) - 6).collect();
+            let weights: Vec<f32> = (0..block_size as usize).map(|i| 0.5 + 0.07 * i as f32).collect();
+            let qac: Vec<f32> = (0..nb).map(|i| 0.5 + 0.1 * i as f32).collect();
+
+            let g_q = GpuI32Blocks {
+                handle: enc.client_ref().create_from_slice(i32::as_bytes(&quant)),
+                num_blocks: nb,
+                coeffs_per_block: block_size,
+                _r: core::marker::PhantomData,
+            };
+            let g_d = enc.dequant_strategy_persistent(&g_q, &weights, &qac);
+            let got = enc.download_blocks(&g_d);
+
+            for b in 0..nb as usize {
+                let inv_qac = 1.0_f32 / qac[b];
+                let off = b * block_size as usize;
+                for i in 0..block_size as usize {
+                    let expected = (quant[off + i] as f32) * weights[i] * inv_qac;
+                    let actual = got[off + i];
+                    assert!(
+                        (expected - actual).abs() < 1e-5,
+                        "block_size={block_size} b={b} i={i}: got {actual}, want {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Persistent dequant_strategy_dct8 must match the host
+    /// `adjust_quant_bias(q, channel) * weight / qac` formula.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dequant_strategy_dct8_persistent_matches_host() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let block_size = 64u32;
+        let nb = 4u32;
+        let total = (nb * block_size) as usize;
+        let quant: Vec<i32> = (0..total).map(|i| (i as i32 % 11) - 5).collect();
+        let weights: Vec<f32> = (0..block_size as usize).map(|i| 0.7 + 0.05 * i as f32).collect();
+        let qac: Vec<f32> = (0..nb).map(|i| 0.6 + 0.15 * i as f32).collect();
+
+        for channel in 0..3 {
+            let g_q = GpuI32Blocks {
+                handle: enc.client_ref().create_from_slice(i32::as_bytes(&quant)),
+                num_blocks: nb,
+                coeffs_per_block: block_size,
+                _r: core::marker::PhantomData,
+            };
+            let g_d = enc.dequant_strategy_dct8_persistent(&g_q, &weights, &qac, channel);
+            let got = enc.download_blocks(&g_d);
+
+            for b in 0..nb as usize {
+                let inv_qac = 1.0_f32 / qac[b];
+                let off = b * block_size as usize;
+                for i in 0..block_size as usize {
+                    let biased = crate::forks::dequant::adjust_quant_bias(quant[off + i], channel);
+                    let expected = biased * weights[i] * inv_qac;
+                    let actual = got[off + i];
+                    assert!(
+                        (expected - actual).abs() < 1e-5,
+                        "channel={channel} b={b} i={i}: got {actual}, want {expected}"
+                    );
+                }
+            }
+        }
+    }
 
     /// Persistent quantize_large_blocks_broadcast_w must produce
     /// identical i32 output to the non-persistent variant on both
