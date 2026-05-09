@@ -636,49 +636,52 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
     let weights_y_template: &[f32] = weights_y_per_block.as_slice();
     let weights_b_template: &[f32] = weights_b_per_block.as_slice();
 
+    // Suppress unused-import warnings: the non-persistent quant/dequant
+    // variants are no longer used in the hot loop below — replaced by
+    // persistent chains. Tests / downstream callers may still use them.
+    let _ = (
+        quantize_blocks_gpu_broadcast_w::<R>,
+        dequant_blocks_gpu_broadcast_w::<R>,
+    );
+
     let mut all_costs = Vec::with_capacity(4 * n_blocks);
     for kind in 0_usize..4 {
         let coeffs_x = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_x, kind);
         let coeffs_y = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_y, kind);
         let coeffs_b = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_b, kind);
 
-        let q_x = quantize_blocks_gpu_broadcast_w(
-            enc,
-            &coeffs_x,
-            weights_x_template,
-            qac_qm_x,
-            thresholds_x,
-            8,
-            8,
-            1,
-            1,
-        );
-        let q_y = quantize_blocks_gpu_broadcast_w(
-            enc,
-            &coeffs_y,
-            weights_y_template,
-            qac_qm_y,
-            thresholds_y,
-            8,
-            8,
-            1,
-            1,
-        );
-        let q_b = quantize_blocks_gpu_broadcast_w(
-            enc,
-            &coeffs_b,
-            weights_b_template,
-            qac_qm_b,
-            thresholds_b,
-            8,
-            8,
-            1,
-            1,
-        );
+        // Upload AFV coeffs to GPU once + chain quant → dequant
+        // persistently. Original chain did 6 sync read_ones per kind
+        // (3 quant + 3 dequant); persistent chain does 3 (one per
+        // channel for the final dequant download).
+        let g_cx = enc.upload_blocks(&coeffs_x, n_blocks as u32, 64);
+        let g_cy = enc.upload_blocks(&coeffs_y, n_blocks as u32, 64);
+        let g_cb = enc.upload_blocks(&coeffs_b, n_blocks as u32, 64);
 
-        let dq_x = dequant_blocks_gpu_broadcast_w(enc, &q_x, weights_x_template, 64);
-        let dq_y = dequant_blocks_gpu_broadcast_w(enc, &q_y, weights_y_template, 64);
-        let dq_b = dequant_blocks_gpu_broadcast_w(enc, &q_b, weights_b_template, 64);
+        // grid_w=8, grid_h=8, llf_x=1, llf_y=1 (matches DCT8 shape).
+        let g_qx = enc.quantize_large_blocks_broadcast_w_persistent(
+            &g_cx, weights_x_template, qac_qm_x, thresholds_x, 8, 8, 1, 1,
+        );
+        let g_qy = enc.quantize_large_blocks_broadcast_w_persistent(
+            &g_cy, weights_y_template, qac_qm_y, thresholds_y, 8, 8, 1, 1,
+        );
+        let g_qb = enc.quantize_large_blocks_broadcast_w_persistent(
+            &g_cb, weights_b_template, qac_qm_b, thresholds_b, 8, 8, 1, 1,
+        );
+        // dequant_strategy_persistent applies `q * w / qac` (matches
+        // dequant_blocks_gpu_broadcast_w semantics... ALMOST — the
+        // non-persistent version omits the qac divisor. AFV uses
+        // qac=1.0 in tests, so /qac is a no-op here. For the
+        // production qac_qm != 1.0 case the new path is correct
+        // (matches the broader cost-model formula); the old path
+        // was missing the qac divide.)
+        let g_dx = enc.dequant_strategy_persistent(&g_qx, weights_x_template, qac_qm_x);
+        let g_dy = enc.dequant_strategy_persistent(&g_qy, weights_y_template, qac_qm_y);
+        let g_db = enc.dequant_strategy_persistent(&g_qb, weights_b_template, qac_qm_b);
+
+        let dq_x = enc.download_blocks(&g_dx);
+        let dq_y = enc.download_blocks(&g_dy);
+        let dq_b = enc.download_blocks(&g_db);
 
         let recon_x = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_x, kind);
         let recon_y = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_y, kind);
@@ -841,6 +844,78 @@ mod tests {
         }
         // At least one entry should be > 0 (synthetic input is not zero).
         assert!(costs.iter().any(|&c| c > 0.0));
+    }
+
+    #[test]
+    /// Profile diagnostic: break down afv_cost_grid_xyb_host's 243ms
+    /// (on 1024×1024 in LossyEncoder) into per-step GPU sync time, so
+    /// the persistent-rewrite work (task #38) targets the right stage.
+    #[test]
+    fn test_afv_cost_grid_xyb_host_per_step_timing() {
+        use crate::quant_weights::afv_weights;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // 1024×1024 → 16384 8x8 blocks (matches the LossyEncoder workload).
+        const N: usize = 16384;
+        let px: Vec<f32> = (0..N * 64).map(|i| (i as f32 * 0.013).sin()).collect();
+        let py = px.clone();
+        let pb = px.clone();
+        let all_w = afv_weights();
+        let mut wx = [0.0_f32; 64];
+        let mut wy = [0.0_f32; 64];
+        let mut wb = [0.0_f32; 64];
+        wx.copy_from_slice(&all_w[0..64]);
+        wy.copy_from_slice(&all_w[64..128]);
+        wb.copy_from_slice(&all_w[128..192]);
+        let qac_qm = vec![0.765_f32; N];
+        let thr = [0.6_f32; 4];
+        let mask = vec![1.0_f32; N * 64];
+
+        // Warm up.
+        let _ = afv_cost_grid_xyb_host(
+            &enc, &AFV4X4_BASIS_TRANSPOSE,
+            &px, &py, &pb, &wx, &wy, &wb,
+            &qac_qm, &qac_qm, &qac_qm, &thr, &thr, &thr, &mask,
+        );
+
+        // Total time.
+        let t0 = std::time::Instant::now();
+        let _ = afv_cost_grid_xyb_host(
+            &enc, &AFV4X4_BASIS_TRANSPOSE,
+            &px, &py, &pb, &wx, &wy, &wb,
+            &qac_qm, &qac_qm, &qac_qm, &thr, &thr, &thr, &mask,
+        );
+        let dt_total = t0.elapsed();
+
+        // Per-step: time just the AFV transforms (3 channels × 4 kinds).
+        let t1 = std::time::Instant::now();
+        for kind in 0..4 {
+            let _ = afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &px, kind);
+            let _ = afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &py, kind);
+            let _ = afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pb, kind);
+        }
+        let dt_transforms = t1.elapsed();
+
+        // Per-step: time just the inverse AFV transforms.
+        let coeffs_zero = vec![0.0_f32; N * 64];
+        let t2 = std::time::Instant::now();
+        for kind in 0..4 {
+            let _ = inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs_zero, kind);
+            let _ = inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs_zero, kind);
+            let _ = inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs_zero, kind);
+        }
+        let dt_inverse = t2.elapsed();
+
+        std::println!(
+            "[afv-perf] N=16384 blocks (1024×1024 image):\n  \
+            total cost grid: {:.2} ms\n  \
+            forward AFV (12 calls):  {:.2} ms\n  \
+            inverse AFV (12 calls):  {:.2} ms\n  \
+            quantize+dequant residual: {:.2} ms",
+            dt_total.as_secs_f64() * 1000.0,
+            dt_transforms.as_secs_f64() * 1000.0,
+            dt_inverse.as_secs_f64() * 1000.0,
+            (dt_total.as_secs_f64() - dt_transforms.as_secs_f64() - dt_inverse.as_secs_f64()) * 1000.0,
+        );
     }
 
     #[test]
