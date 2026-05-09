@@ -64,12 +64,14 @@ use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, 
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
 use crate::launch::dequant::{dequant_dct8, dequant_dct8_broadcast_w};
+use crate::launch::entropy::entropy_coeffs_pixel_broadcast_w;
 use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
 use crate::launch::fused_dct_quant::{dct8_quantize_fused_wide, dequant_idct8_fused_y_wide};
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::gather::{gather_blocks, scatter_blocks};
 use crate::launch::mask1x1::mask1x1;
+use crate::launch::pixel_loss::pixel_loss;
 use crate::launch::quantize::{quantize_dct8, quantize_dct8_broadcast_w};
 use crate::launch::xyb::{xyb_forward, xyb_inverse};
 
@@ -664,6 +666,161 @@ impl<R: Runtime> GpuEncoder<R> {
             coeffs_per_block: 64,
             _r: core::marker::PhantomData,
         }
+    }
+
+    /// Persistent-API entropy_coeffs + error-coef writeback (broadcast
+    /// weights variant). Same algorithmic semantics as
+    /// [`Self::entropy_coeffs_pixel_blocks_broadcast_w`] but keeps
+    /// inputs/outputs on GPU (no synchronous downloads).
+    ///
+    /// Inputs:
+    /// - `block_c`: per-block channel coefficients (`coeffs_per_block ==
+    ///   n_per_block`).
+    /// - `block_y`: per-block Y-channel coefficients (same shape; used
+    ///   for CfL prediction via `cmap_factor`).
+    /// - `weights_template`: exactly `n_per_block` f32 (one quant
+    ///   matrix), broadcast across all blocks.
+    /// - `inv_weights_template`: exactly `n_per_block` f32 (1/weights),
+    ///   broadcast across all blocks.
+    ///
+    /// Returns `(stats, error_coeffs)` as `(GpuBlocks 4-per-block,
+    /// GpuBlocks n-per-block)`. Stats layout: per-block
+    /// `[entropy, nzeros, info_loss, info_loss2]`.
+    ///
+    /// Saves the per-call host download of stats + error_coeffs that
+    /// the non-persistent variant pays — critical for cost-grid pipelines
+    /// that chain DCT → entropy → IDCT → pixel_loss across multiple
+    /// channels and strategies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+        &self,
+        block_c: &GpuBlocks<R>,
+        block_y: &GpuBlocks<R>,
+        weights_template: &[f32],
+        inv_weights_template: &[f32],
+        cmap_factor: f32,
+        quant: f32,
+        k_cost_delta: f32,
+    ) -> (GpuBlocks<R>, GpuBlocks<R>) {
+        assert_eq!(block_c.num_blocks, block_y.num_blocks);
+        assert_eq!(block_c.coeffs_per_block, block_y.coeffs_per_block);
+        let n = block_c.coeffs_per_block;
+        assert_eq!(weights_template.len() as u32, n);
+        assert_eq!(inv_weights_template.len() as u32, n);
+        let total = block_c.total_floats();
+        let num_blocks = block_c.num_blocks;
+        let h_w = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(weights_template));
+        let h_iw = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(inv_weights_template));
+        let h_err = self.client_ref().empty(total * 4);
+        let h_out = self.client_ref().empty((num_blocks as usize) * 4 * 4);
+        entropy_coeffs_pixel_broadcast_w::<R>(
+            self.client_ref(),
+            block_c.handle.clone(),
+            block_y.handle.clone(),
+            h_w,
+            h_iw,
+            h_err.clone(),
+            h_out.clone(),
+            num_blocks,
+            n,
+            cmap_factor,
+            quant,
+            k_cost_delta,
+        );
+        (
+            GpuBlocks {
+                handle: h_out,
+                num_blocks,
+                coeffs_per_block: 4,
+                _r: core::marker::PhantomData,
+            },
+            GpuBlocks {
+                handle: h_err,
+                num_blocks,
+                coeffs_per_block: n,
+                _r: core::marker::PhantomData,
+            },
+        )
+    }
+
+    /// Persistent-API per-block 8th-power masked pixel loss. Same
+    /// semantics as [`Self::pixel_loss_blocks`] but keeps inputs/outputs
+    /// on GPU.
+    ///
+    /// Inputs:
+    /// - `pixel_error`: per-block pixel-domain error values
+    ///   (`block_width * block_height` per block).
+    /// - `mask_plane`: GPU plane containing the masking image (mask1x1).
+    /// - `mask_row_base`: per-block start offsets into the mask plane
+    ///   (host slice; uploaded internally).
+    ///
+    /// Returns `num_blocks` f64 values as a `GpuBlocks` with
+    /// `coeffs_per_block = 1` (caller can `download_blocks_f64` if they
+    /// need them on host; otherwise feed straight into a combiner kernel).
+    ///
+    /// **Note**: kernel writes f64 not f32. The returned GpuBlocks has
+    /// `coeffs_per_block = 1` and the underlying buffer is `num_blocks
+    /// * 8` bytes. Callers must use a dedicated f64 reader to pull it
+    /// back (or compose with another kernel that consumes f64).
+    #[allow(clippy::too_many_arguments)]
+    pub fn pixel_loss_blocks_persistent(
+        &self,
+        pixel_error: &GpuBlocks<R>,
+        mask_plane: &GpuPlane<R>,
+        mask_row_base: &[u32],
+        mask_offset: f32,
+        block_width: u32,
+        block_height: u32,
+    ) -> GpuBlocks<R> {
+        let num_blocks = pixel_error.num_blocks;
+        assert_eq!(
+            pixel_error.coeffs_per_block,
+            block_width * block_height,
+            "pixel_error coeffs_per_block must equal block_width*block_height"
+        );
+        assert_eq!(mask_row_base.len() as u32, num_blocks);
+        let h_mrb = self
+            .client_ref()
+            .create_from_slice(u32::as_bytes(mask_row_base));
+        // Output: num_blocks × f64 = num_blocks × 8 bytes.
+        let h_out = self.client_ref().empty((num_blocks as usize) * 8);
+        let mask_len = (mask_plane.width as usize) * (mask_plane.height as usize);
+        pixel_loss::<R>(
+            self.client_ref(),
+            pixel_error.handle.clone(),
+            mask_plane.handle.clone(),
+            h_mrb,
+            h_out.clone(),
+            num_blocks,
+            mask_len,
+            mask_plane.width,
+            mask_offset,
+            block_width,
+            block_height,
+        );
+        GpuBlocks {
+            handle: h_out,
+            num_blocks,
+            // coeffs_per_block=1 (logical), but underlying buffer is f64
+            // sized — caller must use a matching f64 reader.
+            coeffs_per_block: 1,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Download a `GpuBlocks` whose underlying buffer is f64-typed
+    /// (e.g. the result of [`Self::pixel_loss_blocks_persistent`]).
+    /// Length returned: `num_blocks` f64 values.
+    pub fn download_blocks_f64(&self, blocks: &GpuBlocks<R>) -> Vec<f64> {
+        let bytes = self
+            .client_ref()
+            .read_one(blocks.handle.clone())
+            .expect("download_blocks_f64");
+        f64::from_bytes(&bytes).to_vec()
     }
 
     /// Persistent-API fused DCT8 + quantize. One kernel launch instead
@@ -1279,6 +1436,106 @@ impl<R: Runtime> GpuEncoder<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Persistent entropy_coeffs_pixel_blocks_broadcast_w must produce
+    /// stats and error_coeffs identical to the non-persistent variant.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_entropy_coeffs_persistent_matches_non_persistent() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let nb = 16_u32;
+        let n = 64_u32;
+        let nf = (nb as usize) * (n as usize);
+        let block_c: Vec<f32> = (0..nf).map(|i| (i as f32 * 0.013).sin()).collect();
+        let block_y: Vec<f32> = (0..nf).map(|i| (i as f32 * 0.017).cos() + 0.1).collect();
+        let weights: Vec<f32> = (0..n).map(|i| 0.5 + 0.1 * i as f32).collect();
+        let inv_w: Vec<f32> = weights.iter().map(|&w| 1.0 / w).collect();
+        let cmap_factor = 0.25;
+        let quant = 0.7;
+        let k_cost = 10.0;
+
+        let (stats_a, err_a) = enc.entropy_coeffs_pixel_blocks_broadcast_w(
+            &block_c, &block_y, &weights, &inv_w, n, cmap_factor, quant, k_cost,
+        );
+
+        let gc = enc.upload_blocks(&block_c, nb, n);
+        let gy = enc.upload_blocks(&block_y, nb, n);
+        let (gstats, gerr) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+            &gc, &gy, &weights, &inv_w, cmap_factor, quant, k_cost,
+        );
+        let stats_b = enc.download_blocks(&gstats);
+        let err_b = enc.download_blocks(&gerr);
+
+        assert_eq!(stats_a.len(), stats_b.len(), "stats len mismatch");
+        for (i, (a, b)) in stats_a.iter().zip(&stats_b).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "stats[{i}] differs: persistent={b} vs non={a}"
+            );
+        }
+        for (i, (a, b)) in err_a.iter().zip(&err_b).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "err[{i}] differs: persistent={b} vs non={a}"
+            );
+        }
+    }
+
+    /// Persistent pixel_loss_blocks must match the non-persistent
+    /// variant's f64 output.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_pixel_loss_persistent_matches_non_persistent() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let bw = 8_u32;
+        let bh = 8_u32;
+        let nb = 4_u32;
+        let coeffs = (bw * bh) as usize;
+        let pixel_err: Vec<f32> = (0..(nb as usize) * coeffs)
+            .map(|i| 0.001 * (i as f32 * 0.07).sin())
+            .collect();
+        let mask_w = 64_u32;
+        let mask_h = 32_u32;
+        let mask: Vec<f32> = (0..(mask_w * mask_h) as usize)
+            .map(|i| 0.5 + 0.1 * (i as f32 * 0.013).sin())
+            .collect();
+        // Each block reads mask[base..base+bw] for bh rows. Keep 4 starts
+        // strictly inside the 64×32 mask (bw=8, bh=8 → end < 32).
+        let mask_row_base: Vec<u32> = vec![0, 8, 8 * mask_w, 8 * mask_w + 16];
+        let mask_offset = 0.05;
+
+        let loss_a = enc.pixel_loss_blocks(
+            &pixel_err,
+            &mask,
+            &mask_row_base,
+            mask_w,
+            mask_offset,
+            bw,
+            bh,
+        );
+
+        let gerr = enc.upload_blocks(&pixel_err, nb, bw * bh);
+        let gplane = enc.upload_plane(&mask, mask_w, mask_h);
+        let gloss = enc.pixel_loss_blocks_persistent(
+            &gerr,
+            &gplane,
+            &mask_row_base,
+            mask_offset,
+            bw,
+            bh,
+        );
+        let loss_b = enc.download_blocks_f64(&gloss);
+
+        assert_eq!(loss_a.len(), loss_b.len());
+        for (i, (a, b)) in loss_a.iter().zip(&loss_b).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "loss[{i}] differs: persistent={b} vs non={a}"
+            );
+        }
+    }
 
     #[cfg(feature = "cuda")]
     #[test]
