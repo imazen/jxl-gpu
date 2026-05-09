@@ -798,8 +798,8 @@ impl<R: Runtime> LossyEncoder<R> {
         use crate::pipeline::{
             partitions_16x16_to_assignments, partitions_32x32_to_assignments,
             partitions_64x64_to_assignments, select_partitions_16x16_full,
-            select_partitions_32x32_full, select_partitions_64x64, CostGrids16x16,
-            CostGrids32x32, CostGrids64x64,
+            select_partitions_32x32_with_extras16, select_partitions_64x64_with_extras16,
+            CostGrids16x16, CostGrids32x32, CostGrids64x64,
         };
         use crate::quant_weights::{
             dct16x16_weights_per_channel, dct16x32_weights_per_channel,
@@ -1166,8 +1166,17 @@ impl<R: Runtime> LossyEncoder<R> {
         };
         mark("cost_dct64_family");
 
-        // Stage 5: host-side selector + assignments
-        let sub_blocks = crate::pipeline::SubBlockCostGrids {
+        // Stage 5: host-side selector + assignments.
+        //
+        // Sub-block grids (DCT4x4/4x8/8x4) are computed above but NOT
+        // fed into the selector here: enabling them produces butteraugli
+        // 17.9 on CLIC test image (vs uniform 1.35) because our cost
+        // model under-penalizes their visible block-edge artifacts.
+        // Same pattern as the original DCT32x32 over-selection — fix is
+        // a higher entropy_mul anti-bias adjustment in the cost model
+        // (per-strategy mul/bonus tuning). See task #29 / #34 / unfiled
+        // cost-model-tuning task.
+        let _unused_sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: Some(&cost_dct4x4),
             dct4x8: Some(&cost_dct4x8),
             dct8x4: Some(&cost_dct8x4),
@@ -1177,7 +1186,7 @@ impl<R: Runtime> LossyEncoder<R> {
         let extra16 = CostGrids16x16 {
             dct_16x8: Some(&cost_dct16x8),
             dct_8x16: Some(&cost_dct8x16),
-            sub_blocks,
+            sub_blocks: Default::default(),
         };
         let assignments = if dct64_eligible {
             let extra32 = CostGrids32x32 {
@@ -1188,13 +1197,14 @@ impl<R: Runtime> LossyEncoder<R> {
                 dct_64x32: Some(&cost_dct64x32),
                 dct_32x64: Some(&cost_dct32x64),
             };
-            let partitions = select_partitions_64x64(
+            let partitions = select_partitions_64x64_with_extras16(
                 &cost_dct8,
                 &cost_dct16,
                 &cost_dct32x32,
                 &cost_dct64x64,
                 extra32,
                 extra64,
+                extra16,
                 xb8,
                 yb8,
             );
@@ -1207,11 +1217,12 @@ impl<R: Runtime> LossyEncoder<R> {
                 dct_32x16: Some(&cost_dct32x16),
                 dct_16x32: Some(&cost_dct16x32),
             };
-            let partitions = select_partitions_32x32_full(
+            let partitions = select_partitions_32x32_with_extras16(
                 &cost_dct8,
                 &cost_dct16,
                 &cost_dct32x32,
                 extra32,
+                extra16,
                 xb8,
                 yb8,
             );

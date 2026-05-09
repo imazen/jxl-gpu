@@ -3034,6 +3034,31 @@ pub fn select_partitions_32x32_full(
     xsize_blocks_8: usize,
     ysize_blocks_8: usize,
 ) -> Vec<Partition32x32> {
+    select_partitions_32x32_with_extras16(
+        cost_dct8,
+        cost_dct16x16,
+        cost_dct32x32,
+        extra,
+        CostGrids16x16::default(),
+        xsize_blocks_8,
+        ysize_blocks_8,
+    )
+}
+
+/// Like [`select_partitions_32x32_full`] but threads `CostGrids16x16`
+/// through the inner 16×16-tier picks. Use this when you've computed
+/// rectangular DCT16 / sub-block cost grids and want them to influence
+/// the Sub16x16 sub-region picks inside 32×32 regions.
+#[allow(clippy::too_many_arguments)]
+pub fn select_partitions_32x32_with_extras16(
+    cost_dct8: &[f32],
+    cost_dct16x16: &[f32],
+    cost_dct32x32: &[f32],
+    extra: CostGrids32x32<'_>,
+    extra16: CostGrids16x16<'_>,
+    xsize_blocks_8: usize,
+    ysize_blocks_8: usize,
+) -> Vec<Partition32x32> {
     assert!(xsize_blocks_8.is_multiple_of(4));
     assert!(ysize_blocks_8.is_multiple_of(4));
     let xsize_blocks_32 = xsize_blocks_8 / 4;
@@ -3053,7 +3078,13 @@ pub fn select_partitions_32x32_full(
         assert_eq!(g.len(), xsize_blocks_16x32 * ysize_blocks_16x32);
     }
 
-    let sub16 = select_partitions_16x16(cost_dct8, cost_dct16x16, xsize_blocks_8, ysize_blocks_8);
+    let sub16 = select_partitions_16x16_full(
+        cost_dct8,
+        cost_dct16x16,
+        extra16,
+        xsize_blocks_8,
+        ysize_blocks_8,
+    );
 
     let mut partitions = Vec::with_capacity(xsize_blocks_32 * ysize_blocks_32);
     for ry in 0..ysize_blocks_32 {
@@ -3068,37 +3099,41 @@ pub fn select_partitions_32x32_full(
                 sub16[(r16y + 1) * xsize_blocks_16 + r16x + 1],
             ];
             let sub_costs = [
-                partition_16x16_cost(
+                partition_16x16_cost_with_extras(
                     sub_choices[0],
                     cost_dct8,
                     cost_dct16x16,
+                    extra16,
                     xsize_blocks_8,
                     xsize_blocks_16,
                     r16x,
                     r16y,
                 ),
-                partition_16x16_cost(
+                partition_16x16_cost_with_extras(
                     sub_choices[1],
                     cost_dct8,
                     cost_dct16x16,
+                    extra16,
                     xsize_blocks_8,
                     xsize_blocks_16,
                     r16x + 1,
                     r16y,
                 ),
-                partition_16x16_cost(
+                partition_16x16_cost_with_extras(
                     sub_choices[2],
                     cost_dct8,
                     cost_dct16x16,
+                    extra16,
                     xsize_blocks_8,
                     xsize_blocks_16,
                     r16x,
                     r16y + 1,
                 ),
-                partition_16x16_cost(
+                partition_16x16_cost_with_extras(
                     sub_choices[3],
                     cost_dct8,
                     cost_dct16x16,
+                    extra16,
                     xsize_blocks_8,
                     xsize_blocks_16,
                     r16x + 1,
@@ -3176,6 +3211,33 @@ pub fn select_partitions_64x64(
     xsize_blocks_8: usize,
     ysize_blocks_8: usize,
 ) -> Vec<Partition64x64> {
+    select_partitions_64x64_with_extras16(
+        cost_dct8,
+        cost_dct16x16,
+        cost_dct32x32,
+        cost_dct64x64,
+        extra32,
+        extra64,
+        CostGrids16x16::default(),
+        xsize_blocks_8,
+        ysize_blocks_8,
+    )
+}
+
+/// Like [`select_partitions_64x64`] but threads `CostGrids16x16` through
+/// the inner 16×16-tier picks (for FourSubBlocks etc.).
+#[allow(clippy::too_many_arguments)]
+pub fn select_partitions_64x64_with_extras16(
+    cost_dct8: &[f32],
+    cost_dct16x16: &[f32],
+    cost_dct32x32: &[f32],
+    cost_dct64x64: &[f32],
+    extra32: CostGrids32x32<'_>,
+    extra64: CostGrids64x64<'_>,
+    extra16: CostGrids16x16<'_>,
+    xsize_blocks_8: usize,
+    ysize_blocks_8: usize,
+) -> Vec<Partition64x64> {
     assert!(xsize_blocks_8.is_multiple_of(8));
     assert!(ysize_blocks_8.is_multiple_of(8));
     let xsize_blocks_64 = xsize_blocks_8 / 8;
@@ -3194,11 +3256,12 @@ pub fn select_partitions_64x64(
         assert_eq!(g.len(), xsize_blocks_32x64 * ysize_blocks_32x64);
     }
 
-    let sub32 = select_partitions_32x32_full(
+    let sub32 = select_partitions_32x32_with_extras16(
         cost_dct8,
         cost_dct16x16,
         cost_dct32x32,
         extra32,
+        extra16,
         xsize_blocks_8,
         ysize_blocks_8,
     );
@@ -3320,29 +3383,102 @@ fn partition_16x16_cost(
     rx16: usize,
     ry16: usize,
 ) -> f32 {
+    partition_16x16_cost_with_extras(
+        p,
+        cost_dct8,
+        cost_dct16x16,
+        CostGrids16x16::default(),
+        xsize_blocks_8,
+        xsize_blocks_16,
+        rx16,
+        ry16,
+    )
+}
+
+/// Like [`partition_16x16_cost`] but consumes an extras struct so it
+/// can compute exact costs for `TwoDct16x8Horizontal`,
+/// `TwoDct8x16Vertical`, and `FourSubBlocks(...)` partitions when the
+/// caller has the underlying grids. Returns `f32::INFINITY` when a
+/// partition's required grid is `None` (treating it as not-considered).
+#[allow(clippy::too_many_arguments)]
+fn partition_16x16_cost_with_extras(
+    p: Partition16x16,
+    cost_dct8: &[f32],
+    cost_dct16x16: &[f32],
+    extra: CostGrids16x16<'_>,
+    xsize_blocks_8: usize,
+    xsize_blocks_16: usize,
+    rx16: usize,
+    ry16: usize,
+) -> f32 {
+    let bx = rx16 * 2;
+    let by = ry16 * 2;
+    let cell_cost = |g: &[f32], stride: usize, cx: usize, cy: usize| -> f32 {
+        g[cy * stride + cx]
+    };
     match p {
         Partition16x16::Dct16x16 => cost_dct16x16[ry16 * xsize_blocks_16 + rx16],
         Partition16x16::FourDct8x8 => {
-            let bx = rx16 * 2;
-            let by = ry16 * 2;
             cost_dct8[by * xsize_blocks_8 + bx]
                 + cost_dct8[by * xsize_blocks_8 + bx + 1]
                 + cost_dct8[(by + 1) * xsize_blocks_8 + bx]
                 + cost_dct8[(by + 1) * xsize_blocks_8 + bx + 1]
         }
-        // Rectangular DCT16 variants: in this simplified prototype,
-        // partition_16x16_cost is only called from select_partitions_32x32
-        // which uses select_partitions_16x16 (without rect variants).
-        // Treat as infinite cost so they're never picked at this level.
-        // Full Phase 3 would extend select_partitions_32x32 to pass through
-        // the extra cost grids and recompute these costs precisely.
-        Partition16x16::TwoDct16x8Horizontal | Partition16x16::TwoDct8x16Vertical => f32::INFINITY,
-        // FourSubBlocks isn't reachable from select_partitions_32x32 yet
-        // (32x32 selector currently calls the 2-strategy 16x16 picker
-        // which never emits this variant). Treat as infinite to keep
-        // the selector tie-breaking consistent until the 32x32 path is
-        // extended to pass through the sub-block grids.
-        Partition16x16::FourSubBlocks(_) => f32::INFINITY,
+        Partition16x16::TwoDct16x8Horizontal => {
+            // Two 16x8 blocks at (bx, by) and (bx+1, by) in the
+            // 16x8 grid (xsize = xsize_blocks_8).
+            match extra.dct_16x8 {
+                Some(g) => cell_cost(g, xsize_blocks_8, bx, ry16)
+                    + cell_cost(g, xsize_blocks_8, bx + 1, ry16),
+                None => f32::INFINITY,
+            }
+        }
+        Partition16x16::TwoDct8x16Vertical => {
+            // Two 8x16 blocks at (rx16, by) and (rx16, by+1) in the
+            // 8x16 grid (xsize = xsize_blocks_8 / 2 = xsize_blocks_16).
+            match extra.dct_8x16 {
+                Some(g) => cell_cost(g, xsize_blocks_16, rx16, by)
+                    + cell_cost(g, xsize_blocks_16, rx16, by + 1),
+                None => f32::INFINITY,
+            }
+        }
+        Partition16x16::FourSubBlocks(subs) => {
+            let pick_one = |sub: SubStrategy, dx: usize, dy: usize| -> f32 {
+                let idx = (by + dy) * xsize_blocks_8 + bx + dx;
+                match sub {
+                    SubStrategy::Dct8 => cost_dct8[idx],
+                    SubStrategy::Dct4x4 => extra
+                        .sub_blocks
+                        .dct4x4
+                        .map(|g| g[idx])
+                        .unwrap_or(f32::INFINITY),
+                    SubStrategy::Dct4x8 => extra
+                        .sub_blocks
+                        .dct4x8
+                        .map(|g| g[idx])
+                        .unwrap_or(f32::INFINITY),
+                    SubStrategy::Dct8x4 => extra
+                        .sub_blocks
+                        .dct8x4
+                        .map(|g| g[idx])
+                        .unwrap_or(f32::INFINITY),
+                    SubStrategy::Identity => extra
+                        .sub_blocks
+                        .identity
+                        .map(|g| g[idx])
+                        .unwrap_or(f32::INFINITY),
+                    SubStrategy::Dct2x2 => extra
+                        .sub_blocks
+                        .dct2x2
+                        .map(|g| g[idx])
+                        .unwrap_or(f32::INFINITY),
+                }
+            };
+            pick_one(subs[0], 0, 0)
+                + pick_one(subs[1], 1, 0)
+                + pick_one(subs[2], 0, 1)
+                + pick_one(subs[3], 1, 1)
+        }
     }
 }
 
