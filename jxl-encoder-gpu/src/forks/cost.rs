@@ -2018,9 +2018,16 @@ pub fn strategy_search_costs_dct32x16_or_16x32<R: Runtime>(
         })
         .collect();
 
-    // libjxl entropy_mul = 1.49; tuned higher (~2.5) until full cost
-    // model lands. Same rationale as strategy_search_costs_dct32x32.
-    let entropy_mul = 2.5_f32;
+    // libjxl entropy_mul = 1.49; tuned higher (2.5 → 2.2 May 9 2026)
+    // until full cost model lands. Same rationale as
+    // strategy_search_costs_dct32x32. Bisected on the 11-image corpus
+    // regression test:
+    //   2.5 ✓ baseline, 2.3 ✓, 2.2 ✓, 2.1 ✗ (22ea12c9 / 2684452d
+    //   strat-wins photos shift to RefineDct8 with +2.4% / +2.0%
+    //   regression).
+    // Settled on 2.2 — strict score parity, modest 12% improvement
+    // toward libjxl reference 1.49.
+    let entropy_mul = 2.2_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
