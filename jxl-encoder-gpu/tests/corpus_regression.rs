@@ -82,6 +82,39 @@ const EXPECTED_SCORES: &[(&str, f32, BestOfBothPath)] = &[
         0.8190,
         BestOfBothPath::RefineDct8, // uniform won
     ),
+    // DCT64-sensitive photos — earlier (mul=8) these had 52 / 9 / 79
+    // DCT64 picks respectively. With mul=16 they're shut out and
+    // smart strat-search matches refine+DCT8. Including them in the
+    // regression set so future DCT64 mul changes are caught.
+    (
+        "clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
+        1.1587,
+        // Scores tie but FP-comparison resolves to RefineStratSearch
+        // (strat-search wins by epsilon < tolerance).
+        BestOfBothPath::RefineStratSearch,
+    ),
+    (
+        "clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
+        1.1548,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
+        1.1556,
+        BestOfBothPath::RefineDct8,
+    ),
+    // Strat-search-winning photos — exercise the strat-search-wins
+    // path so cost-model changes that disable wins are caught.
+    (
+        "clic2025-1024/22ea12c903e41583.png",
+        1.1716,
+        BestOfBothPath::RefineStratSearch,
+    ),
+    (
+        "clic2025-1024/2684452db505ddbb.png",
+        1.1868,
+        BestOfBothPath::RefineStratSearch,
+    ),
     // Screenshots — discriminator should fire, smart picks best of
     // {uniform, refine+DCT8} per the May 9 best-of-2-on-screenshot fix.
     (
