@@ -783,7 +783,7 @@ impl<R: Runtime> LossyEncoder<R> {
             compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16,
             strategy_search_costs_dct32x16_or_16x32, strategy_search_costs_dct32x32,
             strategy_search_costs_dct64x32_or_32x64, strategy_search_costs_dct64x64,
-            strategy_search_costs_dct8_16x16,
+            strategy_search_costs_dct8_16x16, strategy_search_costs_subblock_8x8,
         };
         use crate::forks::reconstruct::{
             compute_dc_grid_per_8x8_block, encode_and_reconstruct_mixed_strategy_3channel,
@@ -791,8 +791,9 @@ impl<R: Runtime> LossyEncoder<R> {
         };
         use crate::forks::transform::{
             RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
-            RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
-            RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_DCT8X16,
+            RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+            RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
+            RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
         };
         use crate::pipeline::{
             partitions_16x16_to_assignments, partitions_32x32_to_assignments,
@@ -802,9 +803,11 @@ impl<R: Runtime> LossyEncoder<R> {
         };
         use crate::quant_weights::{
             dct16x16_weights_per_channel, dct16x32_weights_per_channel,
-            dct16x8_weights_per_channel, dct32x32_weights_per_channel,
-            dct32x64_weights_per_channel, dct64x64_weights_per_channel,
-            dct8_weights_per_channel,
+            dct16x8_weights_per_channel, dct2x2_weights_per_channel,
+            dct32x32_weights_per_channel, dct32x64_weights_per_channel,
+            dct4x4_weights_per_channel, dct4x8_weights_per_channel,
+            dct64x64_weights_per_channel, dct8_weights_per_channel,
+            identity_weights_per_channel,
         };
 
         // DCT32x32 wiring: STAGED but DISABLED. Investigation found
@@ -921,6 +924,52 @@ impl<R: Runtime> LossyEncoder<R> {
             *c *= mul_8x8;
         }
         mark("cost_dct8_dct16");
+
+        // 8x8 sub-block strategies (DCT4x4, DCT4x8, DCT8x4, IDENTITY,
+        // DCT2x2). All extract 8x8 tiles → 64 coefs. We pre-gather
+        // 8x8 blocks ONCE, upload to GPU, then run all 5 cost-grid
+        // producers against the same GpuBlocks.
+        let bx8_full = crate::forks::cost::repack_plane_to_blocks(&xyb_x, pw, ph, 8, 8);
+        let by8_full = crate::forks::cost::repack_plane_to_blocks(&xyb_y, pw, ph, 8, 8);
+        let bb8_full = crate::forks::cost::repack_plane_to_blocks(&xyb_b, pw, ph, 8, 8);
+        let g_8x = enc.upload_blocks(&bx8_full, (xb8 * yb8) as u32, 64);
+        let g_8y = enc.upload_blocks(&by8_full, (xb8 * yb8) as u32, 64);
+        let g_8b = enc.upload_blocks(&bb8_full, (xb8 * yb8) as u32, 64);
+
+        let (dct4x4_x, dct4x4_y, dct4x4_b) = dct4x4_weights_per_channel();
+        let inv_4x4_x: Vec<f32> = dct4x4_x.iter().map(|w| 1.0 / w).collect();
+        let inv_4x4_y: Vec<f32> = dct4x4_y.iter().map(|w| 1.0 / w).collect();
+        let inv_4x4_b: Vec<f32> = dct4x4_b.iter().map(|w| 1.0 / w).collect();
+        let cost_dct4x4 = strategy_search_costs_subblock_8x8(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT4X4,
+            &dct4x4_x, &dct4x4_y, &dct4x4_b,
+            &inv_4x4_x, &inv_4x4_y, &inv_4x4_b,
+            qac, qac, qac, 0, 0, scaled_constants, 1.08,
+        );
+
+        let (dct4x8_x, dct4x8_y, dct4x8_b) = dct4x8_weights_per_channel();
+        let inv_4x8_x: Vec<f32> = dct4x8_x.iter().map(|w| 1.0 / w).collect();
+        let inv_4x8_y: Vec<f32> = dct4x8_y.iter().map(|w| 1.0 / w).collect();
+        let inv_4x8_b: Vec<f32> = dct4x8_b.iter().map(|w| 1.0 / w).collect();
+        let cost_dct4x8 = strategy_search_costs_subblock_8x8(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT4X8,
+            &dct4x8_x, &dct4x8_y, &dct4x8_b,
+            &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
+            qac, qac, qac, 0, 0, scaled_constants, 0.859_316_37,
+        );
+        let cost_dct8x4 = strategy_search_costs_subblock_8x8(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT8X4,
+            &dct4x8_x, &dct4x8_y, &dct4x8_b,
+            &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
+            qac, qac, qac, 0, 0, scaled_constants, 0.859_316_37,
+        );
+
+        // IDENTITY and DCT2x2 deferred: their forward/inverse kernels
+        // exist as Vec<f32> APIs but lack persistent variants
+        // (apply_dct_batch_persistent / apply_idct_batch_persistent
+        // would panic). Adding persistent variants is the next step.
+        // For now, treat them as not-considered in the selector.
+        mark("cost_subblock_8x8");
 
         let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16(
             enc,
@@ -1118,10 +1167,17 @@ impl<R: Runtime> LossyEncoder<R> {
         mark("cost_dct64_family");
 
         // Stage 5: host-side selector + assignments
+        let sub_blocks = crate::pipeline::SubBlockCostGrids {
+            dct4x4: Some(&cost_dct4x4),
+            dct4x8: Some(&cost_dct4x8),
+            dct8x4: Some(&cost_dct8x4),
+            identity: None,
+            dct2x2: None,
+        };
         let extra16 = CostGrids16x16 {
             dct_16x8: Some(&cost_dct16x8),
             dct_8x16: Some(&cost_dct8x16),
-            sub_blocks: Default::default(),
+            sub_blocks,
         };
         let assignments = if dct64_eligible {
             let extra32 = CostGrids32x32 {

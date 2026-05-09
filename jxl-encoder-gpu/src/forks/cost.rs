@@ -1674,6 +1674,84 @@ pub fn strategy_search_costs_dct32x32<R: Runtime>(
     )
 }
 
+/// Cost grid for an 8x8-tier sub-block strategy (DCT4x4, DCT4x8,
+/// DCT8x4, IDENTITY, DCT2x2). All of these extract 8x8 pixel tiles
+/// and produce 64 coefficients per block — same shape as DCT8.
+///
+/// Reuses the existing 8x8 input gather (host-side) but feeds it
+/// through the persistent estimate_entropy chain with the chosen
+/// strategy's weights and entropy_mul.
+///
+/// libjxl entropy_mul values (from EntropyMulTable::reference):
+///   DCT4x4: 1.08    DCT4x8/DCT8x4: 0.859316    IDENTITY: 1.0428    DCT2x2: 0.95
+/// Caller passes the entropy_mul; we don't re-tune them in this
+/// helper because they're closer to neutral than the larger-transform
+/// muls (no need for the 2.5/3.5 anti-bias shifts).
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_subblock_8x8<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    pre_gathered_8x8_x: &crate::persistent::GpuBlocks<R>,
+    pre_gathered_8x8_y: &crate::persistent::GpuBlocks<R>,
+    pre_gathered_8x8_b: &crate::persistent::GpuBlocks<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    raw_strategy: u8,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+    entropy_mul: f32,
+) -> Vec<f32> {
+    let xb = padded_width / 8;
+    let yb = padded_height / 8;
+    let n_blocks = xb * yb;
+    debug_assert_eq!(pre_gathered_8x8_x.num_blocks() as usize, n_blocks);
+    debug_assert_eq!(pre_gathered_8x8_x.coeffs_per_block(), 64);
+
+    let mask_row_base: Vec<u32> = (0..n_blocks)
+        .map(|i| {
+            let bx_i = i % xb;
+            let by_i = i / xb;
+            (by_i * 8 * padded_width + bx_i * 8) as u32
+        })
+        .collect();
+
+    estimate_entropy_full_strategy_batch_persistent(
+        enc,
+        pre_gathered_8x8_x,
+        pre_gathered_8x8_y,
+        pre_gathered_8x8_b,
+        raw_strategy,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        &mask_row_base,
+        scaled_constants,
+        entropy_mul,
+        CostMode::Upstream {
+            quant_for_coeffs: quant_y,
+        },
+    )
+}
+
 /// Cost grid for DCT64x64. Returns empty Vec when image dims aren't
 /// multiples of 64.
 ///

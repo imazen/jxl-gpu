@@ -515,6 +515,27 @@ pub fn dct2x2_weights() -> Vec<f32> {
     weights
 }
 
+/// Per-channel split: returns three 64-float `Vec<f32>` slices for X/Y/B
+/// from `dct2x2_weights()` (192 total).
+pub fn dct2x2_weights_per_channel() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let all = dct2x2_weights();
+    (all[..64].to_vec(), all[64..128].to_vec(), all[128..192].to_vec())
+}
+
+/// Per-channel split: returns three 64-float `Vec<f32>` slices for X/Y/B
+/// from `identity_weights()` (192 total).
+pub fn identity_weights_per_channel() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let all = identity_weights();
+    (all[..64].to_vec(), all[64..128].to_vec(), all[128..192].to_vec())
+}
+
+/// Per-channel split: returns three 64-float `Vec<f32>` slices for X/Y/B
+/// from `dct4x8_weights()` (192 total). Same table used for DCT8X4.
+pub fn dct4x8_weights_per_channel() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let all = dct4x8_weights();
+    (all[..64].to_vec(), all[64..128].to_vec(), all[128..192].to_vec())
+}
+
 /// Generate DCT4X8 quant weights (64 per channel = 8×8 row-duplicated
 /// from a 4-tall × 8-wide base, 192 total). Same table used for DCT8X4.
 pub fn dct4x8_weights() -> Vec<f32> {
@@ -551,6 +572,13 @@ pub fn dct4x8_weights() -> Vec<f32> {
         }
     }
     weights
+}
+
+/// Per-channel split: returns three 64-float `Vec<f32>` slices for X/Y/B
+/// from `dct4x4_weights()` (192 total).
+pub fn dct4x4_weights_per_channel() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let all = dct4x4_weights();
+    (all[..64].to_vec(), all[64..128].to_vec(), all[128..192].to_vec())
 }
 
 /// Generate DCT4X4 quant weights (64 per channel, 192 total). Builds a
