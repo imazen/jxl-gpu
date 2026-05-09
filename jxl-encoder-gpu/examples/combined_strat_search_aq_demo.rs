@@ -113,6 +113,51 @@ fn main() {
     let dt_s = t.elapsed();
     let (score_s, pn3_s) = measure_score(&mut bg, &rec_r_s, &rec_g_s, &rec_b_s);
 
+    // Strategy histogram: prepare a plan and count assignments by raw_strategy.
+    let plan = lossy.prepare_strategy_search_plan(&enc, &r, &g, &b, distance);
+    let mut histo: std::collections::BTreeMap<u8, usize> =
+        std::collections::BTreeMap::new();
+    for a in &plan.assignments {
+        *histo.entry(a.raw_strategy).or_insert(0) += 1;
+    }
+    let n_assignments: usize = histo.values().sum();
+    let strat_name = |s: u8| -> &'static str {
+        use jxl_encoder_gpu::forks::transform::*;
+        match s {
+            RAW_STRATEGY_DCT => "DCT8",
+            RAW_STRATEGY_DCT16X8 => "DCT16x8",
+            RAW_STRATEGY_DCT8X16 => "DCT8x16",
+            RAW_STRATEGY_DCT16X16 => "DCT16x16",
+            RAW_STRATEGY_DCT32X32 => "DCT32x32",
+            RAW_STRATEGY_DCT4X8 => "DCT4x8",
+            RAW_STRATEGY_DCT8X4 => "DCT8x4",
+            RAW_STRATEGY_DCT4X4 => "DCT4x4",
+            RAW_STRATEGY_DCT32X16 => "DCT32x16",
+            RAW_STRATEGY_DCT16X32 => "DCT16x32",
+            RAW_STRATEGY_DCT64X64 => "DCT64x64",
+            RAW_STRATEGY_DCT64X32 => "DCT64x32",
+            RAW_STRATEGY_DCT32X64 => "DCT32x64",
+            RAW_STRATEGY_IDENTITY => "IDENT",
+            RAW_STRATEGY_DCT2X2 => "DCT2x2",
+            RAW_STRATEGY_AFV0 => "AFV0",
+            RAW_STRATEGY_AFV1 => "AFV1",
+            RAW_STRATEGY_AFV2 => "AFV2",
+            RAW_STRATEGY_AFV3 => "AFV3",
+            _ => "??",
+        }
+    };
+    let mut histo_str = String::new();
+    for (s, n) in &histo {
+        histo_str.push_str(&format!(
+            " {}={}({:.0}%)",
+            strat_name(*s),
+            n,
+            100.0 * (*n as f32) / (n_assignments as f32)
+        ));
+    }
+    println!("=== Strat-search assignments ({} regions): ===", n_assignments);
+    println!("  {histo_str}\n");
+
     // Initial AQ field for the refinement loop.
     let initial_aq = lossy.compute_aq_field(&enc, &r, &g, &b, distance);
 

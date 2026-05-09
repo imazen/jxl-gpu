@@ -1643,9 +1643,14 @@ pub fn strategy_search_costs_dct32x32<R: Runtime>(
     // cost-model adjustments (X-channel multi-block weight,
     // kAvoidEntropyOfTransforms, AdjustQuantBlockAC). Without those
     // counterweights, 1.48 over-selects DCT32 (butteraugli 8.36 on
-    // CLIC test image vs 1.35 with 2.5). Re-tune to 1.48 once the
+    // CLIC test image vs 1.35 with 2.5). Bumped 2.5 → 4.0 (May 9 2026)
+    // after corpus-sweep diagnostics found 2.5 still over-selects DCT32
+    // on detailed content (image 2684452d: 40 DCT32 picks → +31%
+    // butteraugli regression vs uniform). Same root cause as DCT64x64
+    // bump from 3.5 → 8.0 — missing libjxl pixel-loss penalty for
+    // large transforms on detailed content. Re-tune to 1.48 once the
     // rest of the cost model lands.
-    let entropy_mul = 2.5_f32;
+    let entropy_mul = 4.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
@@ -1804,9 +1809,21 @@ pub fn strategy_search_costs_dct64x64<R: Runtime>(
         })
         .collect();
 
-    // libjxl entropy_mul = 2.25; bumped here pending the rest of the
-    // cost-model adjustments. Same rationale as DCT32x32.
-    let entropy_mul = 3.5_f32;
+    // libjxl entropy_mul = 2.25; bumped to 8.0 (May 9 2026) after
+    // corpus-sweep diagnostics found 3.5 still produced catastrophic
+    // regressions on 3 of 16 CLIC photos at d=1.0 — DCT64x64 picked
+    // 50+ regions on detailed content (e.g., image 1cba10ad with 52
+    // DCT64 picks → +94% butteraugli vs uniform DCT8 1.28 → 2.48).
+    //
+    // The cost model misses libjxl's pixel-loss penalty for large
+    // transforms on detailed content — without that counterweight,
+    // DCT64's "few-coefs" entropy advantage wins even when
+    // reconstruction is catastrophically blurry. Suppressing DCT64
+    // via 8.0 mul is a band-aid until the missing pixel-loss term
+    // lands. Same rationale as DCT32x32 (which is at 2.5 vs libjxl
+    // 1.48). The proper fix is a content-aware gate (e.g. mask1x1
+    // smoothness threshold) before DCT64 even enters the cost grid.
+    let entropy_mul = 8.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
@@ -1893,7 +1910,9 @@ pub fn strategy_search_costs_dct64x32_or_32x64<R: Runtime>(
         })
         .collect();
 
-    let entropy_mul = 3.5_f32;
+    // DCT64x32 / DCT32x64 — same suppression rationale as DCT64x64
+    // (see the corpus-sweep note above). Bumped 3.5 → 8.0 May 9 2026.
+    let entropy_mul = 8.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
