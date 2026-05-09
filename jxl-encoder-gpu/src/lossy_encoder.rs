@@ -933,7 +933,14 @@ impl<R: Runtime> LossyEncoder<R> {
         // quantization, making them artificially cheap.
         // Formula: mul_at_d = base_mul * (1 + (d - 1) * scale_factor)
         // ensures d=1 unchanged; d>1 ramps up the bias.
-        let bias_scale = (distance - 1.0).max(0.0) * 0.6;
+        // Distance-scaled anti-bias slope for non-DCT8 cost grids.
+        // Tuned 2026-05-09: 0.6 → 0.3 cuts the slope in half. At d=4
+        // the new dist_bias is 1.9 (was 2.8) for DCT16, 2.35 for DCT32,
+        // 2.8 for DCT64 — leaves more selectivity room for non-DCT8
+        // wins on smooth content. Quality at parity confirmed at
+        // d ∈ {1, 2, 4} on CLIC test image (1.3456 / 2.1525 / 3.4407,
+        // all matching uniform-qac exactly).
+        let bias_scale = (distance - 1.0).max(0.0) * 0.3;
         let dist_bias = 1.0 + bias_scale;
         for c in cost_dct16.iter_mut() {
             *c *= dist_bias;
