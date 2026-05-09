@@ -1687,6 +1687,86 @@ mod tests {
         }
     }
 
+    /// estimate_entropy_full_dct8_batch_persistent must produce the
+    /// same per-block cost grid as the non-persistent variant on
+    /// realistic input.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_estimate_entropy_full_dct8_batch_persistent_matches_non_persistent() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // 4×4 grid of 8×8 blocks → 32×32 plane (fits the 32×32 mask).
+        let pw = 32_u32;
+        let ph = 32_u32;
+        let n_blocks = ((pw / 8) * (ph / 8)) as usize;
+
+        // Synthetic XYB-like inputs (block-major layout, 64 floats per block).
+        let mk = |seed: f32| -> alloc::vec::Vec<f32> {
+            (0..n_blocks * 64)
+                .map(|i| 0.05 * (i as f32 * seed).sin() + 0.5)
+                .collect()
+        };
+        let bx = mk(0.013);
+        let by = mk(0.017);
+        let bb = mk(0.021);
+
+        let weights_x = [0.8_f32; 64];
+        let weights_y = [1.0_f32; 64];
+        let weights_b = [1.1_f32; 64];
+        let inv_x = [1.0_f32 / 0.8; 64];
+        let inv_y = [1.0_f32; 64];
+        let inv_b = [1.0_f32 / 1.1; 64];
+
+        // Mask plane: 32×32 with smooth variation.
+        let mask: alloc::vec::Vec<f32> = (0..(pw * ph) as usize)
+            .map(|i| 0.3 + 0.2 * (i as f32 * 0.011).sin())
+            .collect();
+        let mask_row_base: alloc::vec::Vec<u32> = (0..n_blocks)
+            .map(|b| {
+                let by_i = (b / (pw as usize / 8)) as u32;
+                let bx_i = (b % (pw as usize / 8)) as u32;
+                by_i * 8 * pw + bx_i * 8
+            })
+            .collect();
+
+        let scaled = COEFF_DOMAIN_CONSTANTS;
+        let entropy_mul = 0.8;
+        let mode = CostMode::Upstream { quant_for_coeffs: 0.7 };
+        let costs_a = estimate_entropy_full_dct8_batch_gpu(
+            &enc,
+            &bx, &by, &bb,
+            &weights_x, &weights_y, &weights_b,
+            &inv_x, &inv_y, &inv_b,
+            0.7, 0.7, 0.7, 0, 0,
+            &mask, &mask_row_base, pw,
+            scaled, entropy_mul, mode,
+        );
+
+        // Persistent path: pre-upload pixel blocks and mask to GPU.
+        let g_bx = enc.upload_blocks(&bx, n_blocks as u32, 64);
+        let g_by = enc.upload_blocks(&by, n_blocks as u32, 64);
+        let g_bb = enc.upload_blocks(&bb, n_blocks as u32, 64);
+        let g_mask = enc.upload_plane(&mask, pw, ph);
+        let costs_b = estimate_entropy_full_dct8_batch_persistent(
+            &enc,
+            &g_bx, &g_by, &g_bb,
+            &weights_x, &weights_y, &weights_b,
+            &inv_x, &inv_y, &inv_b,
+            0.7, 0.7, 0.7, 0, 0,
+            &g_mask, &mask_row_base,
+            scaled, entropy_mul, mode,
+        );
+
+        assert_eq!(costs_a.len(), costs_b.len());
+        for (i, (a, b)) in costs_a.iter().zip(&costs_b).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-3,
+                "cost[{i}] differs: persistent={b} vs non={a} (delta={})",
+                (a - b).abs()
+            );
+        }
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     fn test_estimate_entropy_full_dct8_batch_gpu_zero_input() {
