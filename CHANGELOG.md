@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### Architectural position vs jxl-encoder CPU (clarified May 9, 2026)
+
+This crate is a GPU acceleration library, NOT a competing JXL bitstream
+encoder. `encode_lossy_via_cpu` is a passthrough to the upstream
+`jxl-encoder` CPU encoder; none of the GPU work this crate produces
+(refined AQ field, strategy assignments, quantized AC coefficients)
+currently reaches the bitstream stage. To close that loop, `jxl-encoder`
+needs a "pre-quantized input" entry point that accepts our output and
+skips its own XYB / AQ / strat-search / DCT / quant / butteraugli loop —
+that's blocked on upstream API design and intentionally deferred.
+
+**What this means for measurements:**
+- File size: not meaningfully comparable; GPU side emits no bitstream.
+- End-to-end speed: same; calling our GPU encoder for a JXL file is
+  currently *slower* than calling the CPU encoder directly (because
+  the GPU work is discarded by `encode_lossy_via_cpu`).
+- Reconstruction quality: extensively measured on GPU side
+  (butteraugli scores from `refine_and_encode_smart` / best-of-both /
+  strat-search pipelines), but not compared against the CPU encoder's
+  bitstream-decoded output.
+
+**Crate-local work the handoff doesn't block:**
+- Group-level streaming output (256×256 groups; emit each group's
+  coefficients + per-block metadata as soon as GPU-ready) — lets the
+  future CPU consumer pipeline tokenize/ANS work concurrent with later
+  GPU groups.
+- GPU histogram counting (atomic-add per token bucket) and clustering
+  (pair-merge / k-means style) — both SIMT-friendly. The actual ANS
+  table build + bit-pack stays CPU.
+- Persistent AFV transforms (#38) — would let us re-enable the AFV
+  cost grid (currently skipped to save 175 ms).
+
+See CLAUDE.md "Architectural position vs jxl-encoder CPU" for the
+full rationale.
+
 ### Combined-mode: strat-search + butteraugli AQ refinement (May 9, 2026)
 
 Lands the integration that the strat-search + butteraugli refinement

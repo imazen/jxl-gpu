@@ -9,6 +9,114 @@ Mirrors `jxl-encoder-simd` 1:1 — every public function in `jxl-encoder-simd`
 We dispatch across CUDA (NVIDIA), WGPU (Vulkan/Metal/DX12/WebGPU), HIP (AMD),
 and CPU (cubecl-cpu) from a single `#[cube]`-annotated kernel source.
 
+## Architectural position vs jxl-encoder CPU
+
+This crate is a **GPU acceleration library**, NOT a competing JXL bitstream
+encoder. The structure:
+
+```
+~/work/zen/jxl-encoder/jxl-encoder       (live CPU encoder, sibling workspace)
+   ↑
+   │ pulled in via path dep:
+   │   jxl-encoder = { path = "../jxl-encoder/jxl-encoder", ... }
+   │
+~/work/zen/jxl-encoder-gpu/jxl-encoder-gpu (this crate)
+   ├── src/forks/        ← parallel GPU-flavored copies of CPU modules that
+   │                       traffic in GpuBlocks/GpuPlane handles instead of
+   │                       host Vec<f32>. Header comment in each fork says
+   │                       "Forked from jxl-encoder X — Why a fork instead
+   │                       of editing jxl-encoder: zero edits to upstream."
+   ├── src/persistent.rs ← GPU-only state machinery (handle types, batch ops)
+   ├── src/kernels/      ← #[cube] kernel sources
+   ├── src/launch/       ← kernel launchers (CubeDim sizing, etc.)
+   └── src/encoder.rs    ← thin facade. encode_lossy_via_cpu is currently a
+                            passthrough to jxl-encoder's CPU path; none of
+                            our GPU work reaches the bitstream stage.
+```
+
+### Why this shape
+
+1. **GPU is great at the numerics, terrible at the bitstream.** XYB /
+   gaborish / EPF / mask1x1 / butteraugli / DCT / IDCT / quant are dense
+   FP arithmetic with regular access patterns — perfect SIMT fit.
+   ANS/Huffman entropy coding, context modeling, bit packing, container
+   assembly are bit-serial, branch-heavy, dependency-chained — the
+   worst fit for GPU. Trying to GPU the entropy coder loses to CPU SIMD.
+
+2. **CPU encoder is mature, complex, and not ours to break.** Forking
+   the whole thing means owning a permanent fork and merging upstream
+   forever. Forking only the numeric modules we GPU-port keeps the
+   CPU encoder shippable as-is.
+
+3. **Persistent GPU buffers need API control.** Stages need to hand
+   each other `GpuBlocks` / `GpuPlane` handles — not host buffers
+   round-tripped through PCIe per stage. The CPU encoder's APIs only
+   speak host buffers, so we need parallel module copies that traffic
+   in GPU handles. That's what `forks/*` is.
+
+### The handoff gap (open, blocked on jxl-encoder API)
+
+Today the GPU pipeline ends at "reconstructed pixels + refined AQ
+field + strategy assignments + per-strategy quantized AC coefficients."
+The CPU entropy coder never sees any of that — `encode_lossy_via_cpu`
+makes the CPU encoder redo XYB / AQ / strat-search / DCT / quant
+from scratch. So calling our GPU encoder for an actual JXL file is
+currently *slower* than calling the CPU encoder directly.
+
+To close the loop, `jxl-encoder` needs a "pre-quantized input" entry
+point that ACCEPTS:
+- per-strategy quantized AC coefficients (we have as `GpuI32Blocks`)
+- `Vec<StrategyAssignment>` (we have)
+- DC grid per channel (we have via `compute_dc_grid_per_8x8_block`)
+- refined per-block qac field (we have)
+- CfL ytox/ytob maps (we have)
+- EPF per-block sharpness (we have)
+
+…and SKIPS its own XYB / AQ / strat-search / DCT / quant /
+butteraugli loop — just runs tokenize → ANS → bitstream assemble.
+That seam is already gated behind `features = ["__internals"]` on
+the dep, but the actual API isn't built yet. **Building it requires
+editing jxl-encoder upstream**, which breaks the "zero edits" rule.
+That trade-off is intentional and pending until the upstream encoder
+quiesces.
+
+### What's bounded to this crate (no upstream blocker)
+
+These can be done locally without touching jxl-encoder:
+
+- **Per-stage GPU primitives that the future handoff will consume**:
+  - Group-level streaming output (256×256 groups; emit each group's
+    coefficients + per-block metadata as soon as it's GPU-ready, not
+    after whole-image completion). Lets the future CPU consumer
+    pipeline tokenize/ANS work concurrent with later GPU groups.
+  - Histogram counting on GPU (atomic-add per token bucket — well-
+    known SIMT pattern, way faster than CPU on large tensors).
+  - Histogram clustering on GPU (pair-merge / k-means-style — also
+    SIMT-friendly). The actual ANS table build + bit-pack stays CPU,
+    but the histogram-prep stages are GPU-friendly.
+- **Polish on existing GPU work**:
+  - Persistent AFV transforms (#38 — the only in_progress task).
+    Currently the AFV cost grid is skipped (175 ms saved) because
+    its host-orchestrated transforms cost too much; persistent
+    versions would cut that to ~30 ms and let us re-enable AFV
+    cost-grid evaluation.
+  - More dimension-flexibility tests (sub-block strategies on
+    arbitrary dimensions now that align-16 fix landed).
+  - Per-stage benchmarks comparing GPU vs `jxl-encoder-simd` CPU
+    timings (baseline measurement, not handoff-gated).
+- **API hygiene**:
+  - Document the smart turnkey as the recommended entry point
+  - Examples + roundtrip tests against the upstream CPU encoder
+    (compare GPU reconstruction butteraugli to CPU encoder's
+    reconstruction)
+
+### What's NOT in scope for this crate
+
+- GPU entropy coder. Wrong tool. Will always lose to CPU SIMD.
+- Bitstream assembly / container muxing. Same.
+- Replacing the CPU encoder. The structure is "accelerate the
+  numerics, leave the rest alone."
+
 ## Autonomous mandate
 
 **Drive this port forever, until done. Do NOT stop. Do NOT ask
