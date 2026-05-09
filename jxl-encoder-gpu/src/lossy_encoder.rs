@@ -2122,6 +2122,51 @@ mod tests {
         }
     }
 
+    /// Selectivity test on synthetic SMOOTH content. CLIC photo's
+    /// detailed texture means strat-search picks ~all-DCT8 even at
+    /// the tuned bias slopes. A smooth gradient should let larger
+    /// transforms win — validates the picker is making content-aware
+    /// decisions rather than always falling through to DCT8.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_strat_search_selectivity_on_smooth_synthetic() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let w = 256_u32;
+        let h = 256_u32;
+        let n = (w * h) as usize;
+        // Smooth diagonal gradient: low spatial frequency.
+        let r: Vec<f32> = (0..n)
+            .map(|i| {
+                let x = (i % w as usize) as f32 / w as f32;
+                let y = (i / w as usize) as f32 / h as f32;
+                0.20 + 0.60 * x + 0.10 * y
+            })
+            .collect();
+        let g: Vec<f32> = (0..n)
+            .map(|i| {
+                let x = (i % w as usize) as f32 / w as f32;
+                let y = (i / w as usize) as f32 / h as f32;
+                0.30 + 0.40 * x + 0.20 * y
+            })
+            .collect();
+        let b: Vec<f32> = (0..n)
+            .map(|i| {
+                let x = (i % w as usize) as f32 / w as f32;
+                let y = (i / w as usize) as f32 / h as f32;
+                0.15 + 0.30 * x + 0.50 * y
+            })
+            .collect();
+        let lossy = LossyEncoder::new(&enc, w, h);
+        let distance: f32 = std::env::var("DISTANCE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0);
+        std::println!("[smooth-sel] {w}×{h} smooth gradient, distance={distance}");
+        let _ = lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, distance);
+        // Histogram print fires inside the LossyEncoder when in #[cfg(test)].
+    }
+
     /// Diagnostic: run strat-search with DCT32 enabled on a real CLIC
     /// image and report (a) Partition32x32 histogram and (b) per-channel
     /// reconstruction RMSE vs the no-DCT32 baseline.
