@@ -24,6 +24,12 @@ encoder = ["dep:jxl-encoder"]
 # `vardct::butteraugli_loop` but runs the per-iteration distance
 # compute on GPU via zenmetrics/butteraugli-gpu. Off by default.
 butteraugli-loop = ["dep:butteraugli-gpu"]
+# `corpus` enables integration tests that read images from a known
+# corpus path (codec-corpus on the dev machine) and assert
+# butteraugli scores within tolerance against committed expectations.
+# Required to RUN the corpus regression suite — build/CI default
+# leaves it off so CI doesn't need the corpus tree.
+corpus = ["cuda", "encoder", "butteraugli-loop"]
 
 [dependencies]
 cubecl = { workspace = true }
