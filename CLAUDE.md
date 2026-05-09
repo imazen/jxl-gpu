@@ -188,6 +188,32 @@ and reconstruction blow up to ~165 butteraugli (vs target ~1.3). Fix was
 **When porting CPU code to GPU, double-check the normalization convention
 before trusting any constant from libjxl reconstruct.cc / dct_scales.h.**
 
+## Combining strat-search with butteraugli AQ refinement (open)
+
+`LossyEncoder::encode_one_with_strategy_search_dct8_16` (strat-search)
+and `forks::butteraugli_loop::refine_aq_field_gpu` (per-iter qac
+refinement) are independently working. On CLIC 1024×1024 @ d=1.0 with
+the current implementations:
+
+| Pipeline | Score (butteraugli) |
+|----------|---------------------|
+| uniform-qac (encode_one) | 1.3456 |
+| strat-search (uniform qac) | 1.3456 |
+| butteraugli refine on uniform-qac (4 iters) | **1.1475** |
+
+The refinement loop wins (-15% vs strat-search) because it tunes
+per-block qac based on perceptual feedback, while strat-search picks
+transforms but keeps qac uniform. Combining them — strat-search picks
+transforms AND butteraugli refinement tunes per-block qac — would
+likely produce the best quality.
+
+The integration: replace the per-iter `encode_one_adaptive` call
+inside `refine_aq_field_gpu` with a strat-search call that takes a
+per-block qac field. Currently `encode_one_with_strategy_search_dct8_16`
+takes a scalar `distance` (broadcasts to qac); a new
+`encode_one_with_strategy_search_dct8_16_adaptive` would take
+`&[f32]` per-block qac. This is the natural next step for max quality.
+
 ## Strat-search distance limitation (May 8, 2026)
 
 LossyEncoder::encode_one_with_strategy_search_dct8_16 produces butteraugli
