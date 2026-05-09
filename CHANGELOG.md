@@ -25,6 +25,15 @@ butteraugli refinement.
 - `forks::butteraugli_loop::refine_and_encode_best_of_both` runs both
   refine+DCT8 and refine+strat pipelines and returns the lower-
   butteraugli winner; provably never worse than refine+DCT8 alone
+- `LossyEncoder::content_looks_like_screenshot[_THRESHOLD]` —
+  cheap mask1x1 median check (~10-20 ms) that detects screenshot-like
+  content where strat-search regresses catastrophically (×4-5
+  butteraugli vs uniform). 9-of-10 screenshot detection rate, 0
+  false positives on CLIC photos.
+- `forks::butteraugli_loop::refine_and_encode_smart` — turnkey
+  wrapper that uses the discriminator to skip strat-search on
+  screenshot content. Photo content: same quality + cost as
+  best-of-both. Screenshot content: same quality at ~2.5× lower cost.
 
 **Key commits:**
 - `772a86f1` feat: adaptive variant takes per-block aq_field
