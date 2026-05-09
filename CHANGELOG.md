@@ -2,6 +2,54 @@
 
 ## [Unreleased]
 
+### AC strategy search — full GPU pipeline + 15-strategy palette (May 8, 2026)
+
+Multi-day effort delivering a working AC strategy search on GPU,
+matching libjxl's algorithm at quality parity with uniform-qac.
+
+**End state:** `LossyEncoder::encode_one_with_strategy_search_dct8_16`
+runs in 170 ms on a 1024×1024 image at d=1.0 (vs 305 ms baseline,
+**1.8× speedup**), produces butteraugli identical to uniform-qac
+across d ∈ {0.5, 1.0, 2.0, 4.0}, and considers 15 of 27 strategies.
+
+**Key commits:**
+- `ac88dc1c` fix: GPU DCT mean-scale convention (DC grid sum/8 → sum/64)
+- `79e034707` feat: EPF in postpass closes +6% butteraugli gap
+- `13be0049` perf: persistent cost-grid pipeline (6× faster)
+- `74c5a465` perf: keep mask1x1 on GPU
+- `540f55fd` perf: persistent encode/recon chain
+- `f7cdaa56` fix: kFavor2X2 + tuned DCT32 entropy_mul fixes regression
+- `b482813b` fix: 2× anti-bias muls for sub-blocks
+- `c4c62cef` feat: IDENTITY + DCT2x2 (full sub-block palette)
+- `9ae995d3` feat: thread CostGrids16x16 through 32x32 + 64x64 selectors
+- `ba9eed75` fix: distance-scaled anti-bias preserves quality d=0.5..d=4
+- `da647cc8` chore: 12 → 0 build warnings
+
+**Active strategies (15 of 27):** DCT8, DCT4x4, DCT4x8, DCT8x4,
+IDENTITY, DCT2x2, DCT16x16, DCT16x8, DCT8x16, DCT32x32, DCT32x16,
+DCT16x32, DCT64x64, DCT64x32, DCT32x64. Remaining: AFV0-3 (corner-DCT,
+separate forks::afv path), DCT128+ (libjxl never selects).
+
+**Selectivity validated** on CLIC photo at d=1.0: 16100 DCT8 picks
+(98.4%), 59 DCT16x16 (1.4% area), 3 DCT32x32 (0.3% area). Strat-search
+picks larger transforms only where they genuinely win.
+
+**Distance robustness:** the cost-model anti-bias muls are
+distance-scaled — `bias = 1 + max(0, d-1) * 0.6` for DCT16, 1.5× for
+DCT32, 2× for DCT64. At d=1 unchanged from calibration; at d=4
+prevents the over-selection that produced butteraugli 9.2 (commit
+`ba9eed75` debug).
+
+**Foundation that future work depends on:**
+- 6 new persistent GpuEncoder kernels (entropy_coeffs, pixel_loss,
+  quantize_large, dequant_strategy with/without DCT8 bias, identity,
+  dct2x2 — forward and inverse where applicable)
+- 2 strategy-aware persistent dispatchers (apply_dct/idct_batch_persistent)
+- 4 new selector variants threading extras through (16x16_full,
+  32x32_with_extras16, 64x64_with_extras16)
+- 4 lowering helpers (partitions_16x16/32x32/64x64_to_assignments
+  + recursive Sub16x16 / Sub32x32)
+
 ### Tunable smart-gate threshold + per-metric optima sweep (`69e22df1`, `fee20969`)
 
 Expose the AQ-regression ratio as an explicit parameter via
