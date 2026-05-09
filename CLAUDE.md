@@ -188,31 +188,49 @@ and reconstruction blow up to ~165 butteraugli (vs target ~1.3). Fix was
 **When porting CPU code to GPU, double-check the normalization convention
 before trusting any constant from libjxl reconstruct.cc / dct_scales.h.**
 
-## Combining strat-search with butteraugli AQ refinement (open)
+## Combining strat-search with butteraugli AQ refinement (May 9, 2026)
 
-`LossyEncoder::encode_one_with_strategy_search_dct8_16` (strat-search)
-and `forks::butteraugli_loop::refine_aq_field_gpu` (per-iter qac
-refinement) are independently working. On CLIC 1024×1024 @ d=1.0 with
-the current implementations:
+**Infrastructure landed.** `encode_one_with_strategy_search_dct8_16_adaptive`
+takes `&[f32]` per-block qac instead of scalar distance. The cost-grid
+stage still scales with `target_distance` (so strategy assignments
+stay stable when only `aq_field` varies — required for the loop to
+converge). Only the encode/recon stage consumes `aq_field`.
+`refine_aq_field_gpu_with_strategy_search` is the matching loop entry.
 
-| Pipeline | Score (butteraugli) |
-|----------|---------------------|
-| uniform-qac (encode_one) | 1.3456 |
-| strat-search (uniform qac) | 1.3456 |
-| butteraugli refine on uniform-qac (4 iters) | **1.1475** |
+**Empirical results** (CLIC 1024×1024 @ 4-iter refinement,
+`combined_strat_search_aq_demo`):
 
-The refinement loop wins (-15% vs strat-search) because it tunes
-per-block qac based on perceptual feedback, while strat-search picks
-transforms but keeps qac uniform. Combining them — strat-search picks
-transforms AND butteraugli refinement tunes per-block qac — would
-likely produce the best quality.
+| d   | uniform | strat alone | refine+DCT8 | refine+strat | combined Δ vs DCT8 |
+|-----|---------|-------------|-------------|--------------|---------------------|
+| 0.5 | 0.7006  | 0.7006      | 0.6641      | 0.6641       | -0.0000 (-0.00%)   |
+| 1.0 | 1.3456  | 1.3456      | 1.1475      | 1.1475       | +0.0000 (-0.00%)   |
+| 1.5 | 1.6745  | 1.7491*     | 1.6299      | **2.0604**   | +0.4235 (+25.9%)   |
+| 2.0 | 2.1525  | 2.2506*     | 2.1526      | 2.1566       | +0.0040 (+0.19%)   |
+| 3.0 | —       | —           | 2.9187      | 3.1508       | +0.2321 (+7.95%)   |
 
-The integration: replace the per-iter `encode_one_adaptive` call
-inside `refine_aq_field_gpu` with a strat-search call that takes a
-per-block qac field. Currently `encode_one_with_strategy_search_dct8_16`
-takes a scalar `distance` (broadcasts to qac); a new
-`encode_one_with_strategy_search_dct8_16_adaptive` would take
-`&[f32]` per-block qac. This is the natural next step for max quality.
+*at parity at d≤1, regresses at d≥1.5 per the strat-search distance-
+limitation entry below.
+
+**Combined mode is at parity through d≤1.0**, slightly better on
+pnorm_3 (0.4696 vs 0.4703 at d=1.0). At d≥1.5 it INHERITS strat-
+search's cost-model regression, producing strictly worse results
+than refine+DCT8 alone. **Combined mode is NOT a quality win until
+the strat-search distance-scaling cost model is fixed** (kAvoidEntropyOfTransforms
+and X-channel multi-block weight ports). The plumbing is correct;
+the limitation is upstream.
+
+**Cost: 4.6× more wall-clock per iter** than refine+DCT8 (202ms vs
+44ms/iter on CLIC 1024² at d=1). Each iter re-runs cost grids +
+selector + mixed encode-recon. **Future optimization**: cache the
+cost-grid output before entering the refinement loop — assignments
+are invariant when only `aq_field` varies, so cost-grid recompute is
+wasted work. Could drop combined-mode iter cost to ~50ms (one DCT/quant
+batch + recon). At that point combined mode becomes free relative to
+refine+DCT8 even when quality wins are absent.
+
+**Conclusion**: the integration is shipped and correct; it's gated
+behind explicit caller choice (no auto-promotion in turnkey APIs)
+until the cost-model regression at d≥1.5 is fixed.
 
 ## Strat-search distance limitation (May 8, 2026)
 

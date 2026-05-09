@@ -978,8 +978,98 @@ pub fn refine_aq_field_gpu<R: Runtime>(
     initial_aq_field: &[f32],
     target_distance: f32,
     iters: usize,
-    mut trace: impl FnMut(RefineIterTrace),
+    trace: impl FnMut(RefineIterTrace),
 ) -> butteraugli_gpu::Result<Vec<f32>> {
+    refine_aq_field_gpu_with_encode(
+        lossy,
+        bg,
+        ref_srgb,
+        initial_aq_field,
+        target_distance,
+        iters,
+        |aq| lossy.encode_one_adaptive(enc, r, g, b, aq),
+        trace,
+    )
+}
+
+/// Strat-search variant of [`refine_aq_field_gpu`].
+///
+/// Identical control flow, but the per-iteration encode step calls
+/// [`LossyEncoder::encode_one_with_strategy_search_dct8_16_adaptive`]
+/// instead of [`LossyEncoder::encode_one_adaptive`]. Strategy
+/// assignments are stable across iterations because the cost-grid
+/// stage scales with `target_distance` (constant) — only per-block
+/// quantization changes via the working `aq_field`.
+///
+/// **Quality target** (CLIC 1024×1024 @ d=1.0): combines strat-search
+/// transform picks with butteraugli AQ refinement's per-block qac
+/// tuning. Both are independently working. The combined-mode
+/// expectation is to match-or-beat the refine-only score (1.1475 in
+/// the source-tracking entry) by giving the loop a transform palette
+/// to work with instead of forcing DCT8 everywhere.
+///
+/// **Cost** (per iteration): roughly 5-7× more GPU work than the
+/// uniform-DCT8 variant, because each iter re-runs the full
+/// strat-search pipeline (cost grids + selector + mixed encode-recon).
+/// At 4 iters this is currently ~250-350 ms vs ~45-60 ms for the
+/// uniform variant on a 1024² CLIC photo. Future optimization
+/// (#41/#42): cache cost-grid output across iters since assignments
+/// are stable when only `aq_field` varies.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    lossy: &LossyEncoder<R>,
+    bg: &mut ButteraugliLoopGpu<R>,
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    ref_srgb: &[u8],
+    initial_aq_field: &[f32],
+    target_distance: f32,
+    iters: usize,
+    trace: impl FnMut(RefineIterTrace),
+) -> butteraugli_gpu::Result<Vec<f32>> {
+    refine_aq_field_gpu_with_encode(
+        lossy,
+        bg,
+        ref_srgb,
+        initial_aq_field,
+        target_distance,
+        iters,
+        |aq| {
+            lossy.encode_one_with_strategy_search_dct8_16_adaptive(
+                enc,
+                r,
+                g,
+                b,
+                aq,
+                target_distance,
+            )
+        },
+        trace,
+    )
+}
+
+/// Inner refinement loop parameterized on the encode step. Both
+/// [`refine_aq_field_gpu`] (uniform DCT8) and
+/// [`refine_aq_field_gpu_with_strategy_search`] delegate here. Keeps
+/// the iteration semantics (deviation bounds, qac update rule, trace
+/// callback shape) identical between the two encoders — there's only
+/// one place that defines "what does a butteraugli refinement
+/// iteration mean."
+fn refine_aq_field_gpu_with_encode<R: Runtime, E>(
+    lossy: &LossyEncoder<R>,
+    bg: &mut ButteraugliLoopGpu<R>,
+    ref_srgb: &[u8],
+    initial_aq_field: &[f32],
+    target_distance: f32,
+    iters: usize,
+    mut encode_step: E,
+    mut trace: impl FnMut(RefineIterTrace),
+) -> butteraugli_gpu::Result<Vec<f32>>
+where
+    E: FnMut(&[f32]) -> (Vec<f32>, Vec<f32>, Vec<f32>),
+{
     let (width, height) = lossy.dimensions();
     let (xsize_blocks, ysize_blocks) = {
         let (pw, ph) = lossy.padded_dimensions();
@@ -1021,7 +1111,7 @@ pub fn refine_aq_field_gpu<R: Runtime>(
 
     for iter in 0..=iters {
         // Step 1: encode at current aq_field, get reconstructed linear RGB.
-        let (rec_r, rec_g, rec_b) = lossy.encode_one_adaptive(enc, r, g, b, &aq_field);
+        let (rec_r, rec_g, rec_b) = encode_step(&aq_field);
 
         // Step 2: convert recon → sRGB U8 → butteraugli compute.
         linear_planar_to_srgb_u8_interleaved_into(
