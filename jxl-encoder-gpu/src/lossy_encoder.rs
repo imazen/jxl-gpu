@@ -472,12 +472,25 @@ fn crop_to_original(
 
 impl<R: Runtime> LossyEncoder<R> {
     /// Construct a lossy encoder for a given image size.
-    /// Any width and height ≥ 8 are accepted; non-multiple-of-8
+    /// Any width and height ≥ 16 are accepted; non-multiple-of-16
     /// dimensions are padded internally with edge replication.
+    ///
+    /// **Why 16, not 8**: the strat-search 16x16 selector (the base
+    /// of the partition hierarchy) requires `xsize_blocks_8` and
+    /// `ysize_blocks_8` to be multiples of 2 (= padded dims multiples
+    /// of 16). Aligning to 16 unconditionally lets strat-search work
+    /// on ALL image sizes, not just those whose bare 8-aligned padded
+    /// dims happen to land on multiples of 16. Cost: at most 8 extra
+    /// pixels per axis (~4 KB at typical sizes — negligible).
+    /// DCT32/DCT64 paths remain gated on multiples of 32/64
+    /// internally inside the strat-search facade.
     pub fn new(enc: &GpuEncoder<R>, width: u32, height: u32) -> Self {
-        assert!(width >= 8 && height >= 8, "width/height must be at least 8");
-        let padded_width = align_up(width, 8);
-        let padded_height = align_up(height, 8);
+        assert!(
+            width >= 16 && height >= 16,
+            "width/height must be at least 16 (was {width}x{height})"
+        );
+        let padded_width = align_up(width, 16);
+        let padded_height = align_up(height, 16);
         let num_blocks = (padded_width / 8) * (padded_height / 8);
         // Upload one weights TEMPLATE per channel (X, Y, B) — exactly
         // 64 floats, broadcast across all blocks by the
@@ -1683,6 +1696,28 @@ impl<R: Runtime> LossyEncoder<R> {
         let dct64x32_x_clone = dct64x32_x.clone();
         let dct64x32_y_clone = dct64x32_y.clone();
         let dct64x32_b_clone = dct64x32_b.clone();
+        // Sub-block 8x8-tier weights (DCT4x4, DCT4x8/DCT8x4, IDENTITY,
+        // DCT2x2). The strat-search 16x16 selector can pick these
+        // (cost grids computed in the prepare stage), so the
+        // encode/recon stage must support them too.
+        let (dct4x4_xw, dct4x4_yw, dct4x4_bw) =
+            crate::quant_weights::dct4x4_weights_per_channel();
+        let dct4x4_x_clone = dct4x4_xw.clone();
+        let dct4x4_y_clone = dct4x4_yw.clone();
+        let dct4x4_b_clone = dct4x4_bw.clone();
+        let (dct4x8_xw, dct4x8_yw, dct4x8_bw) =
+            crate::quant_weights::dct4x8_weights_per_channel();
+        let dct4x8_x_clone = dct4x8_xw.clone();
+        let dct4x8_y_clone = dct4x8_yw.clone();
+        let dct4x8_b_clone = dct4x8_bw.clone();
+        let (id_xw, id_yw, id_bw) = crate::quant_weights::identity_weights_per_channel();
+        let id_x_clone = id_xw.clone();
+        let id_y_clone = id_yw.clone();
+        let id_b_clone = id_bw.clone();
+        let (d2_xw, d2_yw, d2_bw) = crate::quant_weights::dct2x2_weights_per_channel();
+        let d2_x_clone = d2_xw.clone();
+        let d2_y_clone = d2_yw.clone();
+        let d2_b_clone = d2_bw.clone();
         let (afv_wx, afv_wy, afv_wb) = crate::quant_weights::afv_weights_per_channel();
         let afv_wx_v: Vec<f32> = afv_wx.to_vec();
         let afv_wy_v: Vec<f32> = afv_wy.to_vec();
@@ -1692,6 +1727,11 @@ impl<R: Runtime> LossyEncoder<R> {
                 || s == crate::forks::transform::RAW_STRATEGY_AFV1
                 || s == crate::forks::transform::RAW_STRATEGY_AFV2
                 || s == crate::forks::transform::RAW_STRATEGY_AFV3
+        };
+        use crate::forks::transform::{
+            RAW_STRATEGY_DCT2X2 as _RS_DCT2X2, RAW_STRATEGY_DCT4X4 as _RS_DCT4X4,
+            RAW_STRATEGY_DCT4X8 as _RS_DCT4X8, RAW_STRATEGY_DCT8X4 as _RS_DCT8X4,
+            RAW_STRATEGY_IDENTITY as _RS_IDENTITY,
         };
         let weights_x_for = move |strat: u8| -> Vec<f32> {
             if is_afv_strategy(strat) {
@@ -1705,7 +1745,11 @@ impl<R: Runtime> LossyEncoder<R> {
                 RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => dct32x16_x_clone.clone(),
                 RAW_STRATEGY_DCT64X64 => dct64_x_clone.clone(),
                 RAW_STRATEGY_DCT64X32 | RAW_STRATEGY_DCT32X64 => dct64x32_x_clone.clone(),
-                _ => panic!("Phase B strategy {strat} not yet wired into encoder"),
+                _RS_DCT4X4 => dct4x4_x_clone.clone(),
+                _RS_DCT4X8 | _RS_DCT8X4 => dct4x8_x_clone.clone(),
+                _RS_IDENTITY => id_x_clone.clone(),
+                _RS_DCT2X2 => d2_x_clone.clone(),
+                _ => panic!("Strategy {strat} not yet wired into encoder weights"),
             }
         };
         let weights_y_for = move |strat: u8| -> Vec<f32> {
@@ -1720,7 +1764,11 @@ impl<R: Runtime> LossyEncoder<R> {
                 RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => dct32x16_y_clone.clone(),
                 RAW_STRATEGY_DCT64X64 => dct64_y_clone.clone(),
                 RAW_STRATEGY_DCT64X32 | RAW_STRATEGY_DCT32X64 => dct64x32_y_clone.clone(),
-                _ => panic!("Phase B strategy {strat} not yet wired into encoder"),
+                _RS_DCT4X4 => dct4x4_y_clone.clone(),
+                _RS_DCT4X8 | _RS_DCT8X4 => dct4x8_y_clone.clone(),
+                _RS_IDENTITY => id_y_clone.clone(),
+                _RS_DCT2X2 => d2_y_clone.clone(),
+                _ => panic!("Strategy {strat} not yet wired into encoder weights"),
             }
         };
         let weights_b_for = move |strat: u8| -> Vec<f32> {
@@ -1735,7 +1783,11 @@ impl<R: Runtime> LossyEncoder<R> {
                 RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => dct32x16_b_clone.clone(),
                 RAW_STRATEGY_DCT64X64 => dct64_b_clone.clone(),
                 RAW_STRATEGY_DCT64X32 | RAW_STRATEGY_DCT32X64 => dct64x32_b_clone.clone(),
-                _ => panic!("Phase B strategy {strat} not yet wired into encoder"),
+                _RS_DCT4X4 => dct4x4_b_clone.clone(),
+                _RS_DCT4X8 | _RS_DCT8X4 => dct4x8_b_clone.clone(),
+                _RS_IDENTITY => id_b_clone.clone(),
+                _RS_DCT2X2 => d2_b_clone.clone(),
+                _ => panic!("Strategy {strat} not yet wired into encoder weights"),
             }
         };
         let mut plane_x = vec![0.0_f32; pw * ph];
@@ -2733,15 +2785,16 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_lossy_encoder_arbitrary_size() {
-        // 100×73 — neither dim is a multiple of 8. Encoder pads to
-        // 104×80 internally, runs pipeline, crops back to 100×73.
+        // 100×73 — neither dim is a multiple of 16. Encoder pads to
+        // 112×80 internally (16-aligned per the strat-search 16x16
+        // selector requirement), runs pipeline, crops back to 100×73.
         type B = cubecl::cuda::CudaRuntime;
         let enc: GpuEncoder<B> = GpuEncoder::new();
         let w = 100_u32;
         let h = 73_u32;
         let lossy = LossyEncoder::new(&enc, w, h);
         assert_eq!(lossy.dimensions(), (100, 73));
-        assert_eq!(lossy.padded_dimensions(), (104, 80));
+        assert_eq!(lossy.padded_dimensions(), (112, 80));
         let n = (w * h) as usize;
         let r: Vec<f32> = (0..n).map(|i| 0.1 + 0.6 * (i as f32 / n as f32)).collect();
         let g: Vec<f32> = (0..n).map(|i| 0.2 + 0.5 * (i as f32 / n as f32)).collect();
