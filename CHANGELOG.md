@@ -50,6 +50,24 @@ that's blocked on upstream API design and intentionally deferred.
   `afv_cost_grid_xyb_host` rewired to use both: 7 syncs/kind → 3.
   Measured perf on 1024² (16k blocks): 243 ms → 52 ms (4.6× speedup,
   near the original ~35 ms target). 281 lib tests passing.
+- ✅ **Standalone GPU SSE-reduction primitive** (`kernels/sse_reduce.rs`):
+  per-block masked Σ((dx²+dy²+db²)·mask). Wiring into AFV cost grid
+  was tried but measured slower (52→58 ms) — likely launch overhead
+  + 16 MB pixel upload outweigh the saved data-transfer at this
+  scale. Kept as standalone primitive for future contexts where
+  pixels are already GPU-resident from an upstream stage.
+- ✅ **Feature-gating hygiene**: `pipeline` now correctly gated behind
+  `encoder` (was implicitly assumed but failed to compile without).
+  All feature combos (no-features / cuda / cuda+encoder /
+  cuda+encoder+butteraugli-loop / cpu+encoder) now compile clean.
+- ✅ **Corpus regression test framework** (`tests/corpus_regression.rs`,
+  `corpus` cargo feature): runs `refine_and_encode_smart` on 6 fixed
+  images (4 CLIC photos + 2 gb82-sc screenshots, exercising all 4
+  `BestOfBothPath` variants), asserts butteraugli scores within 0.5%
+  of committed expectations. Safety net for future cost-model
+  experiments. Run with `cargo test --features corpus --test
+  corpus_regression`. Per CLAUDE.md 'no graceful skips': fails hard
+  if corpus tree absent.
 
 See CLAUDE.md "Architectural position vs jxl-encoder CPU" for the
 full rationale.
