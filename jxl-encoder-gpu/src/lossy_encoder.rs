@@ -1009,48 +1009,17 @@ impl<R: Runtime> LossyEncoder<R> {
         );
         mark("cost_subblock_8x8");
 
-        // AFV0-3 cost grid (one host call returns all 4 kinds packed
-        // [kind * n_blocks + b]). Reuses 8x8 pre-gathered pixels +
-        // existing mask. Persistent quant+dequant inside (commit
-        // 1ef2552c). Currently 237 ms on 1024×1024 — 60% of strat-search
-        // budget at this image size. Persistent AFV transforms would
-        // cut another ~160 ms; deferred to a follow-up.
-        let mask_host_for_afv = enc.download_plane(&g_mask);
-        let mask_block_major =
-            crate::forks::cost::repack_plane_to_blocks(&mask_host_for_afv, pw, ph, 8, 8);
-        let (afv_wx_cg, afv_wy_cg, afv_wb_cg) =
-            crate::quant_weights::afv_weights_per_channel();
-        let qac_vec_for_afv = vec![qac; nb8];
-        let afv_costs = crate::forks::afv::afv_cost_grid_xyb_host(
-            enc,
-            &crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE,
-            &bx8_full,
-            &by8_full,
-            &bb8_full,
-            &afv_wx_cg,
-            &afv_wy_cg,
-            &afv_wb_cg,
-            &qac_vec_for_afv,
-            &qac_vec_for_afv,
-            &qac_vec_for_afv,
-            &self.thresholds_x,
-            &self.thresholds_y,
-            &self.thresholds_b,
-            &mask_block_major,
-        );
-        debug_assert_eq!(afv_costs.len(), 4 * nb8);
-        // Anti-bias mul: libjxl ref AFV = 0.818. Initial 2× (=1.636)
-        // produced butteraugli 21.67 on CLIC photo — AFV picked too
-        // often. Bump 4× (=3.27) and see if quality holds.
-        let afv_anti_bias = 3.27_f32 * dist_bias;
-        let mut cost_afv0 = afv_costs[0..nb8].to_vec();
-        let mut cost_afv1 = afv_costs[nb8..2 * nb8].to_vec();
-        let mut cost_afv2 = afv_costs[2 * nb8..3 * nb8].to_vec();
-        let mut cost_afv3 = afv_costs[3 * nb8..4 * nb8].to_vec();
-        for c in cost_afv0.iter_mut() { *c *= afv_anti_bias; }
-        for c in cost_afv1.iter_mut() { *c *= afv_anti_bias; }
-        for c in cost_afv2.iter_mut() { *c *= afv_anti_bias; }
-        for c in cost_afv3.iter_mut() { *c *= afv_anti_bias; }
+        // AFV0-3 cost grid: SKIPPED. Building the cost grid takes
+        // ~175 ms on 1024×1024 but the result currently can't drive
+        // selector picks — task #39 (pack_afv_dcs / LLF-restore DC
+        // mismatch) blocks the AFV reconstruct path. Until #39 is
+        // fixed, computing the AFV cost grid is wasted work that
+        // adds ~175 ms to every strat-search call.
+        // Bind empty Vecs so the SubBlockCostGrids type-checks below.
+        let cost_afv0: Vec<f32> = Vec::new();
+        let cost_afv1: Vec<f32> = Vec::new();
+        let cost_afv2: Vec<f32> = Vec::new();
+        let cost_afv3: Vec<f32> = Vec::new();
         mark("cost_afv");
 
         // Distance-scaled anti-bias for sub-blocks (same scale as DCT16).
