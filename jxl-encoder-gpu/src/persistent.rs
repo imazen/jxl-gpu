@@ -72,7 +72,9 @@ use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::gather::{gather_blocks, scatter_blocks};
 use crate::launch::mask1x1::mask1x1;
 use crate::launch::pixel_loss::pixel_loss;
-use crate::launch::quantize::{quantize_dct8, quantize_dct8_broadcast_w};
+use crate::launch::quantize::{
+    quantize_dct8, quantize_dct8_broadcast_w, quantize_large_broadcast_w,
+};
 use crate::launch::xyb::{xyb_forward, xyb_inverse};
 
 /// Typed handle to a GPU-resident `f32` plane. Owns the underlying
@@ -1155,6 +1157,64 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Persistent-API generic large-block quantize (broadcast weights).
+    /// Same as [`Self::quantize_dct8_persistent_broadcast_w`] but for
+    /// strategies whose `coeffs_per_block` is `grid_w * grid_h` and that
+    /// have an LLF rectangle of `(llf_x, llf_y)` to be forced to 0.
+    ///
+    /// `weights_template` is a small host slice (length `grid_w *
+    /// grid_h`) — uploaded internally; the kernel broadcasts it across
+    /// all blocks. Returns quantized `GpuI32Blocks` (no host roundtrip).
+    ///
+    /// Algorithmically identical to
+    /// [`GpuEncoder::quantize_large_blocks_broadcast_w`] but eliminates
+    /// the synchronous output download.
+    #[allow(clippy::too_many_arguments)]
+    pub fn quantize_large_blocks_broadcast_w_persistent(
+        &self,
+        coeffs: &GpuBlocks<R>,
+        weights_template: &[f32],
+        qac_qm: &[f32],
+        thresholds: &[f32; 4],
+        grid_width: u32,
+        grid_height: u32,
+        llf_x: u32,
+        llf_y: u32,
+    ) -> GpuI32Blocks<R> {
+        let block_size = (grid_width * grid_height) as usize;
+        assert_eq!(coeffs.coeffs_per_block as usize, block_size);
+        assert_eq!(weights_template.len(), block_size);
+        assert_eq!(qac_qm.len() as u32, coeffs.num_blocks);
+        let n = coeffs.total_floats();
+        let h_w = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(weights_template));
+        let h_q = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
+        let h_t = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(&thresholds[..]));
+        let h_o = self.client_ref().empty(n * 4);
+        quantize_large_broadcast_w::<R>(
+            self.client_ref(),
+            coeffs.handle.clone(),
+            h_w,
+            h_q,
+            h_t,
+            h_o.clone(),
+            coeffs.num_blocks,
+            grid_width,
+            grid_height,
+            llf_x,
+            llf_y,
+        );
+        GpuI32Blocks {
+            handle: h_o,
+            num_blocks: coeffs.num_blocks,
+            coeffs_per_block: block_size as u32,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Persistent-API 3-channel DCT8 dequant. Takes quantized i32
     /// blocks for each channel + per-coefficient weights + per-block
     /// scale + CfL factors. Returns 3 `GpuBlocks` (X, Y, B) of
@@ -1436,6 +1496,50 @@ impl<R: Runtime> GpuEncoder<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Persistent quantize_large_blocks_broadcast_w must produce
+    /// identical i32 output to the non-persistent variant on both
+    /// DCT8 (8×8 grid, 1×1 LLF) and DCT16x16 (16×16 grid, 2×2 LLF)
+    /// configurations.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_quantize_large_persistent_matches_non_persistent() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        for &(gw, gh, lx, ly) in &[(8u32, 8, 1u32, 1), (16, 16, 2, 2), (8, 16, 1, 2)] {
+            let bs = (gw * gh) as usize;
+            let nb = 8u32;
+            let total = (nb as usize) * bs;
+            let coeffs: Vec<f32> = (0..total).map(|i| 0.05 + 0.13 * (i as f32 * 0.07).sin()).collect();
+            let weights: Vec<f32> = (0..bs).map(|i| 0.5 + 0.1 * i as f32).collect();
+            let qac: Vec<f32> = (0..nb).map(|i| 0.7 + 0.1 * i as f32).collect();
+            let thresholds = [0.62_f32, 0.62, 0.62, 0.62];
+
+            let q_a = enc.quantize_large_blocks_broadcast_w(
+                &coeffs, &weights, &qac, &thresholds, gw, gh, lx, ly,
+            );
+
+            let g_c = enc.upload_blocks(&coeffs, nb, (gw * gh) as u32);
+            let g_q = enc.quantize_large_blocks_broadcast_w_persistent(
+                &g_c, &weights, &qac, &thresholds, gw, gh, lx, ly,
+            );
+            // Download GpuI32Blocks; reuse client.
+            let bytes = enc
+                .client_ref()
+                .read_one(g_q.handle.clone())
+                .expect("read q persistent");
+            let q_b: Vec<i32> = i32::from_bytes(&bytes).to_vec();
+
+            assert_eq!(q_a.len(), q_b.len(), "(gw={gw}, gh={gh}) length mismatch");
+            for (i, (a, b)) in q_a.iter().zip(&q_b).enumerate() {
+                assert_eq!(
+                    a, b,
+                    "(gw={gw}, gh={gh}) q[{i}] differs: persistent={b} vs non={a}"
+                );
+            }
+        }
+    }
 
     /// Persistent entropy_coeffs_pixel_blocks_broadcast_w must produce
     /// stats and error_coeffs identical to the non-persistent variant.
