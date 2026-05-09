@@ -1469,7 +1469,7 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
     xyb_b: &[f32],
     padded_width: usize,
     padded_height: usize,
-    mask1x1: &[f32],
+    mask1x1: &crate::persistent::GpuPlane<R>,
     weights_dct8_x: &[f32],
     weights_dct8_y: &[f32],
     weights_dct8_b: &[f32],
@@ -1490,12 +1490,11 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
     scaled_constants: (f32, f32, f32),
 ) -> (Vec<f32>, Vec<f32>) {
     debug_assert_eq!(xyb_x.len(), padded_width * padded_height);
-    debug_assert_eq!(mask1x1.len(), padded_width * padded_height);
     let xsize_blocks_8 = padded_width / 8;
     let ysize_blocks_8 = padded_height / 8;
 
-    // Upload mask once (shared across both strategies).
-    let g_mask = enc.upload_plane(mask1x1, padded_width as u32, padded_height as u32);
+    // Mask is already on GPU (caller-supplied GpuPlane).
+    let g_mask = mask1x1;
 
     // DCT8 cost grid: host repack + upload, then persistent pipeline.
     let bx8 = repack_plane_to_blocks(xyb_x, padded_width, padded_height, 8, 8);
@@ -1531,7 +1530,7 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
         quant_b,
         ytox,
         ytob,
-        &g_mask,
+        g_mask,
         &mask_row_base_8,
         scaled_constants,
         dct8_entropy_mul,
@@ -1577,7 +1576,7 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
         quant_b,
         ytox,
         ytob,
-        &g_mask,
+        g_mask,
         &mask_row_base_16,
         scaled_constants,
         dct16x16_entropy_mul,
@@ -1613,7 +1612,7 @@ pub fn strategy_search_costs_dct16x8_or_8x16<R: Runtime>(
     xyb_b: &[f32],
     padded_width: usize,
     padded_height: usize,
-    mask1x1: &[f32],
+    mask1x1: &crate::persistent::GpuPlane<R>,
     raw_strategy: u8,
     weights_x: &[f32],
     weights_y: &[f32],
@@ -1645,7 +1644,7 @@ pub fn strategy_search_costs_dct16x8_or_8x16<R: Runtime>(
     let g_bx = enc.upload_blocks(&bx_p, n_blocks as u32, coeff_count);
     let g_by = enc.upload_blocks(&by_p, n_blocks as u32, coeff_count);
     let g_bb = enc.upload_blocks(&bb_p, n_blocks as u32, coeff_count);
-    let g_mask = enc.upload_plane(mask1x1, padded_width as u32, padded_height as u32);
+    let g_mask = mask1x1; // caller-supplied GpuPlane.
     let mask_row_base: Vec<u32> = (0..n_blocks)
         .map(|i| {
             let bx_i = i % bx;
@@ -1674,7 +1673,7 @@ pub fn strategy_search_costs_dct16x8_or_8x16<R: Runtime>(
         quant_b,
         ytox,
         ytob,
-        &g_mask,
+        g_mask,
         &mask_row_base,
         scaled_constants,
         entropy_mul,

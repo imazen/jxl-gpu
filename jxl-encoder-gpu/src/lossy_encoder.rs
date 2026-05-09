@@ -813,18 +813,20 @@ impl<R: Runtime> LossyEncoder<R> {
         let g_b = enc.upload_plane(&b_pad, self.padded_width, self.padded_height);
         mark("pad_upload");
 
-        // Stage 2: XYB + gaborish (GPU) → download to host
+        // Stage 2: XYB + gaborish (GPU)
         let (xx, xy, xb) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
         let xx_g = enc.gaborish_5x5_persistent(&xx, &self.weights);
         let xy_g = enc.gaborish_5x5_persistent(&xy, &self.weights);
         let xb_g = enc.gaborish_5x5_persistent(&xb, &self.weights);
+
+        // Stage 3: mask1x1 from Y channel — keep on GPU (cost grids
+        // consume it as a GpuPlane), and download to host so the
+        // existing host-repack cost-grid path still has spatial XYB.
+        let g_mask = enc.mask1x1_persistent(&xy_g);
         let xyb_x: Vec<f32> = enc.download_plane(&xx_g);
         let xyb_y: Vec<f32> = enc.download_plane(&xy_g);
         let xyb_b: Vec<f32> = enc.download_plane(&xb_g);
         mark("xyb_gab");
-
-        // Stage 3: mask1x1 from Y channel
-        let mask1x1 = enc.mask1x1_field(&xyb_y, self.padded_width, self.padded_height);
         mark("mask1x1");
 
         // Stage 4: cost grids — DCT8, DCT16x16, DCT16x8, DCT8x16
@@ -851,7 +853,7 @@ impl<R: Runtime> LossyEncoder<R> {
             &xyb_b,
             pw,
             ph,
-            &mask1x1,
+            &g_mask,
             &dct8_x,
             &dct8_y,
             &dct8_b,
@@ -880,7 +882,7 @@ impl<R: Runtime> LossyEncoder<R> {
             &xyb_b,
             pw,
             ph,
-            &mask1x1,
+            &g_mask,
             RAW_STRATEGY_DCT16X8,
             &dct16x8_x,
             &dct16x8_y,
@@ -903,7 +905,7 @@ impl<R: Runtime> LossyEncoder<R> {
             &xyb_b,
             pw,
             ph,
-            &mask1x1,
+            &g_mask,
             RAW_STRATEGY_DCT8X16,
             &dct16x8_x,
             &dct16x8_y,
