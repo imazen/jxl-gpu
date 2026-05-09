@@ -141,6 +141,44 @@ each value matches the upstream literal exactly): `MASK_CHANNEL_OFFSET`,
 **Total G5.1-compliant `*_matches_upstream` tests: 16** plus 9
 LLF restoration helpers transitively validated via roundtrip.
 
+### LossyEncoder strat-search facade (2026-05-08)
+
+`LossyEncoder::encode_one_with_strategy_search_dct8_16` ties the
+Phase 3 cost grids + Phase 4 facade + Phase 5 forks into one
+end-to-end public method. 15 of 27 strategies wired and selectable:
+DCT8 / DCT4×4 / DCT4×8 / DCT8×4 / IDENTITY / DCT2×2 / DCT16×16 /
+DCT16×8 / DCT8×16 / DCT32×32 / DCT32×16 / DCT16×32 / DCT64×64 /
+DCT64×32 / DCT32×64. AFV0-3 cost grids exist (Phase 3) but
+SubStrategy enum + recursive lowering not yet extended.
+
+**Performance** (CLIC 1024×1024 @ d=1.0): 170 ms per call
+(1.8× from 305 ms baseline). Cost-grid stage went 234 ms → 41 ms
+(5.6×) via the persistent GPU pipeline (commit `13be0049`).
+
+**Quality**: butteraugli at parity with uniform-qac across
+d ∈ {0.5, 1.0, 2.0, 4.0}. Distance-scaled anti-bias muls
+(`bias = 1 + max(0, d-1) * 0.6`, with 1×/1.5×/2× factors for
+DCT16/32/64 families; sub-blocks at base) prevent the
+over-selection that produced butteraugli 9.2 at d=4 with fixed
+muls (commit `ba9eed75` debug).
+
+**Persistent GPU pipeline**: 6 new persistent GpuEncoder kernels
+landed (entropy_coeffs_pixel_blocks_broadcast_w_persistent,
+pixel_loss_blocks_persistent, quantize_large_blocks_broadcast_w_persistent,
+dequant_strategy_persistent + _dct8 variant, identity_persistent,
+dct2x2_persistent — forward + inverse where applicable). Plus
+strategy-aware dispatchers `apply_dct/idct_batch_persistent`.
+
+**Selector threading**: select_partitions_32x32_with_extras16 and
+select_partitions_64x64_with_extras16 thread CostGrids16x16 through
+the higher-tier picks so sub-block strategies can be considered
+inside Sub16x16 partitions.
+
+**Selectivity validated**: at d=1.0 on CLIC photo, 16100 DCT8 picks
+(98.4%), 59 DCT16x16 (1.4% area), 3 DCT32x32 (0.3% area). All other
+strategies zero — strat-search picks larger transforms only where
+they genuinely win.
+
 
 
 **estimate_entropy_full orchestrator (DCT8 + strategy-generic) landed
