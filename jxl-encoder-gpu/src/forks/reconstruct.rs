@@ -2156,6 +2156,115 @@ mod tests {
         }
     }
 
+    /// Isolated AFV reconstruct diagnostic. Forces all blocks to AFV0
+    /// (or AFV1/2/3) on uniform M=1.0 input and measures RMSE. If the
+    /// RMSE is high, the AFV reconstruct branch in
+    /// encode_and_reconstruct_mixed_strategy_single_channel has a bug
+    /// (kind, basis, dequant qac, scatter, etc.). For uniform input
+    /// the DC reconstruction should be near-perfect.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_afv_isolated_reconstruct_uniform_input() {
+        use crate::forks::transform::{
+            coeff_count_per_strategy, RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2,
+            RAW_STRATEGY_AFV3,
+        };
+        use crate::pipeline::StrategyAssignment;
+        use crate::quant_weights::afv_weights_per_channel;
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        let pw = 32_usize;
+        let ph = 32_usize;
+        let xb8 = pw / 8;
+        let yb8 = ph / 8;
+        let nb8 = xb8 * yb8;
+
+        // Smooth gradient input — reveals reconstruction bugs that
+        // uniform input hides (uniform DCT-transforms-back-to-DC means
+        // all AC coeffs are 0 and the output is just DC).
+        let m = 0.5_f32;
+        let xyb: Vec<f32> = (0..pw * ph)
+            .map(|i| {
+                let x = (i % pw) as f32 / pw as f32;
+                let y = (i / pw) as f32 / ph as f32;
+                0.4 + 0.15 * x + 0.15 * y
+            })
+            .collect();
+        let dc_grid = compute_dc_grid_per_8x8_block(&xyb, pw, ph);
+        let qac = alloc::vec![1.0_f32; nb8];
+        let thresholds = [0.0_f32; 4];
+
+        let (afv_x, afv_y, afv_b) = afv_weights_per_channel();
+        let weights_for = move |s: u8| -> Vec<f32> {
+            match s {
+                RAW_STRATEGY_AFV0
+                | RAW_STRATEGY_AFV1
+                | RAW_STRATEGY_AFV2
+                | RAW_STRATEGY_AFV3 => afv_y.to_vec(),
+                _ => alloc::vec![1.0_f32; coeff_count_per_strategy(s)],
+            }
+        };
+
+        // Reference: all-DCT8 on the same gradient (known good).
+        {
+            let assignments: Vec<StrategyAssignment> = (0..yb8)
+                .flat_map(|by| {
+                    (0..xb8).map(move |bx| StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: crate::forks::transform::RAW_STRATEGY_DCT,
+                    })
+                })
+                .collect();
+            let mut out = alloc::vec![0.0_f32; pw * ph];
+            encode_and_reconstruct_mixed_strategy_single_channel(
+                &enc, &xyb, pw, ph, &assignments, &weights_for, &qac, &thresholds,
+                &dc_grid, 1, &mut out,
+            );
+            let mut sumsq = 0.0_f64;
+            for i in 0..pw * ph {
+                sumsq += ((out[i] - xyb[i]) as f64).powi(2);
+            }
+            let rmse = (sumsq / (pw * ph) as f64).sqrt();
+            std::println!("[afv-recon-iso] DCT8 ref:  RMSE={rmse:.6e}");
+        }
+
+        for (kind_name, kind_strat) in [
+            ("AFV0", RAW_STRATEGY_AFV0),
+            ("AFV1", RAW_STRATEGY_AFV1),
+            ("AFV2", RAW_STRATEGY_AFV2),
+            ("AFV3", RAW_STRATEGY_AFV3),
+        ] {
+            let assignments: Vec<StrategyAssignment> = (0..yb8)
+                .flat_map(|by| {
+                    (0..xb8).map(move |bx| StrategyAssignment {
+                        bx,
+                        by,
+                        raw_strategy: kind_strat,
+                    })
+                })
+                .collect();
+            let mut out = alloc::vec![0.0_f32; pw * ph];
+            encode_and_reconstruct_mixed_strategy_single_channel(
+                &enc, &xyb, pw, ph, &assignments, &weights_for, &qac, &thresholds,
+                &dc_grid, 1, &mut out,
+            );
+            let mut sumsq = 0.0_f64;
+            let mut min_v = f32::INFINITY;
+            let mut max_v = f32::NEG_INFINITY;
+            for i in 0..pw * ph {
+                sumsq += ((out[i] - xyb[i]) as f64).powi(2);
+                min_v = min_v.min(out[i]);
+                max_v = max_v.max(out[i]);
+            }
+            let rmse = (sumsq / (pw * ph) as f64).sqrt();
+            std::println!(
+                "[afv-recon-iso] {kind_name}: RMSE={rmse:.6e} out range=[{min_v:.4},{max_v:.4}]"
+            );
+        }
+    }
+
     /// Diagnostic for the DCT32x32 quality regression: force ALL blocks
     /// to DCT32x32 on a smooth gradient, reconstruct, and compare RMSE
     /// against an all-DCT8 reconstruction. Both should give similar
