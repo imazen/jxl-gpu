@@ -23,16 +23,28 @@ that's blocked on upstream API design and intentionally deferred.
   strat-search pipelines), but not compared against the CPU encoder's
   bitstream-decoded output.
 
-**Crate-local work the handoff doesn't block:**
-- Group-level streaming output (256×256 groups; emit each group's
-  coefficients + per-block metadata as soon as GPU-ready) — lets the
-  future CPU consumer pipeline tokenize/ANS work concurrent with later
-  GPU groups.
-- GPU histogram counting (atomic-add per token bucket) and clustering
-  (pair-merge / k-means style) — both SIMT-friendly. The actual ANS
-  table build + bit-pack stays CPU.
-- Persistent AFV transforms (#38) — would let us re-enable the AFV
-  cost grid (currently skipped to save 175 ms).
+**Crate-local work the handoff doesn't block (started May 9 2026):**
+- ✅ **Group geometry + per-group partitioning primitives** (`groups`
+  module). `GroupGeometry::for_padded`, `GroupBounds`, per-group
+  `gather_per_block_f32`, `partition_assignments`. Debug-asserts no
+  assignment crosses a group boundary. 7 tests cover aligned + misaligned
+  + edge groups + DCT64x64 (largest transform) staying inside groups.
+- ✅ **GPU histogram counting** via per-bucket atomic-adds
+  (`GpuEncoder::histogram_count_pow2`, `_persistent` variant).
+  bucket_count must be power-of-2; tokens masked with bucket_count-1
+  to fold OOB values without a branch (matches hybrid-uint wrap-around).
+  3 tests cover bit-exact match vs host reference, empty input, and
+  non-power-of-2 rejection.
+- 🚧 Per-group GPU output streaming (use `groups` partitioning to
+  emit a `GroupOutput` callback per group as soon as GPU-ready —
+  lets the future CPU consumer pipeline tokenize/ANS work concurrent
+  with later GPU groups). Geometry/partitioning is in place; the
+  actual streaming dispatcher is the next step.
+- 🚧 GPU histogram clustering (pair-merge / k-means-style — SIMT-
+  friendly). Histogram counting primitive in place; clustering
+  builds on top.
+- 🚧 Persistent AFV transforms (#38) — would let us re-enable the
+  AFV cost grid (currently skipped to save 175 ms).
 
 See CLAUDE.md "Architectural position vs jxl-encoder CPU" for the
 full rationale.
