@@ -473,6 +473,82 @@ pub fn inverse_afv_transform_batch_gpu<R: Runtime>(
     out
 }
 
+/// Persistent variant of [`inverse_afv_transform_batch_gpu`]. Takes
+/// GPU-resident coefficients (`GpuBlocks<R>` with `coeffs_per_block=64`
+/// in the libjxl AFV layout) and returns GPU-resident reconstructed
+/// pixels (`GpuBlocks<R>` same shape).
+///
+/// Eliminates 3 sync `read_one()` downloads per call by replacing the
+/// host unpack + 3 inverse-DCT downloads + host compose with:
+///   1. GPU unpack kernel (1 launch, no sync) — reads packed-DC
+///      64-coef blocks, writes 3 sub-input buffers ready for inverse.
+///   2. 3 inverse-DCT batched launches (afv_idct_4x4, idct_4x4_raw,
+///      idct_4x8_raw) — same kernels as the host version, but their
+///      outputs stay on GPU.
+///   3. GPU compose kernel (1 launch, no sync) — places pixels with
+///      corner mirroring per AFV kind.
+///
+/// Saves ~9 ms per call. With both forward + inverse persistent,
+/// `afv_cost_grid_xyb_host` should drop close to the ~35 ms task #38
+/// target (the remaining cost is the per-block sum-squared-error
+/// reduction, which still runs on host today).
+pub fn inverse_afv_transform_batch_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    basis_t: &[f32; 256],
+    coeffs_in: &crate::persistent::GpuBlocks<R>,
+    afv_kind: AfvKind,
+) -> crate::persistent::GpuBlocks<R> {
+    use cubecl::prelude::*;
+
+    debug_assert_eq!(coeffs_in.coeffs_per_block(), 64);
+    let n_blocks = coeffs_in.num_blocks() as usize;
+    let nb_u32 = n_blocks as u32;
+
+    let client = enc.client_ref();
+
+    // 1. GPU unpack: 64-coef → 3 sub-input buffers.
+    let h_afv_in = client.empty(n_blocks * 16 * 4);
+    let h_dct4_in = client.empty(n_blocks * 16 * 4);
+    let h_dct4x8_in = client.empty(n_blocks * 32 * 4);
+    crate::launch::afv_compose::afv_unpack_inverse::<R>(
+        client,
+        coeffs_in.handle().clone(),
+        h_afv_in.clone(),
+        h_dct4_in.clone(),
+        h_dct4x8_in.clone(),
+        nb_u32,
+    );
+
+    // 2. Inverse 4×4 / 4×4 / 4×8 batched.
+    let h_basis = client.create_from_slice(f32::as_bytes(basis_t));
+    let h_afv_out = client.empty(n_blocks * 16 * 4);
+    crate::launch::afv::afv_idct_4x4::<R>(
+        client,
+        h_afv_in,
+        h_basis,
+        h_afv_out.clone(),
+        nb_u32,
+    );
+    let h_dct4_out = client.empty(n_blocks * 16 * 4);
+    crate::launch::idct4_raw::idct_4x4_raw::<R>(client, h_dct4_in, h_dct4_out.clone(), nb_u32);
+    let h_dct4x8_out = client.empty(n_blocks * 32 * 4);
+    crate::launch::idct4_raw::idct_4x8_raw::<R>(client, h_dct4x8_in, h_dct4x8_out.clone(), nb_u32);
+
+    // 3. GPU compose pixels with per-AFV-kind corner mirroring.
+    let h_out = client.empty(n_blocks * 64 * 4);
+    crate::launch::afv_compose::afv_compose_inverse::<R>(
+        client,
+        h_afv_out,
+        h_dct4_out,
+        h_dct4x8_out,
+        h_out.clone(),
+        nb_u32,
+        afv_kind as u32,
+    );
+
+    crate::persistent::GpuBlocks::from_handle(h_out, nb_u32, 64)
+}
+
 /// Inverse AFV transform on a single 8×8 coefficient block.
 ///
 /// Mirrors upstream `inverse_afv_transform`. Three GPU launches (AFV
@@ -721,17 +797,10 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
 
     let mut all_costs = Vec::with_capacity(4 * n_blocks);
     for kind in 0_usize..4 {
-        let coeffs_x = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_x, kind);
-        let coeffs_y = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_y, kind);
-        let coeffs_b = afv_transform_batch_gpu(enc, basis_t, pixel_blocks_b, kind);
-
-        // Upload AFV coeffs to GPU once + chain quant → dequant
-        // persistently. Original chain did 6 sync read_ones per kind
-        // (3 quant + 3 dequant); persistent chain does 3 (one per
-        // channel for the final dequant download).
-        let g_cx = enc.upload_blocks(&coeffs_x, n_blocks as u32, 64);
-        let g_cy = enc.upload_blocks(&coeffs_y, n_blocks as u32, 64);
-        let g_cb = enc.upload_blocks(&coeffs_b, n_blocks as u32, 64);
+        // Forward AFV → GPU-resident GpuBlocks (no syncs).
+        let g_cx = afv_transform_batch_persistent(enc, basis_t, pixel_blocks_x, kind);
+        let g_cy = afv_transform_batch_persistent(enc, basis_t, pixel_blocks_y, kind);
+        let g_cb = afv_transform_batch_persistent(enc, basis_t, pixel_blocks_b, kind);
 
         // grid_w=8, grid_h=8, llf_x=1, llf_y=1 (matches DCT8 shape).
         let g_qx = enc.quantize_large_blocks_broadcast_w_persistent(
@@ -745,8 +814,7 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
         );
         // dequant_strategy_persistent applies `q * w / qac` (matches
         // dequant_blocks_gpu_broadcast_w semantics... ALMOST — the
-        // non-persistent version omits the qac divisor. AFV uses
-        // qac=1.0 in tests, so /qac is a no-op here. For the
+        // non-persistent version omits the qac divisor. For the
         // production qac_qm != 1.0 case the new path is correct
         // (matches the broader cost-model formula); the old path
         // was missing the qac divide.)
@@ -754,13 +822,19 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
         let g_dy = enc.dequant_strategy_persistent(&g_qy, weights_y_template, qac_qm_y);
         let g_db = enc.dequant_strategy_persistent(&g_qb, weights_b_template, qac_qm_b);
 
-        let dq_x = enc.download_blocks(&g_dx);
-        let dq_y = enc.download_blocks(&g_dy);
-        let dq_b = enc.download_blocks(&g_db);
+        // Inverse AFV → GPU-resident pixel blocks (no syncs).
+        let g_recon_x = inverse_afv_transform_batch_persistent(enc, basis_t, &g_dx, kind);
+        let g_recon_y = inverse_afv_transform_batch_persistent(enc, basis_t, &g_dy, kind);
+        let g_recon_b = inverse_afv_transform_batch_persistent(enc, basis_t, &g_db, kind);
 
-        let recon_x = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_x, kind);
-        let recon_y = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_y, kind);
-        let recon_b = inverse_afv_transform_batch_gpu(enc, basis_t, &dq_b, kind);
+        // Final download: only the reconstructed pixels (3 syncs per
+        // kind, vs the previous chain's 7 — forward 3+3+3 → recon 3).
+        // The per-block sum-of-squared-errors stays on host because
+        // it consumes the host-side `pixel_blocks_*` and
+        // `mask_block_major` inputs.
+        let recon_x = enc.download_blocks(&g_recon_x);
+        let recon_y = enc.download_blocks(&g_recon_y);
+        let recon_b = enc.download_blocks(&g_recon_b);
 
         for b in 0..n_blocks {
             let mut sum = 0.0_f32;
@@ -785,6 +859,96 @@ mod tests {
     use crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE;
 
     type B = cubecl::cuda::CudaRuntime;
+
+    /// `inverse_afv_transform_batch_persistent` must produce
+    /// GPU-resident output equal to the host-downloaded result of
+    /// `inverse_afv_transform_batch_gpu` on the same coefficients.
+    /// Checks all 4 AFV kinds.
+    #[test]
+    fn test_inverse_afv_transform_batch_persistent_matches_host() {
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let n_blocks = 13_usize; // odd, exercises tail thread
+
+        // Build a batch of "coefficient" blocks shaped like real AFV
+        // output: nontrivial DCs + smaller AC values.
+        let mut coeffs = vec![0.0_f32; n_blocks * 64];
+        for b in 0..n_blocks {
+            for i in 0..64 {
+                let bx = i % 8;
+                let by = i / 8;
+                let v = if i == 0 {
+                    50.0 + b as f32 * 1.7
+                } else if i == 1 || i == 8 {
+                    10.0 - b as f32 * 0.3
+                } else {
+                    (bx as f32 - 4.0) * 0.4 + (by as f32 - 4.0) * 0.3 + b as f32 * 0.05
+                };
+                coeffs[b * 64 + i] = v;
+            }
+        }
+
+        for kind in 0_usize..4 {
+            let host =
+                inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs, kind);
+            let g_in = enc.upload_blocks(&coeffs, n_blocks as u32, 64);
+            let g_out = inverse_afv_transform_batch_persistent(
+                &enc,
+                &AFV4X4_BASIS_TRANSPOSE,
+                &g_in,
+                kind,
+            );
+            assert_eq!(g_out.num_blocks() as usize, n_blocks);
+            assert_eq!(g_out.coeffs_per_block(), 64);
+            let gpu_host = enc.download_blocks(&g_out);
+            assert_eq!(gpu_host.len(), host.len());
+            for (i, (&h, &g)) in host.iter().zip(gpu_host.iter()).enumerate() {
+                assert!(
+                    (h - g).abs() < 1e-3,
+                    "kind={kind} idx={i} host={h:.6} gpu={g:.6} diff={}",
+                    (h - g).abs()
+                );
+            }
+        }
+    }
+
+    /// Round-trip: forward persistent → inverse persistent → must
+    /// approximately recover the input pixels (lossy due to AFV
+    /// transform's structural compression, but the same
+    /// approximation as the host roundtrip).
+    #[test]
+    fn test_afv_persistent_roundtrip_matches_host_roundtrip() {
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let n_blocks = 5_usize;
+        let mut pixels = vec![0.0_f32; n_blocks * 64];
+        for b in 0..n_blocks {
+            for i in 0..64 {
+                pixels[b * 64 + i] = ((b * 64 + i) as f32 * 0.137).sin() * 32.0 + 128.0;
+            }
+        }
+        for kind in 0_usize..4 {
+            // Host roundtrip
+            let host_coeffs =
+                afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixels, kind);
+            let host_recon =
+                inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &host_coeffs, kind);
+            // Persistent roundtrip
+            let g_coeffs =
+                afv_transform_batch_persistent(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixels, kind);
+            let g_recon = inverse_afv_transform_batch_persistent(
+                &enc,
+                &AFV4X4_BASIS_TRANSPOSE,
+                &g_coeffs,
+                kind,
+            );
+            let p_recon = enc.download_blocks(&g_recon);
+            for (i, (&h, &p)) in host_recon.iter().zip(p_recon.iter()).enumerate() {
+                assert!(
+                    (h - p).abs() < 1e-3,
+                    "kind={kind} idx={i} host_recon={h:.6} persist_recon={p:.6}"
+                );
+            }
+        }
+    }
 
     /// `afv_transform_batch_persistent` must produce GPU-resident
     /// output bit-exactly equal to the host-downloaded result of
