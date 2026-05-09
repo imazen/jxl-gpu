@@ -257,6 +257,59 @@ pub fn apply_dct_batch_gpu<R: Runtime>(
     }
 }
 
+/// Persistent variant of [`apply_dct_batch_gpu`]: takes a pre-uploaded
+/// `GpuBlocks` of pixel-domain blocks and returns a `GpuBlocks` of
+/// coefficient-domain blocks for the requested strategy. No host
+/// round-trips, so the caller can chain into entropy/IDCT/loss
+/// without paying the per-call sync.
+pub fn apply_dct_batch_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    blocks: &crate::persistent::GpuBlocks<R>,
+    raw_strategy: u8,
+) -> crate::persistent::GpuBlocks<R> {
+    match raw_strategy {
+        RAW_STRATEGY_DCT => enc.dct_8x8_persistent(blocks),
+        RAW_STRATEGY_DCT4X8 => enc.dct_4x8_persistent(blocks),
+        RAW_STRATEGY_DCT8X4 => enc.dct_8x4_persistent(blocks),
+        RAW_STRATEGY_DCT4X4 => enc.dct_4x4_persistent(blocks),
+        RAW_STRATEGY_DCT16X8 => enc.dct_16x8_persistent(blocks),
+        RAW_STRATEGY_DCT8X16 => enc.dct_8x16_persistent(blocks),
+        RAW_STRATEGY_DCT16X16 => enc.dct_16x16_persistent(blocks),
+        RAW_STRATEGY_DCT32X16 => enc.dct_32x16_persistent(blocks),
+        RAW_STRATEGY_DCT16X32 => enc.dct_16x32_persistent(blocks),
+        RAW_STRATEGY_DCT32X32 => enc.dct_32x32_persistent(blocks),
+        RAW_STRATEGY_DCT64X32 => enc.dct_64x32_persistent(blocks),
+        RAW_STRATEGY_DCT32X64 => enc.dct_32x64_persistent(blocks),
+        RAW_STRATEGY_DCT64X64 => enc.dct_64x64_persistent(blocks),
+        _ => panic!("apply_dct_batch_persistent: unsupported strategy {raw_strategy}"),
+    }
+}
+
+/// Persistent variant of [`apply_idct_batch_gpu`]. Mirrors
+/// [`apply_dct_batch_persistent`] for the inverse direction.
+pub fn apply_idct_batch_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    coeffs: &crate::persistent::GpuBlocks<R>,
+    raw_strategy: u8,
+) -> crate::persistent::GpuBlocks<R> {
+    match raw_strategy {
+        RAW_STRATEGY_DCT => enc.idct_8x8_persistent(coeffs),
+        RAW_STRATEGY_DCT4X8 => enc.idct_4x8_persistent(coeffs),
+        RAW_STRATEGY_DCT8X4 => enc.idct_8x4_persistent(coeffs),
+        RAW_STRATEGY_DCT4X4 => enc.idct_4x4_persistent(coeffs),
+        RAW_STRATEGY_DCT16X8 => enc.idct_16x8_persistent(coeffs),
+        RAW_STRATEGY_DCT8X16 => enc.idct_8x16_persistent(coeffs),
+        RAW_STRATEGY_DCT16X16 => enc.idct_16x16_persistent(coeffs),
+        RAW_STRATEGY_DCT32X16 => enc.idct_32x16_persistent(coeffs),
+        RAW_STRATEGY_DCT16X32 => enc.idct_16x32_persistent(coeffs),
+        RAW_STRATEGY_DCT32X32 => enc.idct_32x32_persistent(coeffs),
+        RAW_STRATEGY_DCT64X32 => enc.idct_64x32_persistent(coeffs),
+        RAW_STRATEGY_DCT32X64 => enc.idct_32x64_persistent(coeffs),
+        RAW_STRATEGY_DCT64X64 => enc.idct_64x64_persistent(coeffs),
+        _ => panic!("apply_idct_batch_persistent: unsupported strategy {raw_strategy}"),
+    }
+}
+
 /// Batched IDCT dispatch on the GPU. All `coeff_blocks` MUST come from
 /// the same `raw_strategy` (one contiguous buffer of
 /// `coeff_count_per_strategy(raw_strategy)` floats per block).

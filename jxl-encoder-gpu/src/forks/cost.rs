@@ -786,6 +786,161 @@ pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
     }
 }
 
+/// Persistent-API variant of [`estimate_entropy_full_dct8_batch_gpu`]:
+/// takes pre-uploaded `GpuBlocks` for the per-channel pixel blocks and
+/// a `GpuPlane` for the mask, keeping every intermediate buffer
+/// (forward DCT coeffs, error coeffs, IDCT pixel errors) on GPU. Only
+/// the final per-block cost grid (`n_blocks * 4` stats + `n_blocks`
+/// f64 losses per channel) is downloaded.
+///
+/// Saves the 8 sync `read_one()` per channel (~10ms each at 1MB) that
+/// the non-persistent variant pays — at 1024×1024 with DCT8, expect
+/// ~80ms savings per call.
+///
+/// Returns the same `Vec<f32>` cost grid as
+/// [`estimate_entropy_full_dct8_batch_gpu`].
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    pixel_blocks_x: &crate::persistent::GpuBlocks<R>,
+    pixel_blocks_y: &crate::persistent::GpuBlocks<R>,
+    pixel_blocks_b: &crate::persistent::GpuBlocks<R>,
+    weights_x_per_block: &[f32; 64],
+    weights_y_per_block: &[f32; 64],
+    weights_b_per_block: &[f32; 64],
+    inv_weights_x_per_block: &[f32; 64],
+    inv_weights_y_per_block: &[f32; 64],
+    inv_weights_b_per_block: &[f32; 64],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    mask_plane: &crate::persistent::GpuPlane<R>,
+    mask_row_base: &[u32],
+    scaled_constants: (f32, f32, f32),
+    entropy_mul: f32,
+    mode: CostMode,
+) -> Vec<f32> {
+    use crate::forks::cfl::{ytob_ratio, ytox_ratio};
+
+    let n_blocks = pixel_blocks_x.num_blocks() as usize;
+    debug_assert_eq!(pixel_blocks_x.num_blocks(), pixel_blocks_y.num_blocks());
+    debug_assert_eq!(pixel_blocks_x.num_blocks(), pixel_blocks_b.num_blocks());
+    debug_assert_eq!(pixel_blocks_x.coeffs_per_block(), 64);
+    debug_assert_eq!(mask_row_base.len(), n_blocks);
+    let (_info_loss_mul, cost_delta, _zeros_mul) = scaled_constants;
+
+    // Step 1: forward DCT8 each channel (no sync).
+    let dct_x = enc.dct_8x8_persistent(pixel_blocks_x);
+    let dct_y = enc.dct_8x8_persistent(pixel_blocks_y);
+    let dct_b = enc.dct_8x8_persistent(pixel_blocks_b);
+
+    let weights_x_t: &[f32] = weights_x_per_block.as_slice();
+    let weights_y_t: &[f32] = weights_y_per_block.as_slice();
+    let weights_b_t: &[f32] = weights_b_per_block.as_slice();
+    let inv_x_t: &[f32] = inv_weights_x_per_block.as_slice();
+    let inv_y_t: &[f32] = inv_weights_y_per_block.as_slice();
+    let inv_b_t: &[f32] = inv_weights_b_per_block.as_slice();
+
+    // Step 2: per-channel entropy + error-coef writeback (no sync).
+    let (g_y_stats, g_y_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+        &dct_y, &dct_y, weights_y_t, inv_y_t, 0.0, quant_y, cost_delta,
+    );
+    let (g_x_stats, g_x_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+        &dct_x,
+        &dct_y,
+        weights_x_t,
+        inv_x_t,
+        ytox_ratio(ytox),
+        quant_x,
+        cost_delta,
+    );
+    let (g_b_stats, g_b_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+        &dct_b,
+        &dct_y,
+        weights_b_t,
+        inv_b_t,
+        ytob_ratio(ytob),
+        quant_b,
+        cost_delta,
+    );
+
+    // Step 3: IDCT of error coefficients per channel (no sync).
+    let g_pix_err_x = enc.idct_8x8_persistent(&g_x_err);
+    let g_pix_err_y = enc.idct_8x8_persistent(&g_y_err);
+    let g_pix_err_b = enc.idct_8x8_persistent(&g_b_err);
+
+    // Step 4: per-channel masked 8th-power pixel loss (no sync).
+    let g_loss_x = enc.pixel_loss_blocks_persistent(
+        &g_pix_err_x,
+        mask_plane,
+        mask_row_base,
+        MASK_CHANNEL_OFFSET[0],
+        8,
+        8,
+    );
+    let g_loss_y = enc.pixel_loss_blocks_persistent(
+        &g_pix_err_y,
+        mask_plane,
+        mask_row_base,
+        MASK_CHANNEL_OFFSET[1],
+        8,
+        8,
+    );
+    let g_loss_b = enc.pixel_loss_blocks_persistent(
+        &g_pix_err_b,
+        mask_plane,
+        mask_row_base,
+        MASK_CHANNEL_OFFSET[2],
+        8,
+        8,
+    );
+
+    // Step 5: now download stats + losses (only the small final
+    // outputs — no intermediate downloads).
+    let x_stats = enc.download_blocks(&g_x_stats);
+    let y_stats = enc.download_blocks(&g_y_stats);
+    let b_stats = enc.download_blocks(&g_b_stats);
+    let loss_x = enc.download_blocks_f64(&g_loss_x);
+    let loss_y = enc.download_blocks_f64(&g_loss_y);
+    let loss_b = enc.download_blocks_f64(&g_loss_b);
+
+    // Step 6: combine per-channel losses via CHANNEL_MUL (host).
+    let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
+
+    // Step 7: extract per-block entropy from each channel.
+    let entropy_x = extract_per_block_entropy(&x_stats, n_blocks);
+    let entropy_y = extract_per_block_entropy(&y_stats, n_blocks);
+    let entropy_b = extract_per_block_entropy(&b_stats, n_blocks);
+
+    // Step 8: final cost — formula selector.
+    match mode {
+        CostMode::Simple => {
+            let entropy_total = sum_per_block_entropy_3channel(&entropy_x, &entropy_y, &entropy_b);
+            per_block_total_cost(&entropy_total, &pixel_loss_total, entropy_mul)
+        }
+        CostMode::Upstream { quant_for_coeffs } => {
+            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            per_block_upstream_cost(
+                &entropy_x,
+                &entropy_y,
+                &entropy_b,
+                &nzeros_x,
+                &nzeros_y,
+                &nzeros_b,
+                &pixel_loss_total,
+                entropy_mul,
+                scaled_constants,
+                quant_for_coeffs,
+                64,
+            )
+        }
+    }
+}
+
 /// Strategy-generic per-block cost evaluator — same shape as
 /// [`estimate_entropy_full_dct8_batch_gpu`] but takes a
 /// `raw_strategy` parameter so it works for any DCT family
