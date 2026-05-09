@@ -781,7 +781,8 @@ impl<R: Runtime> LossyEncoder<R> {
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         use crate::forks::cost::{
             compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16,
-            strategy_search_costs_dct32x32, strategy_search_costs_dct8_16x16,
+            strategy_search_costs_dct32x16_or_16x32, strategy_search_costs_dct32x32,
+            strategy_search_costs_dct8_16x16,
         };
         use crate::forks::reconstruct::{
             compute_dc_grid_per_8x8_block, encode_and_reconstruct_mixed_strategy_3channel,
@@ -797,8 +798,9 @@ impl<R: Runtime> LossyEncoder<R> {
             CostGrids32x32,
         };
         use crate::quant_weights::{
-            dct16x16_weights_per_channel, dct16x8_weights_per_channel,
-            dct32x32_weights_per_channel, dct8_weights_per_channel,
+            dct16x16_weights_per_channel, dct16x32_weights_per_channel,
+            dct16x8_weights_per_channel, dct32x32_weights_per_channel,
+            dct8_weights_per_channel,
         };
 
         // DCT32x32 wiring: STAGED but DISABLED. Investigation found
@@ -1010,6 +1012,44 @@ impl<R: Runtime> LossyEncoder<R> {
         };
         mark("cost_dct32x32");
 
+        // Optional: DCT32x16 + DCT16x32 cost grids (rectangular DCT32
+        // family). Both feed into the 32x32-tier selector via CostGrids32x32.
+        let (dct32x16_x, dct32x16_y, dct32x16_b);
+        let inv_32x16_x: Vec<f32>;
+        let inv_32x16_y: Vec<f32>;
+        let inv_32x16_b: Vec<f32>;
+        let (cost_dct32x16, cost_dct16x32) = if dct32_eligible {
+            let (x, y, b) = dct16x32_weights_per_channel();
+            dct32x16_x = x;
+            dct32x16_y = y;
+            dct32x16_b = b;
+            inv_32x16_x = dct32x16_x.iter().map(|w| 1.0 / w).collect();
+            inv_32x16_y = dct32x16_y.iter().map(|w| 1.0 / w).collect();
+            inv_32x16_b = dct32x16_b.iter().map(|w| 1.0 / w).collect();
+            let c_32x16 = strategy_search_costs_dct32x16_or_16x32(
+                enc, &xyb_x, &xyb_y, &xyb_b, pw, ph, &g_mask, RAW_STRATEGY_DCT32X16,
+                &dct32x16_x, &dct32x16_y, &dct32x16_b,
+                &inv_32x16_x, &inv_32x16_y, &inv_32x16_b,
+                qac, qac, qac, 0, 0, scaled_constants,
+            );
+            let c_16x32 = strategy_search_costs_dct32x16_or_16x32(
+                enc, &xyb_x, &xyb_y, &xyb_b, pw, ph, &g_mask, RAW_STRATEGY_DCT16X32,
+                &dct32x16_x, &dct32x16_y, &dct32x16_b,
+                &inv_32x16_x, &inv_32x16_y, &inv_32x16_b,
+                qac, qac, qac, 0, 0, scaled_constants,
+            );
+            (c_32x16, c_16x32)
+        } else {
+            dct32x16_x = Vec::new();
+            dct32x16_y = Vec::new();
+            dct32x16_b = Vec::new();
+            inv_32x16_x = Vec::new();
+            inv_32x16_y = Vec::new();
+            inv_32x16_b = Vec::new();
+            (Vec::new(), Vec::new())
+        };
+        mark("cost_dct32x16_and_16x32");
+
         // Stage 5: host-side selector + assignments
         let extra16 = CostGrids16x16 {
             dct_16x8: Some(&cost_dct16x8),
@@ -1020,7 +1060,10 @@ impl<R: Runtime> LossyEncoder<R> {
             // 32x32-tier selector picks per-32x32-region between
             // DCT32x32, two-DCT32x16, two-DCT16x32, and four sub-16x16
             // (which themselves descend through the 16x16 selector).
-            let extra32 = CostGrids32x32::default();
+            let extra32 = CostGrids32x32 {
+                dct_32x16: Some(&cost_dct32x16),
+                dct_16x32: Some(&cost_dct16x32),
+            };
             let partitions = select_partitions_32x32_full(
                 &cost_dct8,
                 &cost_dct16,
@@ -1084,12 +1127,16 @@ impl<R: Runtime> LossyEncoder<R> {
         let dct32_x_clone = dct32_x.clone();
         let dct32_y_clone = dct32_y.clone();
         let dct32_b_clone = dct32_b.clone();
+        let dct32x16_x_clone = dct32x16_x.clone();
+        let dct32x16_y_clone = dct32x16_y.clone();
+        let dct32x16_b_clone = dct32x16_b.clone();
         let weights_x_for = move |strat: u8| -> Vec<f32> {
             match strat {
                 RAW_STRATEGY_DCT => dct8_x_clone.to_vec(),
                 RAW_STRATEGY_DCT16X16 => dct16_x_clone.clone(),
                 RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => dct16x8_x_clone.clone(),
                 RAW_STRATEGY_DCT32X32 => dct32_x_clone.clone(),
+                RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => dct32x16_x_clone.clone(),
                 _ => panic!("Phase B strategy {strat} not yet wired into encoder"),
             }
         };
@@ -1099,6 +1146,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 RAW_STRATEGY_DCT16X16 => dct16_y_clone.clone(),
                 RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => dct16x8_y_clone.clone(),
                 RAW_STRATEGY_DCT32X32 => dct32_y_clone.clone(),
+                RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => dct32x16_y_clone.clone(),
                 _ => panic!("Phase B strategy {strat} not yet wired into encoder"),
             }
         };
@@ -1108,6 +1156,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 RAW_STRATEGY_DCT16X16 => dct16_b_clone.clone(),
                 RAW_STRATEGY_DCT16X8 | RAW_STRATEGY_DCT8X16 => dct16x8_b_clone.clone(),
                 RAW_STRATEGY_DCT32X32 => dct32_b_clone.clone(),
+                RAW_STRATEGY_DCT32X16 | RAW_STRATEGY_DCT16X32 => dct32x16_b_clone.clone(),
                 _ => panic!("Phase B strategy {strat} not yet wired into encoder"),
             }
         };
