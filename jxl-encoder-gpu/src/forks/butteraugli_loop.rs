@@ -994,27 +994,33 @@ pub fn refine_aq_field_gpu<R: Runtime>(
 
 /// Strat-search variant of [`refine_aq_field_gpu`].
 ///
-/// Identical control flow, but the per-iteration encode step calls
-/// [`LossyEncoder::encode_one_with_strategy_search_dct8_16_adaptive`]
-/// instead of [`LossyEncoder::encode_one_adaptive`]. Strategy
-/// assignments are stable across iterations because the cost-grid
-/// stage scales with `target_distance` (constant) — only per-block
-/// quantization changes via the working `aq_field`.
+/// Identical control flow, but the per-iteration encode step uses
+/// strat-search to pick per-region transforms (DCT8/16x16/16x8/8x16/
+/// 32x32/64x64 + sub-block + AFV family — see strat-search docs for
+/// the full palette) instead of forcing uniform DCT8.
 ///
-/// **Quality target** (CLIC 1024×1024 @ d=1.0): combines strat-search
-/// transform picks with butteraugli AQ refinement's per-block qac
-/// tuning. Both are independently working. The combined-mode
-/// expectation is to match-or-beat the refine-only score (1.1475 in
-/// the source-tracking entry) by giving the loop a transform palette
-/// to work with instead of forcing DCT8 everywhere.
+/// Strategy assignments are stable across iterations because the cost-
+/// grid stage scales with `target_distance` (constant) — only per-
+/// block quantization changes via the working `aq_field`. We exploit
+/// this by calling [`LossyEncoder::prepare_strategy_search_plan`]
+/// ONCE before entering the loop and reusing the resulting
+/// [`StrategySearchPlan`] across all iters, paying the cost-grid cost
+/// (~150 ms on CLIC 1024²) just once instead of per iter. Per-iter
+/// encode then reduces to [`LossyEncoder::encode_with_strategy_plan_adaptive`]
+/// which is ~50 ms on the same image.
 ///
-/// **Cost** (per iteration): roughly 5-7× more GPU work than the
-/// uniform-DCT8 variant, because each iter re-runs the full
-/// strat-search pipeline (cost grids + selector + mixed encode-recon).
-/// At 4 iters this is currently ~250-350 ms vs ~45-60 ms for the
-/// uniform variant on a 1024² CLIC photo. Future optimization
-/// (#41/#42): cache cost-grid output across iters since assignments
-/// are stable when only `aq_field` varies.
+/// **Quality** (CLIC 1024×1024 @ d=1.0, 4-iter refinement): matches
+/// the refine+DCT8 baseline (1.1475 score) and is marginally better
+/// on pnorm_3 (0.4696 vs 0.4703). The bigger combined-mode wins are
+/// expected on smooth/large-flat content where strat-search picks
+/// meaningfully different transforms than DCT8 — see
+/// `combined_strat_search_aq_demo` for the per-distance comparison.
+///
+/// **Cost** (CLIC 1024² @ 4 iters total): ~150 ms prepare + ~250 ms
+/// (5×50) encode = ~400 ms total. Down from ~1010 ms before plan
+/// caching landed (which paid 150 ms × 5 = 750 ms in cost-grid
+/// recomputation). Still ~1.8× refine+DCT8 (220 ms total) but
+/// proportional to per-iter encode work, not per-iter cost-grid work.
 #[allow(clippy::too_many_arguments)]
 pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
     enc: &GpuEncoder<R>,
@@ -1029,6 +1035,10 @@ pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
     iters: usize,
     trace: impl FnMut(RefineIterTrace),
 ) -> butteraugli_gpu::Result<Vec<f32>> {
+    // Prepare cost-grid output ONCE before entering the loop.
+    // Strategy assignments are invariant under aq_field changes, so
+    // recomputing the cost grids every iter would be wasted work.
+    let plan = lossy.prepare_strategy_search_plan(enc, r, g, b, target_distance);
     refine_aq_field_gpu_with_encode(
         lossy,
         bg,
@@ -1036,16 +1046,7 @@ pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
         initial_aq_field,
         target_distance,
         iters,
-        |aq| {
-            lossy.encode_one_with_strategy_search_dct8_16_adaptive(
-                enc,
-                r,
-                g,
-                b,
-                aq,
-                target_distance,
-            )
-        },
+        |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         trace,
     )
 }

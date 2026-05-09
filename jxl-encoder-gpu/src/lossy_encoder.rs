@@ -135,6 +135,49 @@ fn default_gaborish_weights() -> GaborishWeights {
 ///
 /// Construct one per (width, height) to amortize the static-input
 /// upload across many encodes.
+
+/// Cached cost-grid output from
+/// [`LossyEncoder::prepare_strategy_search_plan`]. Holds everything
+/// the encode/recon stage needs that's invariant under per-block
+/// `aq_field` changes — XYB host buffers, DC grids, and strategy
+/// assignments.
+///
+/// Why split prepare/encode: combined-mode (strat-search + butteraugli
+/// AQ refinement) would otherwise pay the cost-grid cost on every
+/// refinement iteration. Strategy assignments are stable across iters
+/// (cost grids scale with `target_distance`, not `aq_field`), so
+/// caching them via this plan drops per-iter cost from ~210 ms to
+/// ~50 ms on CLIC 1024² — a ~4× speedup.
+///
+/// The plan is plain old data (no GPU lifetimes): host buffers + a
+/// `Vec<StrategyAssignment>`. Re-uploads of XYB to GPU happen inside
+/// each [`LossyEncoder::encode_with_strategy_plan_adaptive`] call;
+/// this is amortized by the encode/recon work.
+#[derive(Clone, Debug)]
+pub struct StrategySearchPlan {
+    /// XYB X-channel host buffer, padded-image-size raster order.
+    pub xyb_x: Vec<f32>,
+    /// XYB Y-channel host buffer.
+    pub xyb_y: Vec<f32>,
+    /// XYB B-channel host buffer.
+    pub xyb_b: Vec<f32>,
+    /// Per-8x8-block DC grid for X channel (length = num_padded_blocks).
+    pub dc_grid_x: Vec<f32>,
+    /// Per-8x8-block DC grid for Y channel.
+    pub dc_grid_y: Vec<f32>,
+    /// Per-8x8-block DC grid for B channel.
+    pub dc_grid_b: Vec<f32>,
+    /// Per-region strategy picks from the cost-grid selector.
+    pub assignments: Vec<crate::pipeline::StrategyAssignment>,
+    /// Target distance used for cost-grid scaling (constant across
+    /// refinement iterations).
+    pub target_distance: f32,
+    /// Padded image width (multiple of 8/16/32/64 alignment).
+    pub padded_width: u32,
+    /// Padded image height.
+    pub padded_height: u32,
+}
+
 pub struct LossyEncoder<R: Runtime> {
     /// Original dimensions as the caller sees them.
     width: u32,
@@ -829,7 +872,14 @@ impl<R: Runtime> LossyEncoder<R> {
     /// `target_distance` controls the cost-model scaling; `aq_field`
     /// controls per-block quantization. The `mark` callback is invoked
     /// at the same boundaries as the historical `_traced` method.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// As of May 9 2026 this is a 4-line shim that delegates to
+    /// [`Self::prepare_strategy_search_plan_traced`] +
+    /// [`Self::encode_with_strategy_plan_adaptive_traced`]. Callers
+    /// who need to encode the same image at multiple `aq_field`s
+    /// (e.g., the butteraugli refinement loop) should call
+    /// `prepare_strategy_search_plan` once and reuse the plan across
+    /// many `encode_with_strategy_plan_adaptive` calls.
     pub fn encode_one_with_strategy_search_dct8_16_adaptive_traced(
         &self,
         enc: &GpuEncoder<R>,
@@ -840,10 +890,60 @@ impl<R: Runtime> LossyEncoder<R> {
         target_distance: f32,
         mark: &mut dyn FnMut(&'static str),
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let plan =
+            self.prepare_strategy_search_plan_traced(enc, r, g, b, target_distance, mark);
+        self.encode_with_strategy_plan_adaptive_traced(enc, &plan, aq_field, mark)
+    }
+
+    /// Non-traced wrapper around
+    /// [`Self::prepare_strategy_search_plan_traced`]. Runs the cost-grid
+    /// stage of strat-search and returns a [`StrategySearchPlan`] that
+    /// can be reused across multiple
+    /// [`Self::encode_with_strategy_plan_adaptive`] calls (e.g., across
+    /// butteraugli refinement iterations).
+    pub fn prepare_strategy_search_plan(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        target_distance: f32,
+    ) -> StrategySearchPlan {
+        self.prepare_strategy_search_plan_traced(enc, r, g, b, target_distance, &mut |_| {})
+    }
+
+    /// Cost-grid stage of strat-search. Computes XYB + gaborish + masks,
+    /// runs all per-strategy cost grids, runs the partition selector,
+    /// and returns the assignments + cached host buffers.
+    ///
+    /// **Cost** (CLIC 1024²): ~150-180 ms. The bulk is the cost-grid
+    /// kernels (DCT8, DCT16x16, DCT16x8, DCT8x16, DCT32x32, DCT32x16,
+    /// DCT16x32, DCT64x64, DCT64x32, DCT32x64, plus the 5 sub-block
+    /// strategies on 8x8 grids). AFV cost grids are skipped per the
+    /// existing notes.
+    ///
+    /// **Reuse**: when the same image is encoded multiple times at the
+    /// same `target_distance` but with different `aq_field`s (e.g., the
+    /// butteraugli refinement loop), this plan can be reused across
+    /// iterations. Strategy assignments are invariant under aq_field
+    /// changes because the cost-grid scalar `qac` derives from
+    /// `target_distance` (constant), not from `aq_field`.
+    ///
+    /// `mark` callback fires at the same stage boundaries as the
+    /// monolithic `encode_one_with_strategy_search_dct8_16_adaptive_traced`
+    /// up through `dc_grids`.
+    pub fn prepare_strategy_search_plan_traced(
+        &self,
+        enc: &GpuEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        target_distance: f32,
+        mark: &mut dyn FnMut(&'static str),
+    ) -> StrategySearchPlan {
         // Cost-grid stage uses the user-facing target distance for
         // `compute_scaled_constants`, `mul_8x8`, and the anti-bias
-        // distance-ramp. Per-block quant uses `aq_field` directly in
-        // the encode/recon stage further down.
+        // distance-ramp.
         let distance = target_distance;
         use crate::forks::cost::{
             compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16,
@@ -851,15 +951,12 @@ impl<R: Runtime> LossyEncoder<R> {
             strategy_search_costs_dct64x32_or_32x64, strategy_search_costs_dct64x64,
             strategy_search_costs_dct8_16x16, strategy_search_costs_subblock_8x8,
         };
-        use crate::forks::reconstruct::{
-            compute_dc_grid_per_8x8_block, encode_and_reconstruct_mixed_strategy_3channel,
-            gab_weights,
-        };
+        use crate::forks::reconstruct::compute_dc_grid_per_8x8_block;
         use crate::forks::transform::{
-            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
-            RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
-            RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
-            RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+            RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT2X2,
+            RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT4X4,
+            RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT8X16,
+            RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
         };
         use crate::pipeline::{
             partitions_16x16_to_assignments, partitions_32x32_to_assignments,
@@ -906,16 +1003,7 @@ impl<R: Runtime> LossyEncoder<R> {
         let xb8 = pw / 8;
         let yb8 = ph / 8;
         let nb8 = xb8 * yb8;
-
-        assert_eq!(
-            aq_field.len(),
-            nb8,
-            "aq_field length {} != num_padded_blocks {} ({}x{})",
-            aq_field.len(),
-            nb8,
-            xb8,
-            yb8,
-        );
+        let _ = (w, h, nb8); // used in cost-grid stage; nb8 only used in marks
 
         // Stage 1: pad + upload
         mark("start");
@@ -1465,13 +1553,108 @@ impl<R: Runtime> LossyEncoder<R> {
         let dc_grid_b = compute_dc_grid_per_8x8_block(&xyb_b, pw, ph);
         mark("dc_grids");
 
+        // Suppress "unused" warnings for weight Vecs that are only
+        // re-derived in the encode-with-plan stage. The cost-grid
+        // stage above uses these for cost-grid kernel calls; the
+        // encode/recon stage recomputes them from the same const
+        // weight functions.
+        let _ = (
+            &dct8_x, &dct8_y, &dct8_b,
+            &dct16_x, &dct16_y, &dct16_b,
+            &dct16x8_x, &dct16x8_y, &dct16x8_b,
+            &dct32_x, &dct32_y, &dct32_b,
+            &dct32x16_x, &dct32x16_y, &dct32x16_b,
+            &dct64_x, &dct64_y, &dct64_b,
+            &dct64x32_x, &dct64x32_y, &dct64x32_b,
+        );
+
+        StrategySearchPlan {
+            xyb_x,
+            xyb_y,
+            xyb_b,
+            dc_grid_x,
+            dc_grid_y,
+            dc_grid_b,
+            assignments,
+            target_distance,
+            padded_width: self.padded_width,
+            padded_height: self.padded_height,
+        }
+    }
+
+    /// Non-traced wrapper around
+    /// [`Self::encode_with_strategy_plan_adaptive_traced`]. Encode an
+    /// image using a precomputed [`StrategySearchPlan`] and a per-block
+    /// `aq_field`. The plan must come from
+    /// [`Self::prepare_strategy_search_plan`] on the same image.
+    pub fn encode_with_strategy_plan_adaptive(
+        &self,
+        enc: &GpuEncoder<R>,
+        plan: &StrategySearchPlan,
+        aq_field: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        self.encode_with_strategy_plan_adaptive_traced(enc, plan, aq_field, &mut |_| {})
+    }
+
+    /// Encode + recon + postpass stage of strat-search using a
+    /// precomputed [`StrategySearchPlan`].
+    ///
+    /// **Cost** (CLIC 1024²): ~50 ms per call (excludes the ~150 ms
+    /// prepare cost paid once). When called repeatedly on the same
+    /// plan with different `aq_field`s (refinement loop), this is
+    /// where most of the per-iter wall-clock goes.
+    ///
+    /// `mark` callback fires at the same stage boundaries as the
+    /// monolithic `_adaptive_traced` from `mixed_strategy_encode_recon`
+    /// onward.
+    pub fn encode_with_strategy_plan_adaptive_traced(
+        &self,
+        enc: &GpuEncoder<R>,
+        plan: &StrategySearchPlan,
+        aq_field: &[f32],
+        mark: &mut dyn FnMut(&'static str),
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        use crate::forks::reconstruct::{
+            encode_and_reconstruct_mixed_strategy_3channel, gab_weights,
+        };
+        use crate::forks::transform::{
+            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
+            RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+            RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_DCT8X16,
+        };
+        use crate::quant_weights::{
+            dct16x16_weights_per_channel, dct16x32_weights_per_channel,
+            dct16x8_weights_per_channel, dct32x32_weights_per_channel,
+            dct32x64_weights_per_channel, dct64x64_weights_per_channel,
+            dct8_weights_per_channel,
+        };
+
+        let (w, h) = (self.width as usize, self.height as usize);
+        let pw = plan.padded_width as usize;
+        let ph = plan.padded_height as usize;
+        let xb8 = pw / 8;
+        let yb8 = ph / 8;
+        let nb8 = xb8 * yb8;
+
+        assert_eq!(
+            aq_field.len(),
+            nb8,
+            "aq_field length {} != num_padded_blocks {}",
+            aq_field.len(),
+            nb8,
+        );
+        debug_assert_eq!(plan.xyb_x.len(), pw * ph);
+        debug_assert_eq!(plan.dc_grid_x.len(), nb8);
+
         // Stage 7: encode + reconstruct via mixed-strategy IDCT.
-        // Strategies supported: DCT8, DCT16x16, DCT16x8, DCT8x16, DCT32x32.
         // Per-block qac comes from `aq_field` directly — this is what
         // makes the adaptive variant compose with the butteraugli AQ
         // refinement loop. For uniform-qac (scalar `distance` shim)
         // callers, this is just `vec![distance_to_qac(distance); nb8]`.
         let qac_vec = aq_field.to_vec();
+        let (dct8_x, dct8_y, dct8_b) = dct8_weights_per_channel();
+        let (dct16_x, dct16_y, dct16_b) = dct16x16_weights_per_channel();
+        let (dct16x8_x, dct16x8_y, dct16x8_b) = dct16x8_weights_per_channel();
         let dct8_x_clone = dct8_x;
         let dct8_y_clone = dct8_y;
         let dct8_b_clone = dct8_b;
@@ -1481,15 +1664,22 @@ impl<R: Runtime> LossyEncoder<R> {
         let dct16x8_x_clone = dct16x8_x.clone();
         let dct16x8_y_clone = dct16x8_y.clone();
         let dct16x8_b_clone = dct16x8_b.clone();
+        // DCT32x32 + rectangular DCT32 weights (only used if
+        // assignments contain those strategies, but cheap to fetch).
+        let (dct32_x, dct32_y, dct32_b) = dct32x32_weights_per_channel();
         let dct32_x_clone = dct32_x.clone();
         let dct32_y_clone = dct32_y.clone();
         let dct32_b_clone = dct32_b.clone();
+        let (dct32x16_x, dct32x16_y, dct32x16_b) = dct16x32_weights_per_channel();
         let dct32x16_x_clone = dct32x16_x.clone();
         let dct32x16_y_clone = dct32x16_y.clone();
         let dct32x16_b_clone = dct32x16_b.clone();
+        // DCT64 family weights.
+        let (dct64_x, dct64_y, dct64_b) = dct64x64_weights_per_channel();
         let dct64_x_clone = dct64_x.clone();
         let dct64_y_clone = dct64_y.clone();
         let dct64_b_clone = dct64_b.clone();
+        let (dct64x32_x, dct64x32_y, dct64x32_b) = dct32x64_weights_per_channel();
         let dct64x32_x_clone = dct64x32_x.clone();
         let dct64x32_y_clone = dct64x32_y.clone();
         let dct64x32_b_clone = dct64x32_b.clone();
@@ -1553,12 +1743,12 @@ impl<R: Runtime> LossyEncoder<R> {
         let mut plane_b = vec![0.0_f32; pw * ph];
         encode_and_reconstruct_mixed_strategy_3channel(
             enc,
-            &xyb_x,
-            &xyb_y,
-            &xyb_b,
+            &plan.xyb_x,
+            &plan.xyb_y,
+            &plan.xyb_b,
             pw,
             ph,
-            &assignments,
+            &plan.assignments,
             &weights_x_for,
             &weights_y_for,
             &weights_b_for,
@@ -1568,9 +1758,9 @@ impl<R: Runtime> LossyEncoder<R> {
             &self.thresholds_x,
             &self.thresholds_y,
             &self.thresholds_b,
-            &dc_grid_x,
-            &dc_grid_y,
-            &dc_grid_b,
+            &plan.dc_grid_x,
+            &plan.dc_grid_y,
+            &plan.dc_grid_b,
             &mut plane_x,
             &mut plane_y,
             &mut plane_b,
