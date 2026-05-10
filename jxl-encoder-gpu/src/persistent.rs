@@ -61,8 +61,8 @@ use crate::launch::dct4::{
 };
 use crate::launch::dct2x2::{dct2x2_forward, dct2x2_inverse};
 use crate::launch::dct8::{
-    dct_8x8, dct_8x8_wide, dequant_idct_dc_scatter_dct8, idct_8x8, idct_8x8_set_dc_scatter,
-    idct_8x8_wide,
+    dct_8x8, dct_8x8_wide, dequant_idct_dc_scatter_dct8, dequant_idct_dc_scatter_dct8_wide,
+    idct_8x8, idct_8x8_set_dc_scatter, idct_8x8_wide,
 };
 use crate::launch::identity::{identity_forward, identity_inverse};
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
@@ -880,6 +880,75 @@ impl<R: Runtime> GpuEncoder<R> {
         let h_coords = layouts.pop().expect("layouts[0]").memory;
         let dc_grid_len = dc_grid.total_floats();
         dequant_idct_dc_scatter_dct8::<R>(
+            self.client_ref(),
+            quant.handle.clone(),
+            h_w,
+            h_qac,
+            dc_grid.handle.clone(),
+            h_coords,
+            plane.handle.clone(),
+            plane.n_pixels(),
+            plane.width,
+            dc_grid_len,
+            dc_stride,
+            quant.num_blocks,
+            channel_bias,
+        );
+    }
+
+    /// Wide-cube variant of [`Self::dequant_idct_dc_scatter_dct8_persistent`]
+    /// using `cube_dim=64` instead of `cube_dim=1`. Bit-identical
+    /// math; differs only in launch shape (better warp utilization,
+    /// higher shared-mem pressure per cube). See the kernel docstring
+    /// for the rationale.
+    ///
+    /// Verified bit-equal to the cube_dim=1 variant by
+    /// `test_dequant_idct_dc_scatter_wide_matches_narrow`.
+    pub fn dequant_idct_dc_scatter_dct8_wide_persistent(
+        &self,
+        quant: &GpuI32Blocks<R>,
+        weights_template: &[f32],
+        qac_qm: &[f32],
+        dc_grid: &GpuBlocks<R>,
+        coords: &[(u32, u32)],
+        plane: &GpuPlane<R>,
+        dc_stride: u32,
+        channel: usize,
+    ) {
+        const BIAS_X: f32 = 0.945_349_93;
+        const BIAS_Y: f32 = 0.929_945_5;
+        const BIAS_B: f32 = 0.950_064_9;
+        let channel_bias = match channel {
+            0 => BIAS_X,
+            1 => BIAS_Y,
+            2 => BIAS_B,
+            _ => panic!(
+                "dequant_idct_dc_scatter_dct8_wide_persistent: channel must be 0, 1, or 2; got {channel}"
+            ),
+        };
+        assert_eq!(quant.coeffs_per_block, 64);
+        assert_eq!(quant.num_blocks as usize, coords.len());
+        assert_eq!(weights_template.len(), 64);
+        assert_eq!(qac_qm.len() as u32, quant.num_blocks);
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let coords_b = u32::as_bytes(&flat);
+        let w_bytes = f32::as_bytes(weights_template);
+        let qac_b = f32::as_bytes(qac_qm);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([coords_b.len()].into(), 1), coords_b),
+            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
+            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_qac = layouts.pop().expect("layouts[2]").memory;
+        let h_w = layouts.pop().expect("layouts[1]").memory;
+        let h_coords = layouts.pop().expect("layouts[0]").memory;
+        let dc_grid_len = dc_grid.total_floats();
+        dequant_idct_dc_scatter_dct8_wide::<R>(
             self.client_ref(),
             quant.handle.clone(),
             h_w,
@@ -3189,6 +3258,87 @@ mod tests {
             q_perblock_host, q_broadcast_host,
             "broadcast-W fused must match per-block fused when weights are replicated"
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dequant_idct_dc_scatter_wide_matches_narrow() {
+        // The wide-cube (cube_dim=64) variant of the 4-way fused
+        // kernel must produce a plane bit-identical to the narrow
+        // (cube_dim=1) variant. Same math, just different launch
+        // shape — same idct1d_8 calls, same bias formula, same
+        // scatter destination.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        // 8×6 block grid (64×48 pixels) — exercises both 64-wide
+        // cube fill (one full cube) and overflow into a partial
+        // second cube. n_blocks = 48 → first cube has 48 active
+        // threads, no second cube.
+        let xb = 8u32;
+        let yb = 6u32;
+        let pw = (xb * 8) as u32;
+        let ph = (yb * 8) as u32;
+        let n_blocks = (xb * yb) as u32;
+        let n = (n_blocks as usize) * 64;
+
+        let quant: Vec<i32> = (0..n)
+            .map(|i| {
+                let v = (i.wrapping_mul(31) % 13) as i32 - 6;
+                if i % 7 == 0 { 0 } else { v }
+            })
+            .collect();
+        let weights_template: Vec<f32> =
+            (0..64usize).map(|i| 0.5 + 0.7 * ((i * 17 % 251) as f32 / 251.0)).collect();
+        let qac: Vec<f32> = (0..n_blocks as usize).map(|b| 3.5 + 0.1 * b as f32).collect();
+        let dc_host: Vec<f32> = (0..n_blocks).map(|i| 0.4 + 0.05 * i as f32).collect();
+        let mut coords: Vec<(u32, u32)> = Vec::with_capacity(n_blocks as usize);
+        for by in 0..yb {
+            for bx in 0..xb {
+                coords.push((bx, by));
+            }
+        }
+
+        for channel in [0_usize, 1, 2] {
+            let g_quant_n = enc.upload_i32_blocks(&quant, n_blocks, 64);
+            let g_quant_w = enc.upload_i32_blocks(&quant, n_blocks, 64);
+            let g_dc = enc.upload_blocks(&dc_host, n_blocks, 1);
+
+            let g_plane_narrow = enc.alloc_plane(pw, ph);
+            enc.dequant_idct_dc_scatter_dct8_persistent(
+                &g_quant_n,
+                &weights_template,
+                &qac,
+                &g_dc,
+                &coords,
+                &g_plane_narrow,
+                xb,
+                channel,
+            );
+            let plane_narrow = enc.download_plane(&g_plane_narrow);
+
+            let g_plane_wide = enc.alloc_plane(pw, ph);
+            enc.dequant_idct_dc_scatter_dct8_wide_persistent(
+                &g_quant_w,
+                &weights_template,
+                &qac,
+                &g_dc,
+                &coords,
+                &g_plane_wide,
+                xb,
+                channel,
+            );
+            let plane_wide = enc.download_plane(&g_plane_wide);
+
+            assert_eq!(plane_narrow.len(), plane_wide.len());
+            for (i, (&a, &b)) in plane_narrow.iter().zip(plane_wide.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "channel {channel} idx {i}: narrow={a} wide={b}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "cuda")]

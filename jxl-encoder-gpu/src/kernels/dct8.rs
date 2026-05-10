@@ -768,6 +768,127 @@ pub fn dequant_idct_dc_scatter_dct8_kernel(
     }
 }
 
+/// Wide-cube variant of [`fn@dequant_idct_dc_scatter_dct8_kernel`].
+/// `cube_dim=64` (one thread per block, 64 blocks per cube) so each
+/// SM cube packs more independent blocks → better warp utilization.
+/// Same per-thread private slice layout as the existing wide
+/// kernels (`dct_8x8_wide_kernel` / `idct_8x8_wide_kernel` /
+/// `dct8_quantize_fused_wide_kernel`).
+///
+/// Same math as the cube_dim=1 variant — verified bit-identical by
+/// `test_dequant_idct_dc_scatter_wide_matches_narrow` in persistent.rs.
+///
+/// Motivation: the cube_dim=1 variant was wired into encode/recon's
+/// DCT8 branch in an earlier session and showed +3.4% slowdown vs
+/// the 3-way (idct+dc+scatter) chain — likely register pressure
+/// from doing dequant + IDCT + scatter all in one cube_dim=1 thread.
+/// The wide variant trades slightly higher shared-mem pressure for
+/// better thread-level parallelism, mirroring why
+/// `dct8_quantize_fused_wide_kernel` outperforms the cube_dim=1
+/// forward equivalent.
+#[allow(clippy::too_many_arguments)]
+#[cube(launch_unchecked)]
+pub fn dequant_idct_dc_scatter_dct8_wide_kernel(
+    quant: &Array<i32>,
+    weights: &Array<f32>,
+    qac: &Array<f32>,
+    dc_grid: &Array<f32>,
+    coords: &Array<u32>,
+    plane: &mut Array<f32>,
+    plane_width: u32,
+    dc_stride: u32,
+    n_blocks: u32,
+    channel_bias: f32,
+) {
+    const BIAS_RECIP: f32 = 0.145;
+
+    let block_idx = ABSOLUTE_POS;
+    let n = n_blocks as usize;
+    if block_idx >= n {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+    let unit = UNIT_POS;
+    let private_base = unit * 64u32;
+    let private_base_us = private_base as usize;
+
+    let bx = coords[block_idx * 2usize] as usize;
+    let by = coords[block_idx * 2usize + 1usize] as usize;
+    let dc_stride_us = dc_stride as usize;
+    let dc = dc_grid[by * dc_stride_us + bx];
+    let inv_qac = 1.0f32 / qac[block_idx];
+
+    let mut scratch = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut transposed = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+
+    // Dequant directly into private slice of shared memory.
+    let mut i: u32 = 0u32;
+    while i < 64u32 {
+        let iu = i as usize;
+        let q_int = quant[off + iu];
+        let biased = if q_int == 0i32 {
+            f32::new(0.0)
+        } else {
+            let q = q_int as f32;
+            if f32::abs(q) < 1.125f32 {
+                if q > 0.0f32 { channel_bias } else { -channel_bias }
+            } else {
+                q - BIAS_RECIP / q
+            }
+        };
+        scratch[private_base_us + iu] = biased * weights[iu] * inv_qac;
+        i += 1u32;
+    }
+    // Restore DC at slot 0 of this thread's private slice.
+    scratch[private_base_us] = dc;
+
+    // Row pass — 8 rows × 8 coefs each within the private slice.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        idct1d_8(&mut scratch, private_base + r * 8u32);
+        r += 1u32;
+    }
+
+    // Transpose private slice → transposed private slice.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            transposed[private_base_us + cu * 8usize + ru] =
+                scratch[private_base_us + ru * 8usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // Column pass.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        idct1d_8(&mut transposed, private_base + r * 8u32);
+        r += 1u32;
+    }
+
+    // Indexed scatter into plane.
+    let pw = plane_width as usize;
+    let dst_y0 = by * 8usize;
+    let dst_x0 = bx * 8usize;
+    let mut dy: u32 = 0u32;
+    while dy < 8u32 {
+        let dyu = dy as usize;
+        let dst_row = (dst_y0 + dyu) * pw + dst_x0;
+        let src_row = dyu * 8usize;
+        let mut dx: u32 = 0u32;
+        while dx < 8u32 {
+            let dxu = dx as usize;
+            plane[dst_row + dxu] = transposed[private_base_us + src_row + dxu];
+            dx += 1u32;
+        }
+        dy += 1u32;
+    }
+}
+
 /// Inverse 8x8 DCT for `num_blocks` contiguous blocks.
 #[cube(launch_unchecked)]
 pub fn idct_8x8_kernel(input: &Array<f32>, output: &mut Array<f32>) {

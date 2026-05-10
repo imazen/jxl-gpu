@@ -7,7 +7,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::kernels::dct8::{
-    dct_8x8_kernel, dequant_idct_dc_scatter_dct8_kernel, idct_8x8_kernel,
+    dct_8x8_kernel, dequant_idct_dc_scatter_dct8_kernel,
+    dequant_idct_dc_scatter_dct8_wide_kernel, idct_8x8_kernel,
     idct_8x8_set_dc_scatter_kernel,
 };
 
@@ -197,6 +198,48 @@ pub fn dequant_idct_dc_scatter_dct8<R: Runtime>(
             client,
             CubeCount::Static(cubes, 1, 1),
             CubeDim::new_1d(1),
+            ArrayArg::from_raw_parts(quant, n_coef),
+            ArrayArg::from_raw_parts(weights, 64),
+            ArrayArg::from_raw_parts(qac, n_blocks as usize),
+            ArrayArg::from_raw_parts(dc_grid, dc_grid_len),
+            ArrayArg::from_raw_parts(coords, (n_blocks as usize) * 2),
+            ArrayArg::from_raw_parts(plane, plane_n_pixels),
+            plane_width,
+            dc_stride,
+            n_blocks,
+            channel_bias,
+        );
+    }
+}
+
+/// Wide-cube variant of [`dequant_idct_dc_scatter_dct8`]: cube_dim=64
+/// (one thread per block, 64 blocks per cube). Same I/O contract;
+/// bit-identical math. See
+/// [`fn@crate::kernels::dct8::dequant_idct_dc_scatter_dct8_wide_kernel`]
+/// for the rationale.
+#[allow(clippy::too_many_arguments)]
+pub fn dequant_idct_dc_scatter_dct8_wide<R: Runtime>(
+    client: &ComputeClient<R>,
+    quant: Handle,
+    weights: Handle,
+    qac: Handle,
+    dc_grid: Handle,
+    coords: Handle,
+    plane: Handle,
+    plane_n_pixels: usize,
+    plane_width: u32,
+    dc_grid_len: usize,
+    dc_stride: u32,
+    n_blocks: u32,
+    channel_bias: f32,
+) {
+    let n_coef = (n_blocks as usize) * 64;
+    let cubes = n_blocks.div_ceil(64).max(1);
+    unsafe {
+        dequant_idct_dc_scatter_dct8_wide_kernel::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(cubes, 1, 1),
+            CubeDim::new_1d(64),
             ArrayArg::from_raw_parts(quant, n_coef),
             ArrayArg::from_raw_parts(weights, 64),
             ArrayArg::from_raw_parts(qac, n_blocks as usize),
