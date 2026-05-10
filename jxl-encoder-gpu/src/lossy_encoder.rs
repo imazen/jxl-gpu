@@ -1064,13 +1064,27 @@ impl<R: Runtime> LossyEncoder<R> {
         let xy_g = enc.gaborish_5x5_persistent(&xy, &self.weights);
         let xb_g = enc.gaborish_5x5_persistent(&xb, &self.weights);
 
-        // Stage 3: mask1x1 from Y channel — keep on GPU (cost grids
-        // consume it as a GpuPlane), and download to host so the
-        // existing host-repack cost-grid path still has spatial XYB.
+        // Stage 3: mask1x1 from Y channel — keep on GPU.
+        //
+        // Skip the host XYB download. Only the AFV branch in
+        // encode_and_reconstruct_mixed_strategy_single_channel uses
+        // these host slices (the per-block extend_from_slice loop in
+        // forks/reconstruct.rs's `is_afv` branch), and AFV is
+        // currently disabled in production cost grids. Downloading
+        // 3× plane-sized buffers here forced a queue-drain sync
+        // that masked the prior GPU work as "xyb_gab" wall-clock.
+        // At 16 MP that was 170 ms of pure waste — entirely just
+        // the download_plane × 3.
+        //
+        // SAFETY: if AFV gets re-enabled in the strat-search, the
+        // AFV branch will need to lazily download these planes.
+        // The empty Vecs flow through plan.xyb_x/y/b unchanged but
+        // any caller that indexes them will panic — the existing
+        // debug_assert checking len was removed.
         let g_mask = enc.mask1x1_persistent(&xy_g);
-        let xyb_x: Vec<f32> = enc.download_plane(&xx_g);
-        let xyb_y: Vec<f32> = enc.download_plane(&xy_g);
-        let xyb_b: Vec<f32> = enc.download_plane(&xb_g);
+        let xyb_x: Vec<f32> = Vec::new();
+        let xyb_y: Vec<f32> = Vec::new();
+        let xyb_b: Vec<f32> = Vec::new();
         mark("xyb_gab");
         mark("mask1x1");
 
@@ -1744,7 +1758,10 @@ impl<R: Runtime> LossyEncoder<R> {
             aq_field.len(),
             nb8,
         );
-        debug_assert_eq!(plan.xyb_x.len(), pw * ph);
+        // plan.xyb_x/y/b are empty Vecs (intentional — see comment
+        // in prepare_strategy_search_plan_traced where we skip the
+        // download). If AFV is re-enabled, callers that consume
+        // these need to lazily populate from xyb_*_gpu.
         debug_assert_eq!(plan.dc_grid_x.len(), nb8);
 
         // Stage 7: encode + reconstruct via mixed-strategy IDCT.

@@ -239,8 +239,9 @@ fn main() {
         println!();
     }
     println!(
-        "Caveats:\n  * CPU number includes bitstream output; GPU number doesn't.\n  * GPU prepare\
-         is one-shot; in a real encode the prepare cost is amortized only if the loop iters > 1.\n  \
+        "Caveats:\n  * CPU number includes bitstream output; GPU number doesn't.\n  \
+         * GPU prepare is one-shot; in a real encode the prepare cost is amortized only \
+         if the loop iters > 1.\n  \
          * Both warmed up; cubecl pool + jit cache are hot."
     );
 }
