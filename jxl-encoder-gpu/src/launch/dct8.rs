@@ -6,7 +6,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::kernels::dct8::{dct_8x8_kernel, idct_8x8_kernel};
+use crate::kernels::dct8::{dct_8x8_kernel, idct_8x8_kernel, idct_8x8_set_dc_scatter_kernel};
 
 /// Forward 8x8 DCT for `num_blocks` contiguous 8x8 blocks.
 ///
@@ -129,6 +129,40 @@ pub fn idct_8x8<R: Runtime>(
             CubeDim::new_1d(1),
             ArrayArg::from_raw_parts(input, n),
             ArrayArg::from_raw_parts(output, n),
+        );
+    }
+}
+
+/// Fused IDCT8 + DC-restore + indexed scatter. One launch instead of
+/// three. See [`fn@crate::kernels::dct8::idct_8x8_set_dc_scatter_kernel`]
+/// for the layout contract.
+#[allow(clippy::too_many_arguments)]
+pub fn idct_8x8_set_dc_scatter<R: Runtime>(
+    client: &ComputeClient<R>,
+    input: Handle,
+    dc_grid: Handle,
+    coords: Handle,
+    plane: Handle,
+    plane_n_pixels: usize,
+    plane_width: u32,
+    dc_grid_len: usize,
+    dc_stride: u32,
+    n_blocks: u32,
+) {
+    let n_coef = (n_blocks as usize) * 64;
+    let cubes = n_blocks.max(1);
+    unsafe {
+        idct_8x8_set_dc_scatter_kernel::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(cubes, 1, 1),
+            CubeDim::new_1d(1),
+            ArrayArg::from_raw_parts(input, n_coef),
+            ArrayArg::from_raw_parts(dc_grid, dc_grid_len),
+            ArrayArg::from_raw_parts(coords, (n_blocks as usize) * 2),
+            ArrayArg::from_raw_parts(plane, plane_n_pixels),
+            plane_width,
+            dc_stride,
+            n_blocks,
         );
     }
 }

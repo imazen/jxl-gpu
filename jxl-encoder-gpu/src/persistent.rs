@@ -60,7 +60,9 @@ use crate::launch::dct4::{
     dct_4x4_full, dct_4x8_full, dct_8x4_full, idct_4x4_full, idct_4x8_full, idct_8x4_full,
 };
 use crate::launch::dct2x2::{dct2x2_forward, dct2x2_inverse};
-use crate::launch::dct8::{dct_8x8, dct_8x8_wide, idct_8x8, idct_8x8_wide};
+use crate::launch::dct8::{
+    dct_8x8, dct_8x8_wide, idct_8x8, idct_8x8_set_dc_scatter, idct_8x8_wide,
+};
 use crate::launch::identity::{identity_forward, identity_inverse};
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
@@ -729,6 +731,52 @@ impl<R: Runtime> GpuEncoder<R> {
             coeffs_per_block: 64,
             _r: core::marker::PhantomData,
         }
+    }
+
+    /// Fused IDCT8 + DC restore + indexed scatter — replaces the
+    /// three-launch chain
+    /// `set_dc_from_grid_indexed_persistent → idct_8x8_persistent →
+    /// indexed_scatter_blocks_persistent` on the encode/recon DCT8 hot
+    /// path. Saves the intermediate `g_recon` GpuBlocks roundtrip
+    /// (~256 bytes/block × N blocks of HBM traffic).
+    ///
+    /// The kernel reads each block's restored DC from `dc_grid[by *
+    /// dc_stride + bx]` (matching `set_dc_from_grid_indexed`'s lookup)
+    /// and writes the IDCT result directly to `plane` at the block's
+    /// 8×8 footprint (matching `indexed_scatter_blocks_persistent`'s
+    /// destination layout).
+    ///
+    /// Bit-identical to the split chain — see
+    /// `test_idct_8x8_set_dc_scatter_matches_split` for proof.
+    pub fn idct_8x8_set_dc_scatter_persistent(
+        &self,
+        coeffs: &GpuBlocks<R>,
+        dc_grid: &GpuBlocks<R>,
+        coords: &[(u32, u32)],
+        plane: &GpuPlane<R>,
+        dc_stride: u32,
+    ) {
+        assert_eq!(coeffs.coeffs_per_block, 64);
+        assert_eq!(coeffs.num_blocks as usize, coords.len());
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
+        let dc_grid_len = dc_grid.total_floats();
+        idct_8x8_set_dc_scatter::<R>(
+            self.client_ref(),
+            coeffs.handle.clone(),
+            dc_grid.handle.clone(),
+            h_coords,
+            plane.handle.clone(),
+            plane.n_pixels(),
+            plane.width,
+            dc_grid_len,
+            dc_stride,
+            coeffs.num_blocks,
+        );
     }
 
     /// Persistent-API wide-cube forward DCT8. Same I/O contract as
@@ -2875,6 +2923,87 @@ mod tests {
             q_perblock_host, q_broadcast_host,
             "broadcast-W fused must match per-block fused when weights are replicated"
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_idct_8x8_set_dc_scatter_matches_split() {
+        // The fused IDCT8 + set_dc + scatter must produce a plane
+        // bit-identical to the three-launch chain it replaces:
+        //   set_dc_from_grid_indexed_persistent → idct_8x8_persistent
+        //     → indexed_scatter_blocks_persistent
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        // 4×3 block-grid (32×24 pixels) is enough to exercise both
+        // axes without overspending build time on the GPU.
+        let xb = 4u32;
+        let yb = 3u32;
+        let pw = (xb * 8) as u32;
+        let ph = (yb * 8) as u32;
+        let n_blocks = (xb * yb) as u32;
+        let n = (n_blocks as usize) * 64;
+
+        // Non-uniform AC dequant coefs (varied per block / per coef).
+        let dequant: Vec<f32> = (0..n)
+            .map(|i| ((i.wrapping_mul(31) % 251) as f32 / 251.0 - 0.5) * 2.0)
+            .collect();
+        // Coords cover every (bx, by) cell — IDCT runs on all of them
+        // (same as the encode/recon DCT8 hot path on a full image).
+        let mut coords: Vec<(u32, u32)> = Vec::with_capacity(n_blocks as usize);
+        for by in 0..yb {
+            for bx in 0..xb {
+                coords.push((bx, by));
+            }
+        }
+        // Per-block DC values stored in raster order, as the dc_grid
+        // produced by `dc_grid_8x8_persistent`.
+        let dc_host: Vec<f32> = (0..n_blocks)
+            .map(|i| 0.4 + 0.05 * i as f32)
+            .collect();
+        let g_dequant_split = enc.upload_blocks(&dequant, n_blocks, 64);
+        let g_dequant_fused = enc.upload_blocks(&dequant, n_blocks, 64);
+        let g_dc = enc.upload_blocks(&dc_host, n_blocks, 1);
+
+        // ── Split chain: set_dc → idct → indexed_scatter ──────────
+        let g_plane_split = enc.alloc_plane(pw, ph);
+        enc.set_dc_from_grid_indexed_persistent(
+            &g_dc,
+            &coords,
+            &g_dequant_split,
+            xb,
+        );
+        let g_recon = enc.idct_8x8_persistent(&g_dequant_split);
+        enc.indexed_scatter_blocks_persistent(
+            &g_recon,
+            &coords,
+            &g_plane_split,
+            8u32,
+            8u32,
+        );
+        let plane_split = enc.download_plane(&g_plane_split);
+
+        // ── Fused chain: single launch ────────────────────────────
+        let g_plane_fused = enc.alloc_plane(pw, ph);
+        enc.idct_8x8_set_dc_scatter_persistent(
+            &g_dequant_fused,
+            &g_dc,
+            &coords,
+            &g_plane_fused,
+            xb,
+        );
+        let plane_fused = enc.download_plane(&g_plane_fused);
+
+        assert_eq!(plane_split.len(), plane_fused.len());
+        // Bit-identical: same idct1d_8 calls, same DC override, same
+        // scatter destination math.
+        for (i, (&a, &b)) in plane_split.iter().zip(plane_fused.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "split vs fused diverge at idx {i}: split={a} fused={b}"
+            );
+        }
     }
 
     #[cfg(feature = "cuda")]
