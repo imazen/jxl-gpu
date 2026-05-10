@@ -78,7 +78,7 @@ use crate::launch::fused_dct_quant::{
     dct8_quantize_fused_broadcast_w_wide, dct8_quantize_fused_wide, dequant_idct8_fused_y_wide,
 };
 use crate::launch::gab::gab_smooth;
-use crate::launch::gaborish::gaborish_5x5;
+use crate::launch::gaborish::{gaborish_5x5, gaborish_5x5_3ch};
 use crate::launch::gather::{gather_blocks, scatter_blocks};
 use crate::launch::mask1x1::mask1x1;
 use crate::launch::pixel_loss::pixel_loss;
@@ -547,6 +547,62 @@ impl<R: Runtime> GpuEncoder<R> {
             height: plane.height,
             _r: core::marker::PhantomData,
         }
+    }
+
+    /// 3-channel fused gaborish — single launch processes x/y/b
+    /// together. Same math as 3 sequential `gaborish_5x5_persistent`
+    /// calls. Useful at large image sizes where the per-launch SM
+    /// scheduling overhead dominates HBM bandwidth.
+    pub fn gaborish_5x5_3ch_persistent(
+        &self,
+        x: &GpuPlane<R>,
+        y: &GpuPlane<R>,
+        b: &GpuPlane<R>,
+        weights: &GaborishWeights,
+    ) -> (GpuPlane<R>, GpuPlane<R>, GpuPlane<R>) {
+        assert_eq!(x.width, y.width);
+        assert_eq!(x.height, y.height);
+        assert_eq!(x.width, b.width);
+        assert_eq!(x.height, b.height);
+        let n = x.n_pixels();
+        let n_bytes = n * 4;
+        let descs = alloc::vec![
+            MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+            MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+            MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+        ];
+        let mut layouts = self.client_ref().empty_tensors(descs);
+        let h_b_out = layouts.pop().expect("layouts[2]").memory;
+        let h_y_out = layouts.pop().expect("layouts[1]").memory;
+        let h_x_out = layouts.pop().expect("layouts[0]").memory;
+        gaborish_5x5_3ch::<R>(
+            self.client_ref(),
+            x.handle.clone(),
+            y.handle.clone(),
+            b.handle.clone(),
+            h_x_out.clone(),
+            h_y_out.clone(),
+            h_b_out.clone(),
+            x.width,
+            x.height,
+            weights.wc,
+            weights.wr,
+            weights.wd,
+            weights.w_big_r,
+            weights.wl,
+            weights.w_big_d,
+        );
+        let mk = |h, w, ht| GpuPlane {
+            handle: h,
+            width: w,
+            height: ht,
+            _r: core::marker::PhantomData,
+        };
+        (
+            mk(h_x_out, x.width, x.height),
+            mk(h_y_out, x.width, x.height),
+            mk(h_b_out, x.width, x.height),
+        )
     }
 
     /// Persistent-API decoder gab smoothing (3×3 plus, used in
