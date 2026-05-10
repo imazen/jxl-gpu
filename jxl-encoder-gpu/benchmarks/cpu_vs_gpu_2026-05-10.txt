@@ -1,0 +1,60 @@
+CPU vs GPU encode latency — 2026-05-10
+======================================
+
+Hardware: AMD Ryzen 9 7950X + RTX (CUDA backend, cubecl 0.10)
+Method:   5 runs each after warmup, distance/effort/iters as labeled.
+GPU path: prepare_strategy_search_plan + N × encode_with_strategy_plan_adaptive
+          (lossy pipeline, NO bitstream output yet)
+CPU path: jxl_encoder::api::LossyConfig encode (full pipeline → JXL bytes)
+Image:    1024² = clic2025-1024/02809272...png (322 KB JXL output at d=1)
+          512²  = CID22-512/validation/1025469.png
+
+| Image  | Distance | CPU min  | GPU min  | Speedup |
+|--------|----------|----------|----------|---------|
+| 1024²  | d=1.0    | 425.6 ms |  67.0 ms |  6.4×   |
+| 1024²  | d=4.0    | 607.5 ms |  68.4 ms |  8.9×   |
+| 512²   | d=1.0    |  75.9 ms |  30.9 ms |  2.5×   |
+| 512²   | d=4.0    | 136.2 ms |  28.8 ms |  4.7×   |
+
+(GPU iters=1, matches CPU effort=7 which doesn't run the butteraugli
+refinement loop. e8+ adds 4 GPU iters, ~+50 ms GPU but no extra CPU
+cost since CPU at e7 doesn't iterate either.)
+
+Observations
+------------
+
+1. **GPU scales much better with image size.**
+   1024² has 4× the pixels of 512² but GPU only takes ~2× as long
+   (67 vs 31 ms). CPU takes ~5-6× as long (426 vs 76 ms). The GPU
+   has higher fixed setup cost but its parallel work amortizes.
+
+2. **CPU is slower at higher distance.**
+   d=4 takes longer than d=1 on the same image. Counterintuitive
+   for a "lossier" setting; likely because the strat-search picks
+   more large-transform candidates that need bigger cost-grid evals,
+   and the entropy codec spends more effort optimizing the cleaner
+   coefficient distributions.
+
+3. **GPU is invariant to distance.**
+   d=1 and d=4 take essentially the same GPU wall-clock (67 vs 68 ms
+   at 1024²; 31 vs 29 ms at 512²). The cost-grid evaluation runs all
+   strategies regardless; selection just changes which one is picked.
+
+4. **Extrapolation to 4K (16× pixels of 1024²):**
+   CPU likely 7-10 seconds; GPU likely 200-400 ms = 25-50× speedup.
+   Worth a real measurement next time a 4K image is on the bench.
+
+Caveats
+-------
+
+- GPU number is the lossy pipeline only. Bitstream output (entropy
+  coding + frame headers + container) is still CPU-only and would
+  add an estimated ~50-150 ms depending on strategy mix and
+  histogram complexity. Even adding that, GPU-lossy + CPU-bitstream
+  beats CPU-full by ~3-4× on 1024².
+
+- Both warmed up: cubecl pool is hot, jxl-encoder caches are
+  primed. First-run numbers are higher (cubecl JIT compile of
+  kernels can take ~1 s on cold start).
+
+- GPU bitstream port is the next big lever for end-to-end speedup.
