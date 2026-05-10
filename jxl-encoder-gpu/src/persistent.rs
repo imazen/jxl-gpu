@@ -1673,6 +1673,120 @@ impl<R: Runtime> GpuEncoder<R> {
         );
     }
 
+    /// Persistent-API indexed LLF restore for DCT64×64 (8×8 DC-grid →
+    /// 64 LLF positions per block at coeffs[iy * 64 + ix] for iy, ix
+    /// in 0..8). GPU equivalent of `dispatch_restore_llf` for DCT64×64.
+    ///
+    /// `dst.coeffs_per_block` must be 4096 (DCT64x64 standard size).
+    pub fn set_llf_dct64x64_indexed_persistent(
+        &self,
+        dc_grid: &GpuBlocks<R>,
+        coords: &[(u32, u32)],
+        dst: &GpuBlocks<R>,
+        dc_stride: u32,
+    ) {
+        assert_eq!(dc_grid.coeffs_per_block, 1);
+        assert_eq!(
+            dst.coeffs_per_block, 4096,
+            "dst.coeffs_per_block must be 4096 for DCT64x64; got {}",
+            dst.coeffs_per_block
+        );
+        assert_eq!(coords.len() as u32, dst.num_blocks);
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
+        crate::launch::set_llf::set_llf_dct64x64_indexed::<R>(
+            self.client_ref(),
+            dc_grid.handle.clone(),
+            h_coords,
+            dst.handle.clone(),
+            dc_grid.num_blocks as usize,
+            dst.total_floats(),
+            dc_stride,
+            dst.coeffs_per_block,
+            dst.num_blocks,
+        );
+    }
+
+    /// Persistent-API indexed LLF restore for DCT64×32 (8×4 DC-grid →
+    /// 32 LLF positions per block at coeffs[iy * 64 + ix] for iy in 0..4,
+    /// ix in 0..8). GPU equivalent of `dispatch_restore_llf` for DCT64×32.
+    ///
+    /// `dst.coeffs_per_block` must be 2048 (DCT64x32 standard size).
+    pub fn set_llf_dct64x32_indexed_persistent(
+        &self,
+        dc_grid: &GpuBlocks<R>,
+        coords: &[(u32, u32)],
+        dst: &GpuBlocks<R>,
+        dc_stride: u32,
+    ) {
+        assert_eq!(dc_grid.coeffs_per_block, 1);
+        assert_eq!(
+            dst.coeffs_per_block, 2048,
+            "dst.coeffs_per_block must be 2048 for DCT64x32; got {}",
+            dst.coeffs_per_block
+        );
+        assert_eq!(coords.len() as u32, dst.num_blocks);
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
+        crate::launch::set_llf::set_llf_dct64x32_indexed::<R>(
+            self.client_ref(),
+            dc_grid.handle.clone(),
+            h_coords,
+            dst.handle.clone(),
+            dc_grid.num_blocks as usize,
+            dst.total_floats(),
+            dc_stride,
+            dst.coeffs_per_block,
+            dst.num_blocks,
+        );
+    }
+
+    /// Persistent-API indexed LLF restore for DCT32×64 (4×8 DC-grid →
+    /// 32 LLF positions per block at coeffs[iy * 64 + ix] for iy in 0..4,
+    /// ix in 0..8). GPU equivalent of `dispatch_restore_llf` for DCT32×64.
+    ///
+    /// `dst.coeffs_per_block` must be 2048 (DCT32x64 standard size).
+    pub fn set_llf_dct32x64_indexed_persistent(
+        &self,
+        dc_grid: &GpuBlocks<R>,
+        coords: &[(u32, u32)],
+        dst: &GpuBlocks<R>,
+        dc_stride: u32,
+    ) {
+        assert_eq!(dc_grid.coeffs_per_block, 1);
+        assert_eq!(
+            dst.coeffs_per_block, 2048,
+            "dst.coeffs_per_block must be 2048 for DCT32x64; got {}",
+            dst.coeffs_per_block
+        );
+        assert_eq!(coords.len() as u32, dst.num_blocks);
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
+        crate::launch::set_llf::set_llf_dct32x64_indexed::<R>(
+            self.client_ref(),
+            dc_grid.handle.clone(),
+            h_coords,
+            dst.handle.clone(),
+            dc_grid.num_blocks as usize,
+            dst.total_floats(),
+            dc_stride,
+            dst.coeffs_per_block,
+            dst.num_blocks,
+        );
+    }
+
     /// Persistent-API indexed LLF restore for DCT32×16 (4×2 DC-grid →
     /// 8 LLF positions per block at coeffs[iy * 32 + ix] for iy in 0..2,
     /// ix in 0..4). GPU equivalent of `dispatch_restore_llf` for DCT32×16.
@@ -2907,6 +3021,142 @@ mod tests {
             }
             for (i, (g, e)) in dst.iter().zip(expected.iter()).enumerate() {
                 assert_eq!(g, e, "{pw}×{ph} tile {tile_w}×{tile_h} pixel {i}");
+            }
+        }
+    }
+
+    /// `set_llf_dct64x{64,32}_indexed_persistent` +
+    /// `set_llf_dct32x64_indexed_persistent` must match the host
+    /// scalar `restore_llf_dct64x64`/`restore_llf_dct64x32`/
+    /// `restore_llf_dct32x64` per-block within fp32 rounding. All
+    /// LLF positions written, AC untouched.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_set_llf_dct64_family_indexed_persistent_matches_host() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // Need a DC grid large enough to fit DCT64x64's 8×8 subgrid.
+        let xsize_blocks_8 = 16u32;
+        let ysize_blocks_8 = 16u32;
+        let n_total = (xsize_blocks_8 * ysize_blocks_8) as usize;
+        let dc_host: Vec<f32> = (0..n_total)
+            .map(|i| (i as f32 * 0.041).sin() * 0.6 + 0.25)
+            .collect();
+        let g_dc = enc.upload_blocks(&dc_host, n_total as u32, 1);
+
+        // ----- DCT64x64 (8×8 subgrid) -----
+        let mut coords_64x64: Vec<(u32, u32)> = Vec::new();
+        for by in 0..(ysize_blocks_8 - 7) {
+            for bx in 0..(xsize_blocks_8 - 7) {
+                coords_64x64.push((bx, by));
+            }
+        }
+        let cpb_64x64 = 4096u32;
+        let init_64x64: Vec<f32> = (0..(coords_64x64.len() * cpb_64x64 as usize))
+            .map(|i| -((i as f32) * 0.0007 + 1.0))
+            .collect();
+        let g_dst = enc.upload_blocks(&init_64x64, coords_64x64.len() as u32, cpb_64x64);
+        enc.set_llf_dct64x64_indexed_persistent(&g_dc, &coords_64x64, &g_dst, xsize_blocks_8);
+        let got = enc.download_blocks(&g_dst);
+        for (i, &(bx, by)) in coords_64x64.iter().enumerate() {
+            let mut sub = [0.0_f32; 64];
+            for dy in 0..8u32 {
+                for dx in 0..8u32 {
+                    let idx = ((by + dy) * xsize_blocks_8 + (bx + dx)) as usize;
+                    sub[(dy * 8 + dx) as usize] = dc_host[idx];
+                }
+            }
+            let host_llf = crate::forks::reconstruct::restore_llf_dct64x64(sub);
+            let off = i * cpb_64x64 as usize;
+            for iy in 0..8 {
+                for ix in 0..8 {
+                    let pos = iy * 64 + ix;
+                    let expected = host_llf[iy * 8 + ix];
+                    assert!(
+                        (got[off + pos] - expected).abs() < 1e-3,
+                        "DCT64x64 block {i} pos ({iy},{ix}): gpu={} host={expected}",
+                        got[off + pos]
+                    );
+                }
+            }
+            // AC sample untouched.
+            for &k in &[8usize, 9, 63, 72, 4095] {
+                assert_eq!(got[off + k], init_64x64[off + k]);
+            }
+        }
+
+        // ----- DCT64x32 (8×4 subgrid) -----
+        let mut coords_64x32: Vec<(u32, u32)> = Vec::new();
+        for by in 0..(ysize_blocks_8 - 7) {
+            for bx in 0..(xsize_blocks_8 - 3) {
+                coords_64x32.push((bx, by));
+            }
+        }
+        let cpb_64x32 = 2048u32;
+        let init_64x32: Vec<f32> = (0..(coords_64x32.len() * cpb_64x32 as usize))
+            .map(|i| -((i as f32) * 0.00029 + 1.0))
+            .collect();
+        let g_dst_64x32 = enc.upload_blocks(&init_64x32, coords_64x32.len() as u32, cpb_64x32);
+        enc.set_llf_dct64x32_indexed_persistent(&g_dc, &coords_64x32, &g_dst_64x32, xsize_blocks_8);
+        let got_64x32 = enc.download_blocks(&g_dst_64x32);
+        for (i, &(bx, by)) in coords_64x32.iter().enumerate() {
+            // Build 8×4 host subgrid: dc[iy*4+ix] for iy in 0..8, ix in 0..4.
+            let mut sub = [0.0_f32; 32];
+            for dy in 0..8u32 {
+                for dx in 0..4u32 {
+                    let idx = ((by + dy) * xsize_blocks_8 + (bx + dx)) as usize;
+                    sub[(dy * 4 + dx) as usize] = dc_host[idx];
+                }
+            }
+            let host_llf = crate::forks::reconstruct::restore_llf_dct64x32(sub);
+            let off = i * cpb_64x32 as usize;
+            for iy in 0..4 {
+                for ix in 0..8 {
+                    let pos = iy * 64 + ix;
+                    let expected = host_llf[iy * 8 + ix];
+                    assert!(
+                        (got_64x32[off + pos] - expected).abs() < 1e-3,
+                        "DCT64x32 block {i} pos ({iy},{ix}): gpu={} host={expected}",
+                        got_64x32[off + pos]
+                    );
+                }
+            }
+        }
+
+        // ----- DCT32x64 (4×8 subgrid) -----
+        let mut coords_32x64: Vec<(u32, u32)> = Vec::new();
+        for by in 0..(ysize_blocks_8 - 3) {
+            for bx in 0..(xsize_blocks_8 - 7) {
+                coords_32x64.push((bx, by));
+            }
+        }
+        let init_32x64: Vec<f32> = (0..(coords_32x64.len() * cpb_64x32 as usize))
+            .map(|i| -((i as f32) * 0.00037 + 1.0))
+            .collect();
+        let g_dst_32x64 = enc.upload_blocks(&init_32x64, coords_32x64.len() as u32, cpb_64x32);
+        enc.set_llf_dct32x64_indexed_persistent(&g_dc, &coords_32x64, &g_dst_32x64, xsize_blocks_8);
+        let got_32x64 = enc.download_blocks(&g_dst_32x64);
+        for (i, &(bx, by)) in coords_32x64.iter().enumerate() {
+            // Build 4×8 host subgrid: dc[iy*8+ix] for iy in 0..4, ix in 0..8.
+            let mut sub = [0.0_f32; 32];
+            for dy in 0..4u32 {
+                for dx in 0..8u32 {
+                    let idx = ((by + dy) * xsize_blocks_8 + (bx + dx)) as usize;
+                    sub[(dy * 8 + dx) as usize] = dc_host[idx];
+                }
+            }
+            let host_llf = crate::forks::reconstruct::restore_llf_dct32x64(sub);
+            let off = i * cpb_64x32 as usize;
+            for iy in 0..4 {
+                for ix in 0..8 {
+                    let pos = iy * 64 + ix;
+                    let expected = host_llf[iy * 8 + ix];
+                    assert!(
+                        (got_32x64[off + pos] - expected).abs() < 1e-3,
+                        "DCT32x64 block {i} pos ({iy},{ix}): gpu={} host={expected}",
+                        got_32x64[off + pos]
+                    );
+                }
             }
         }
     }

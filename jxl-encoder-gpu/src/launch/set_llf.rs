@@ -9,7 +9,8 @@ use cubecl::server::Handle;
 use crate::kernels::set_llf::{
     set_llf_dct16x16_indexed_kernel, set_llf_dct16x32_indexed_kernel,
     set_llf_dct16x8_or_8x16_indexed_kernel, set_llf_dct32x16_indexed_kernel,
-    set_llf_dct32x32_indexed_kernel,
+    set_llf_dct32x32_indexed_kernel, set_llf_dct32x64_indexed_kernel,
+    set_llf_dct64x32_indexed_kernel, set_llf_dct64x64_indexed_kernel,
 };
 
 const TPB: u32 = 256;
@@ -41,6 +42,45 @@ pub fn set_llf_dct16x16_indexed<R: Runtime>(
         );
     }
 }
+
+/// Generates the launcher boilerplate for the per-block-thread LLF
+/// kernels that all share the same (dc_grid, coords, dst, dc_stride,
+/// coeffs_per_block, n_blocks) signature.
+macro_rules! per_block_launcher {
+    ($fn_name:ident, $kernel:ident) => {
+        #[allow(clippy::too_many_arguments)]
+        pub fn $fn_name<R: Runtime>(
+            client: &ComputeClient<R>,
+            dc_grid: Handle,
+            coords: Handle,
+            dst: Handle,
+            dc_grid_n: usize,
+            dst_n: usize,
+            dc_stride: u32,
+            coeffs_per_block: u32,
+            n_blocks: u32,
+        ) {
+            let cubes = n_blocks.div_ceil(TPB).max(1);
+            unsafe {
+                $kernel::launch_unchecked::<R>(
+                    client,
+                    CubeCount::Static(cubes, 1, 1),
+                    CubeDim::new_1d(TPB),
+                    ArrayArg::from_raw_parts(dc_grid, dc_grid_n),
+                    ArrayArg::from_raw_parts(coords, (n_blocks as usize) * 2),
+                    ArrayArg::from_raw_parts(dst, dst_n),
+                    dc_stride,
+                    coeffs_per_block,
+                    n_blocks,
+                );
+            }
+        }
+    };
+}
+
+per_block_launcher!(set_llf_dct64x64_indexed, set_llf_dct64x64_indexed_kernel);
+per_block_launcher!(set_llf_dct64x32_indexed, set_llf_dct64x32_indexed_kernel);
+per_block_launcher!(set_llf_dct32x64_indexed, set_llf_dct32x64_indexed_kernel);
 
 #[allow(clippy::too_many_arguments)]
 pub fn set_llf_dct32x16_indexed<R: Runtime>(
