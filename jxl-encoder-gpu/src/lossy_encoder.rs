@@ -959,9 +959,11 @@ impl<R: Runtime> LossyEncoder<R> {
         // distance-ramp.
         let distance = target_distance;
         use crate::forks::cost::{
-            compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16,
-            strategy_search_costs_dct32x16_or_16x32, strategy_search_costs_dct32x32,
-            strategy_search_costs_dct64x32_or_32x64, strategy_search_costs_dct64x64,
+            compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16_persistent,
+            strategy_search_costs_dct32x16_or_16x32_persistent,
+            strategy_search_costs_dct32x32_persistent,
+            strategy_search_costs_dct64x32_or_32x64_persistent,
+            strategy_search_costs_dct64x64_persistent,
             strategy_search_costs_dct8_16x16_persistent, strategy_search_costs_subblock_8x8,
         };
         use crate::forks::reconstruct::compute_dc_grid_per_8x8_block;
@@ -1252,11 +1254,11 @@ impl<R: Runtime> LossyEncoder<R> {
         for c in cost_identity.iter_mut() { *c *= dist_bias; }
         for c in cost_dct2x2.iter_mut() { *c *= dist_bias; }
 
-        let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16(
+        let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16_persistent(
             enc,
-            &xyb_x,
-            &xyb_y,
-            &xyb_b,
+            &xx_g,
+            &xy_g,
+            &xb_g,
             pw,
             ph,
             &g_mask,
@@ -1275,11 +1277,11 @@ impl<R: Runtime> LossyEncoder<R> {
             scaled_constants,
         );
         mark("cost_dct16x8");
-        let cost_dct8x16 = strategy_search_costs_dct16x8_or_8x16(
+        let cost_dct8x16 = strategy_search_costs_dct16x8_or_8x16_persistent(
             enc,
-            &xyb_x,
-            &xyb_y,
-            &xyb_b,
+            &xx_g,
+            &xy_g,
+            &xb_g,
             pw,
             ph,
             &g_mask,
@@ -1319,11 +1321,11 @@ impl<R: Runtime> LossyEncoder<R> {
             let inv_32x: Vec<f32> = dct32_x.iter().map(|w| 1.0 / w).collect();
             let inv_32y: Vec<f32> = dct32_y.iter().map(|w| 1.0 / w).collect();
             let inv_32b: Vec<f32> = dct32_b.iter().map(|w| 1.0 / w).collect();
-            strategy_search_costs_dct32x32(
+            strategy_search_costs_dct32x32_persistent(
                 enc,
-                &xyb_x,
-                &xyb_y,
-                &xyb_b,
+                &xx_g,
+                &xy_g,
+                &xb_g,
                 pw,
                 ph,
                 &g_mask,
@@ -1364,14 +1366,14 @@ impl<R: Runtime> LossyEncoder<R> {
             let inv_32x16_x: Vec<f32> = dct32x16_x.iter().map(|w| 1.0 / w).collect();
             let inv_32x16_y: Vec<f32> = dct32x16_y.iter().map(|w| 1.0 / w).collect();
             let inv_32x16_b: Vec<f32> = dct32x16_b.iter().map(|w| 1.0 / w).collect();
-            let c_32x16 = strategy_search_costs_dct32x16_or_16x32(
-                enc, &xyb_x, &xyb_y, &xyb_b, pw, ph, &g_mask, RAW_STRATEGY_DCT32X16,
+            let c_32x16 = strategy_search_costs_dct32x16_or_16x32_persistent(
+                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask, RAW_STRATEGY_DCT32X16,
                 &dct32x16_x, &dct32x16_y, &dct32x16_b,
                 &inv_32x16_x, &inv_32x16_y, &inv_32x16_b,
                 qac, qac, qac, 0, 0, scaled_constants,
             );
-            let c_16x32 = strategy_search_costs_dct32x16_or_16x32(
-                enc, &xyb_x, &xyb_y, &xyb_b, pw, ph, &g_mask, RAW_STRATEGY_DCT16X32,
+            let c_16x32 = strategy_search_costs_dct32x16_or_16x32_persistent(
+                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask, RAW_STRATEGY_DCT16X32,
                 &dct32x16_x, &dct32x16_y, &dct32x16_b,
                 &inv_32x16_x, &inv_32x16_y, &inv_32x16_b,
                 qac, qac, qac, 0, 0, scaled_constants,
@@ -1409,20 +1411,20 @@ impl<R: Runtime> LossyEncoder<R> {
             let inv_64x32_x: Vec<f32> = dct64x32_x.iter().map(|w| 1.0 / w).collect();
             let inv_64x32_y: Vec<f32> = dct64x32_y.iter().map(|w| 1.0 / w).collect();
             let inv_64x32_b: Vec<f32> = dct64x32_b.iter().map(|w| 1.0 / w).collect();
-            let c64 = strategy_search_costs_dct64x64(
-                enc, &xyb_x, &xyb_y, &xyb_b, pw, ph, &g_mask,
+            let c64 = strategy_search_costs_dct64x64_persistent(
+                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask,
                 &dct64_x, &dct64_y, &dct64_b,
                 &inv_64x, &inv_64y, &inv_64b,
                 qac, qac, qac, 0, 0, scaled_constants,
             );
-            let c64x32 = strategy_search_costs_dct64x32_or_32x64(
-                enc, &xyb_x, &xyb_y, &xyb_b, pw, ph, &g_mask, RAW_STRATEGY_DCT64X32,
+            let c64x32 = strategy_search_costs_dct64x32_or_32x64_persistent(
+                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask, RAW_STRATEGY_DCT64X32,
                 &dct64x32_x, &dct64x32_y, &dct64x32_b,
                 &inv_64x32_x, &inv_64x32_y, &inv_64x32_b,
                 qac, qac, qac, 0, 0, scaled_constants,
             );
-            let c32x64 = strategy_search_costs_dct64x32_or_32x64(
-                enc, &xyb_x, &xyb_y, &xyb_b, pw, ph, &g_mask, RAW_STRATEGY_DCT32X64,
+            let c32x64 = strategy_search_costs_dct64x32_or_32x64_persistent(
+                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask, RAW_STRATEGY_DCT32X64,
                 &dct64x32_x, &dct64x32_y, &dct64x32_b,
                 &inv_64x32_x, &inv_64x32_y, &inv_64x32_b,
                 qac, qac, qac, 0, 0, scaled_constants,

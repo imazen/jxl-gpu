@@ -2288,6 +2288,280 @@ pub fn strategy_search_costs_dct16x8_or_8x16<R: Runtime>(
     )
 }
 
+/// Internal helper: runs the full estimate_entropy_full pipeline for a
+/// single rectangular non-DCT8 strategy on GPU-resident inputs.
+///
+/// Gathers per-tile GpuBlocks from the supplied GpuPlanes, computes the
+/// per-block mask_row_base offsets, and forwards to
+/// `estimate_entropy_full_strategy_batch_persistent`. Returns the
+/// Vec<f32> cost grid in raster order at the strategy's natural
+/// alignment (caller treats as `Vec::new()` if the dims don't tile).
+#[allow(clippy::too_many_arguments)]
+fn rect_strategy_cost_xyb_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_plane_x: &crate::persistent::GpuPlane<R>,
+    xyb_plane_y: &crate::persistent::GpuPlane<R>,
+    xyb_plane_b: &crate::persistent::GpuPlane<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    raw_strategy: u8,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+    entropy_mul: f32,
+) -> Vec<f32> {
+    use crate::forks::transform::tile_dims_pixels;
+    let (tile_w, tile_h) = tile_dims_pixels(raw_strategy);
+    if !padded_width.is_multiple_of(tile_w) || !padded_height.is_multiple_of(tile_h) {
+        return Vec::new();
+    }
+    let bx = padded_width / tile_w;
+    let by = padded_height / tile_h;
+    let n_blocks = bx * by;
+    let g_bx = enc.gather_blocks_persistent(xyb_plane_x, tile_w as u32, tile_h as u32);
+    let g_by = enc.gather_blocks_persistent(xyb_plane_y, tile_w as u32, tile_h as u32);
+    let g_bb = enc.gather_blocks_persistent(xyb_plane_b, tile_w as u32, tile_h as u32);
+    let mask_row_base: Vec<u32> = (0..n_blocks)
+        .map(|i| {
+            let bx_i = i % bx;
+            let by_i = i / bx;
+            (by_i * tile_h * padded_width + bx_i * tile_w) as u32
+        })
+        .collect();
+    estimate_entropy_full_strategy_batch_persistent(
+        enc,
+        &g_bx,
+        &g_by,
+        &g_bb,
+        raw_strategy,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        &mask_row_base,
+        scaled_constants,
+        entropy_mul,
+        CostMode::Upstream {
+            quant_for_coeffs: quant_y,
+        },
+    )
+}
+
+/// Persistent variant of [`strategy_search_costs_dct16x8_or_8x16`].
+/// Takes XYB GpuPlanes, gathers tile blocks internally on GPU.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct16x8_or_8x16_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_plane_x: &crate::persistent::GpuPlane<R>,
+    xyb_plane_y: &crate::persistent::GpuPlane<R>,
+    xyb_plane_b: &crate::persistent::GpuPlane<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    raw_strategy: u8,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> Vec<f32> {
+    use crate::forks::transform::{RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT8X16};
+    debug_assert!(
+        raw_strategy == RAW_STRATEGY_DCT16X8 || raw_strategy == RAW_STRATEGY_DCT8X16,
+        "this helper is for DCT16x8/DCT8x16 only; got {raw_strategy}"
+    );
+    rect_strategy_cost_xyb_persistent(
+        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
+        padded_width, padded_height, mask1x1, raw_strategy,
+        weights_x, weights_y, weights_b,
+        inv_weights_x, inv_weights_y, inv_weights_b,
+        quant_x, quant_y, quant_b, ytox, ytob,
+        scaled_constants, 1.21_f32,
+    )
+}
+
+/// Persistent variant of [`strategy_search_costs_dct32x32`]. Takes XYB
+/// GpuPlanes, gathers 32×32 blocks internally. Returns Vec::new() when
+/// dims aren't multiples of 32 (matches the host-slice variant).
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct32x32_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_plane_x: &crate::persistent::GpuPlane<R>,
+    xyb_plane_y: &crate::persistent::GpuPlane<R>,
+    xyb_plane_b: &crate::persistent::GpuPlane<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> Vec<f32> {
+    use crate::forks::transform::RAW_STRATEGY_DCT32X32;
+    // entropy_mul = 3.0 — see the host-slice variant for bisection history.
+    rect_strategy_cost_xyb_persistent(
+        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
+        padded_width, padded_height, mask1x1, RAW_STRATEGY_DCT32X32,
+        weights_x, weights_y, weights_b,
+        inv_weights_x, inv_weights_y, inv_weights_b,
+        quant_x, quant_y, quant_b, ytox, ytob,
+        scaled_constants, 3.0_f32,
+    )
+}
+
+/// Persistent variant of [`strategy_search_costs_dct32x16_or_16x32`].
+/// Takes XYB GpuPlanes, gathers tile blocks internally. Returns
+/// Vec::new() when dims aren't aligned for the chosen strategy.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct32x16_or_16x32_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_plane_x: &crate::persistent::GpuPlane<R>,
+    xyb_plane_y: &crate::persistent::GpuPlane<R>,
+    xyb_plane_b: &crate::persistent::GpuPlane<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    raw_strategy: u8,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> Vec<f32> {
+    use crate::forks::transform::{RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16};
+    debug_assert!(
+        raw_strategy == RAW_STRATEGY_DCT32X16 || raw_strategy == RAW_STRATEGY_DCT16X32,
+        "this helper is for DCT32x16/DCT16x32 only; got {raw_strategy}"
+    );
+    // entropy_mul = 2.2 — see the host-slice variant for bisection history.
+    rect_strategy_cost_xyb_persistent(
+        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
+        padded_width, padded_height, mask1x1, raw_strategy,
+        weights_x, weights_y, weights_b,
+        inv_weights_x, inv_weights_y, inv_weights_b,
+        quant_x, quant_y, quant_b, ytox, ytob,
+        scaled_constants, 2.2_f32,
+    )
+}
+
+/// Persistent variant of [`strategy_search_costs_dct64x64`]. Takes XYB
+/// GpuPlanes, gathers 64×64 blocks internally. Returns Vec::new() when
+/// dims aren't multiples of 64.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct64x64_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_plane_x: &crate::persistent::GpuPlane<R>,
+    xyb_plane_y: &crate::persistent::GpuPlane<R>,
+    xyb_plane_b: &crate::persistent::GpuPlane<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> Vec<f32> {
+    use crate::forks::transform::RAW_STRATEGY_DCT64X64;
+    // entropy_mul = 4.8 — see the host-slice variant for bisection history.
+    rect_strategy_cost_xyb_persistent(
+        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
+        padded_width, padded_height, mask1x1, RAW_STRATEGY_DCT64X64,
+        weights_x, weights_y, weights_b,
+        inv_weights_x, inv_weights_y, inv_weights_b,
+        quant_x, quant_y, quant_b, ytox, ytob,
+        scaled_constants, 4.8_f32,
+    )
+}
+
+/// Persistent variant of [`strategy_search_costs_dct64x32_or_32x64`].
+/// Takes XYB GpuPlanes, gathers tile blocks internally.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct64x32_or_32x64_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_plane_x: &crate::persistent::GpuPlane<R>,
+    xyb_plane_y: &crate::persistent::GpuPlane<R>,
+    xyb_plane_b: &crate::persistent::GpuPlane<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    raw_strategy: u8,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> Vec<f32> {
+    use crate::forks::transform::{RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT64X32};
+    debug_assert!(
+        raw_strategy == RAW_STRATEGY_DCT64X32 || raw_strategy == RAW_STRATEGY_DCT32X64,
+        "this helper is for DCT64x32/DCT32x64 only; got {raw_strategy}"
+    );
+    // entropy_mul = 4.8 — same as DCT64x64; see host-slice variant.
+    rect_strategy_cost_xyb_persistent(
+        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
+        padded_width, padded_height, mask1x1, raw_strategy,
+        weights_x, weights_y, weights_b,
+        inv_weights_x, inv_weights_y, inv_weights_b,
+        quant_x, quant_y, quant_b, ytox, ytob,
+        scaled_constants, 4.8_f32,
+    )
+}
+
 /// Useful as a quick proxy cost — cheaper than full pixel-loss but
 /// still mask-aware.
 #[allow(clippy::too_many_arguments)]
