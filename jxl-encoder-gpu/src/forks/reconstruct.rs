@@ -2527,6 +2527,14 @@ pub fn xyb_to_linear_rgb_gpu<R: Runtime>(
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant, clippy::erasing_op)]
+// Tests below use literals like `3.14`, `2.71`, `1.41`, `0.577` as
+// arbitrary distinct test-data values — NOT approximations of PI, e,
+// sqrt(2), or 1/sqrt(3) (silences `approx_constant`). Some
+// row-major index expressions like `plane[0 * padded_w + 24]` keep
+// the `0 *` prefix for symmetry with neighbouring `plane[r * padded_w
+// + c]` indexing — clippy::erasing_op would prefer dropping the zero
+// term, but the symmetry aids readability of the test layout.
 mod tests {
     use super::*;
 

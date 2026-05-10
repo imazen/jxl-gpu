@@ -7,6 +7,11 @@
 //! Runs entirely on CPU — no GPU launch — to isolate algorithmic vs
 //! kernel-codegen issues.
 
+// `0 * 13` in the input-synthesis loop preserves the full-grid
+// pattern shape (`j * 13 + i * 17` for block (j, _)) for diff-ability
+// against other ports of the same fixture.
+#![allow(clippy::erasing_op)]
+
 fn main() {
     const SQRT2: f32 = core::f32::consts::SQRT_2;
     const WC4_0: f32 = 0.541_196_1;
