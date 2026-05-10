@@ -376,6 +376,28 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         padded_height as u32,
     );
 
+    // Allocate a zero-init GPU plane that 1×1-LLF non-AFV strategies
+    // (DCT8 + DCT4-family + IDENTITY + DCT2X2) scatter their IDCT
+    // output into directly. Other strategies (rect-DCT16/DCT32/DCT64
+    // family + AFV) still write the host out_plane via the existing
+    // path. At function exit we add g_out_plane back into out_plane —
+    // disjoint per-pixel coverage means addition equals union.
+    //
+    // Why disjoint: AC strategy assignments partition the image's 8×8
+    // grid; every pixel is covered by exactly one strategy. Both
+    // out_plane (caller-supplied zero-init) and g_out_plane (uploaded
+    // zeros) start blank, so adding their non-zero positions is the
+    // strategy-set union with no overlap.
+    let zero_plane: Vec<f32> = vec![0.0_f32; padded_width * padded_height];
+    let g_out_plane = enc.upload_plane(&zero_plane, padded_width as u32, padded_height as u32);
+    let mut used_gpu_for_any = false;
+
+    // Upload the per-(8×8)-block DC grid ONCE (caller-supplied). Used
+    // by the 1×1-LLF GPU LLF restore (set_dc_from_grid_indexed_persistent)
+    // for every 1×1-LLF strategy that the loop sees.
+    let n_blocks_8x8 = (xsize_blocks_8 * ysize_blocks_8) as u32;
+    let g_dc_grid = enc.upload_blocks(dc_grid_per_8x8_block, n_blocks_8x8, 1);
+
     // Per-strategy: encode and store dequant result. Buffers live in
     // `coeff_buffers` for the lifetime of the recipe build + reconstruct
     // call below.
@@ -559,6 +581,40 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             enc.dequant_strategy_persistent(&g_quant, &weights_template, &qac_for_strategy)
         };
 
+        // 1×1-LLF non-AFV fast path: GPU LLF restore + GPU IDCT + GPU
+        // scatter, fully bypassing the host download/LLF-loop/re-upload
+        // round-trip the slower path below pays.
+        //
+        // Eligible strategies: DCT8, DCT4×4, DCT4×8, DCT8×4, IDENTITY,
+        // DCT2X2 (every strategy whose llf_dim_x = llf_dim_y = 1, except
+        // AFV which is handled by the dedicated branch above).
+        if llf_x == 1 && llf_y == 1 {
+            // GPU LLF restore: writes dc_grid[by * stride + bx] into
+            // position 0 of each block. AC positions untouched.
+            enc.set_dc_from_grid_indexed_persistent(
+                &g_dc_grid,
+                &coords_u32,
+                &g_dequant,
+                xsize_blocks_8 as u32,
+            );
+            // Persistent IDCT for this strategy + GPU scatter back into
+            // g_out_plane at the strategy's tile positions.
+            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
+                enc,
+                &g_dequant,
+                raw_strategy,
+            );
+            enc.indexed_scatter_blocks_persistent(
+                &g_recon,
+                &coords_u32,
+                &g_out_plane,
+                tile_w as u32,
+                tile_h as u32,
+            );
+            used_gpu_for_any = true;
+            continue;
+        }
+
         // Step 3: download dequant result for host LLF restore.
         // (LLF restore is per-block scalar work; deferring to host
         // avoids a separate GPU kernel per strategy. Future work could
@@ -604,8 +660,22 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         }
     }
 
-    // Step 6: dispatch mixed-strategy reconstruct.
+    // Step 6: dispatch mixed-strategy reconstruct (host LLF + AFV path).
     reconstruct_mixed_strategy_gpu(enc, &recipes, out_plane, padded_width);
+
+    // Step 7: merge GPU-resident scatter results back into out_plane.
+    // The 1×1-LLF non-AFV fast path scatters its IDCT outputs into
+    // g_out_plane on GPU; here we download once and add into the host
+    // out_plane. Disjoint per-pixel coverage (AC strategy partitioning)
+    // means addition equals union with no overlap. Skip the download
+    // entirely if no GPU-fast-path strategy fired this call.
+    if used_gpu_for_any {
+        let gpu_out = enc.download_plane(&g_out_plane);
+        debug_assert_eq!(gpu_out.len(), out_plane.len());
+        for (o, g) in out_plane.iter_mut().zip(gpu_out.iter()) {
+            *o += *g;
+        }
+    }
 }
 
 /// 3-channel wrapper around [`encode_and_reconstruct_mixed_strategy_single_channel`].
