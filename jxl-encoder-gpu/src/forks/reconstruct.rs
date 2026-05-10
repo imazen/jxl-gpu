@@ -709,6 +709,18 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             // g_recon GpuBlocks roundtrip (~256 bytes/block of HBM
             // traffic). Bit-identical to the split chain — proven by
             // test_idct_8x8_set_dc_scatter_matches_split.
+            //
+            // NOTE: A 4-way fused variant exists
+            // (dequant_idct_dc_scatter_dct8_persistent) that ALSO
+            // collapses the dequant step. Bit-identical and
+            // unit-tested across all 3 channels, but paired A/B on
+            // CLIC photo (10 runs each) showed +3.4% mixed_strategy_
+            // encode_recon vs the 3-way version — likely register
+            // pressure / occupancy from doing dequant + IDCT + scatter
+            // in a single cube_dim=1 cube. Available as
+            // `dequant_idct_dc_scatter_dct8_persistent` if a wide-cube
+            // variant or a different occupancy-balanced design proves
+            // out later.
             if raw_strategy == RAW_STRATEGY_DCT {
                 enc.idct_8x8_set_dc_scatter_persistent(
                     &g_dequant,
