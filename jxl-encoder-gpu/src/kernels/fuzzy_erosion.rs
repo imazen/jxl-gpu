@@ -18,6 +18,11 @@
 //! buffer).
 
 #![allow(clippy::assign_op_pattern)]
+// Sorting-network manual swaps in `weighted_min4_3x3` (~6 conditional
+// `let t = a; a = b; b = t;` patterns). cubecl 0.10's `#[cube]` body
+// can't call `core::mem::swap` (per `cubecl_type_gotchas.md`), so the
+// manual form is required, not stylistic.
+#![allow(clippy::manual_swap)]
 
 use cubecl::prelude::*;
 
