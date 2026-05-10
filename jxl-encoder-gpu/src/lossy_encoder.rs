@@ -1125,14 +1125,11 @@ impl<R: Runtime> LossyEncoder<R> {
 
         // 8x8 sub-block strategies (DCT4x4, DCT4x8, DCT8x4, IDENTITY,
         // DCT2x2). All extract 8x8 tiles → 64 coefs. We pre-gather
-        // 8x8 blocks ONCE, upload to GPU, then run all 5 cost-grid
-        // producers against the same GpuBlocks.
-        let bx8_full = crate::forks::cost::repack_plane_to_blocks(&xyb_x, pw, ph, 8, 8);
-        let by8_full = crate::forks::cost::repack_plane_to_blocks(&xyb_y, pw, ph, 8, 8);
-        let bb8_full = crate::forks::cost::repack_plane_to_blocks(&xyb_b, pw, ph, 8, 8);
-        let g_8x = enc.upload_blocks(&bx8_full, (xb8 * yb8) as u32, 64);
-        let g_8y = enc.upload_blocks(&by8_full, (xb8 * yb8) as u32, 64);
-        let g_8b = enc.upload_blocks(&bb8_full, (xb8 * yb8) as u32, 64);
+        // 8x8 blocks ONCE on GPU (xx_g/xy_g/xb_g are still resident),
+        // then run all 5 cost-grid producers against the same GpuBlocks.
+        let g_8x = enc.gather_blocks_persistent(&xx_g, 8, 8);
+        let g_8y = enc.gather_blocks_persistent(&xy_g, 8, 8);
+        let g_8b = enc.gather_blocks_persistent(&xb_g, 8, 8);
 
         let (dct4x4_x, dct4x4_y, dct4x4_b) = dct4x4_weights_per_channel();
         let inv_4x4_x: Vec<f32> = dct4x4_x.iter().map(|w| 1.0 / w).collect();
