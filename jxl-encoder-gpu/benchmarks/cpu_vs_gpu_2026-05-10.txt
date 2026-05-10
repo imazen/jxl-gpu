@@ -22,6 +22,29 @@ Image:    1024² = clic2025-1024/02809272...png (322 KB JXL output at d=1)
 | clic2025/a365e654… → Triangle | 32.00 MP | d=1.0    | 10907.7 ms | 1262.7 ms|   8.64× |
 | clic2025/a365e654… → Triangle | 48.00 MP | d=1.0    | 18101.5 ms | 2031.6 ms|   8.91× |
 
+After sync-barrier removals (2026-05-10, 5 commits: 78ca825c → 814795e5)
+=========================================================================
+
+| Image                         | Pixels   | Distance | CPU min    | GPU min  | Speedup | GPU Δ vs above |
+|-------------------------------|----------|----------|------------|----------|---------|----------------|
+| clic2025-1024/02809272…       |  1.05 MP | d=1.0    |   407.3 ms |  60.0 ms |   6.79× |   -10%         |
+| clic2025/a365e654… (native)   |  2.79 MP | d=1.0    |  1129.9 ms |  95.8 ms |  11.80× |    -8%         |
+| clic2025/a365e654… → Triangle | 16.00 MP | d=1.0    |  5088.1 ms | 547.5 ms |   9.29× |   -18%         |
+| 02809272 → Triangle           | 16.00 MP | d=1.0    |  4318.5 ms | 665.0 ms |   6.49× |     —          |
+| clic2025/a365e654… → Triangle | 32.00 MP | d=1.0    | 11152.8 ms |1133.6 ms |   9.84× |   -10%         |
+| 02809272 → Triangle           | 32.00 MP | d=1.0    | 10273.1 ms |1388.2 ms |   7.40× |     —          |
+
+Sync-barrier removals committed:
+  * 78ca825c — drop xyb host download in prepare (-12% prep at 16 MP)
+  * f317d69f — drop dc_grid host downloads (-3% additional)
+  * dd498330 — batch cost-grid stats+losses download (1 read for 6) (-3%)
+  * 814795e5 — batch download_planes_3ch in run_pipeline_with_qac
+
+Net effect: 16 MP GPU encode -18% (671 → 547 ms), CPU/GPU speedup
+peaks at ~12× on native 2.78 MP (was 10.7×) and sustains ~9-10× at
+larger sizes. The GPU pipeline is now mostly compute-bound rather
+than sync-bound.
+
 (GPU iters=1, matches CPU effort=7 which doesn't run the butteraugli
 refinement loop. e8+ adds 4 GPU iters, ~+50 ms GPU but no extra CPU
 cost since CPU at e7 doesn't iterate either.)
