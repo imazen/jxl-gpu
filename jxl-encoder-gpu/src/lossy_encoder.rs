@@ -1878,10 +1878,9 @@ impl<R: Runtime> LossyEncoder<R> {
         // strategy reconstruct scatters into them via indexed_scatter
         // (see out_plane_*_gpu params below). Postpass (gab_smooth +
         // EPF + xyb_to_linear) chains straight into them — no need
-        // for the upload_plane(plane_*) round-trip the older code did.
-        let mut plane_x = vec![0.0_f32; pw * ph];
-        let mut plane_y = vec![0.0_f32; pw * ph];
-        let mut plane_b = vec![0.0_f32; pw * ph];
+        // for the upload_plane(plane_*) round-trip the older code did
+        // and no need for the host plane_x/y/b alloc (12 MB / iter at
+        // 1024² avoided across 4 butteraugli refinement iters).
         let recon_x_p = enc.alloc_plane(self.padded_width, self.padded_height);
         let recon_y_p = enc.alloc_plane(self.padded_width, self.padded_height);
         let recon_b_p = enc.alloc_plane(self.padded_width, self.padded_height);
@@ -1905,9 +1904,11 @@ impl<R: Runtime> LossyEncoder<R> {
             &plan.dc_grid_x,
             &plan.dc_grid_y,
             &plan.dc_grid_b,
-            &mut plane_x,
-            &mut plane_y,
-            &mut plane_b,
+            // No host out_plane needed — every strategy scatters into
+            // recon_*_p (out_plane_*_gpu = Some below).
+            None,
+            None,
+            None,
             // Plumb through the GpuPlanes from the prepare stage so the
             // per-iter encode skips the redundant upload_plane(xyb)
             // PCIe transfer (3 × 4MB at 1024² → savings stack across
@@ -1928,11 +1929,6 @@ impl<R: Runtime> LossyEncoder<R> {
             Some(&recon_y_p),
             Some(&recon_b_p),
         );
-        // Skip the host plane_x/y/b: they were allocated for the
-        // legacy host-merge path but are now untouched (the GPU plane
-        // holds the recon). Keep the Vec allocation cheap by using
-        // an empty Vec to make rust-compiler-happy.
-        let _ = (&plane_x, &plane_y, &plane_b);
         mark("mixed_strategy_encode_recon");
 
 
