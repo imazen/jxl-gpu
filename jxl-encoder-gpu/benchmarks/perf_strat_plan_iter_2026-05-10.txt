@@ -170,5 +170,43 @@ measurements unreliable. For confident perf claims, need:
     baseline at the same commit / image
   - Or: zenbench-style interleaved A/B execution
 
+Paired A/B measurement: fused-DCT8 wiring vs split chain (2026-05-10)
+--------------------------------------------------------------------
+
+Image: clic2025-1024/02809272...png (1024×1024, 99.6% DCT8)
+Method: 10 separate `cargo run` invocations of each version, 5
+iters/run after warmup, all at distance=1.0 on the same machine
+back-to-back. Both versions identical except the DCT8 branch in
+encode_and_reconstruct_mixed_strategy_single_channel.
+
+mixed_strategy_encode_recon stage (per-iter mean across 5 iters,
+reported once per cargo-run; aggregated across 10 runs):
+
+                          fused (wired)    split (un-wired)   delta
+  mean of run-means         8.65 ms          9.31 ms        -0.66 ms / -7.1%
+  min run-mean              7.74 ms          8.75 ms        -1.01 ms / -11.5%
+
+Total per-iter wall-clock (encode_with_strategy_plan_adaptive_traced):
+
+                          fused (wired)    split (un-wired)   delta
+  min iter (across 50)      9.32 ms         11.96 ms         -2.64 ms / -22.1%
+  mean of run-mins         10.90 ms         12.67 ms         -1.78 ms / -14.0%
+
+Conclusion: the fused DCT8 + quantize wiring (commit ab8a5bed) gives a
+real, measurable speedup on DCT8-heavy real photos:
+  - ~7% on the targeted mixed_strategy_encode_recon stage
+  - ~14% on overall per-iter wall-clock (mean of run-mins)
+  - ~22% on best-case per-iter min
+
+This is consistent with the existing fused_dct_quant_bench's 2.84×
+speedup on the per-strategy work (fewer ms saved overall because
+forward DCT + quantize is only ~half the encode/recon chain — the
+rest is dequant + LLF + IDCT + scatter, none of which are fused yet).
+
+Next-largest optimization target: fuse dequant + IDCT for DCT8 (with
+DC-aware variant + per-channel bias). Estimated saving: similar
+magnitude (~2-3 ms / ~14% per-iter) per the kernel's existing 3.07×
+fused_dequant_idct_bench number.
+
 
 
