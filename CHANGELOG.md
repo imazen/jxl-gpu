@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### u8 RGB upload fast-path for prepare_strategy_search_plan (May 10, 2026)
+
+`LossyEncoder::prepare_strategy_search_plan_traced_from_u8` accepts raw
+interleaved sRGB u8 RGB bytes (the standard PNG-decoded layout) and runs
+sRGB → linear conversion + edge-replication padding in a single fused
+GPU launch. Skips both the host-side per-pixel `powf` preprocessing and
+the 3× larger f32 plane upload that the f32 entry point would do.
+
+End-to-end paired A/B (`examples/perf_strat_plan_u8_vs_f32`):
+
+| Pixels  | f32 path | u8 path | Speedup | Δ saved |
+|---------|---------:|--------:|--------:|--------:|
+| 1.05 MP |  29.4 ms | 24.0 ms |  1.22×  |  −5 ms  |
+| 16 MP   |   703 ms |  499 ms |  1.41×  | −204 ms |
+
+Bound below by cubecl 0.10's slow upload path (see "cubecl upload
+bandwidth ceiling" in CLAUDE.md). Existing f32 entry point
+(`prepare_strategy_search_plan_traced`) unchanged.
+
+Commits: a7d9be33, 1e771f01.
+
 ### Architectural position vs jxl-encoder CPU (clarified May 9, 2026)
 
 This crate is a GPU acceleration library, NOT a competing JXL bitstream
