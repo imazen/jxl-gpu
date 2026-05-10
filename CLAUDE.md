@@ -287,10 +287,20 @@ don't repeat the experiments:
   `client.empty()` + a tiny GPU zero_fill kernel **regressed encode
   iter 5×** at 16 MP (605 → 2947 ms; iter-to-iter 1489→3305ms,
   monotonically increasing). cubecl's `empty()` apparently doesn't
-  pool-reuse 64 MB buffers the way `create_from_slice` does. The
-  308 ms `alloc_recon_planes` cost is the production baseline until
-  the cubecl pinned-buffer PR lands or we cache empty handles
-  explicitly per-iter on `LossyEncoder`. See
+  pool-reuse 64 MB buffers the way `create_from_slice` does.
+
+  **Followup attempt (also reverted, 2026-05-10):** caching the 3
+  empty()-allocated handles on `LossyEncoder` and reusing them across
+  iters with GPU zero_fill **regressed 2×** (605 → 1168 ms). 500 ms
+  of unattributed wall-clock appeared OUTSIDE any `mark()` call. Iter
+  0 was the fastest (1005 ms); iters 1-4 ranged 1132-1361 ms — opposite
+  of cold-warmup. Suspected cubecl handle-clone refcount cost or pool
+  confusion from holding 192 MB pinned. Don't re-attempt without
+  raw-cudarc allocation bypass.
+
+  The 308 ms `alloc_recon_planes` cost is the production baseline
+  until the cubecl pinned-buffer PR lands or we bypass cubecl's
+  allocator entirely for the recon planes. See
   `negative_perf_alloc_plane_zero_fill.md` memo for full numbers.
 
   When measuring with `mark()`, note that `mark("alloc_recon_planes")`

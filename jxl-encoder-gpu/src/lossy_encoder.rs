@@ -2013,14 +2013,18 @@ impl<R: Runtime> LossyEncoder<R> {
         // (probed 2026-05-10 with mark("alloc_recon_planes")), 51% of
         // encode iter wall-clock — by far the largest single bottleneck.
         //
-        // Tried replacing with `client.empty()` + GPU zero_fill kernel
-        // (commits "GPU zero-fill kernel"): regressed 5× to ~2900 ms per
-        // iter due to cubecl 0.10's empty() apparently not pool-reusing
-        // 64 MB buffers across iters the way create_from_slice does.
-        // Reverted; see `negative_perf_alloc_plane_zero_fill.md` memo.
+        // Two fixes attempted, both regressed:
+        // 1. `client.empty() + GPU zero_fill` per call: regressed 5×
+        //    (605→2947 ms). Cubecl's empty() doesn't pool-reuse 64 MB.
+        // 2. Cached `empty()` handles on LossyEncoder + GPU zero_fill
+        //    per iter: regressed 2× (605→1168 ms). 500 ms of
+        //    unattributed CPU/sync overhead appeared, source unknown
+        //    (suspected: cubecl handle-clone refcount cost or pool
+        //    confusion from holding 192 MB pinned).
         //
         // Real fix needs the cubecl pinned-buffer PR or the raw-cudarc
         // bypass — until then this 308 ms is the production baseline.
+        // See `negative_perf_alloc_plane_zero_fill.md` memo.
         let recon_x_p = enc.alloc_plane(self.padded_width, self.padded_height);
         let recon_y_p = enc.alloc_plane(self.padded_width, self.padded_height);
         let recon_b_p = enc.alloc_plane(self.padded_width, self.padded_height);
