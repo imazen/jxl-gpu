@@ -1066,7 +1066,7 @@ impl<R: Runtime> LossyEncoder<R> {
             strategy_search_costs_dct32x32_persistent,
             strategy_search_costs_dct64x32_or_32x64_persistent,
             strategy_search_costs_dct64x64_persistent,
-            strategy_search_costs_dct8_16x16_persistent, strategy_search_costs_subblock_8x8,
+            strategy_search_costs_dct8_16x16_persistent,
         };
         use crate::forks::transform::{
             RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT2X2,
@@ -1244,6 +1244,26 @@ impl<R: Runtime> LossyEncoder<R> {
         // 8x8 sub-block strategies (DCT4x4, DCT4x8, DCT8x4, IDENTITY,
         // DCT2x2). Reuse the GpuBlocks gathered above for the DCT8 cost
         // grid — all 5 strategies extract 8x8 tiles → 64 coefs.
+        //
+        // Hoist the mask_row_base upload out of the per-strategy loop.
+        // All 5 strategies operate on the same 8×8 grid, so the row-base
+        // table is identical. cubecl 0.10's HtoD takes ~6 ms for the 1 MB
+        // mask_row_base buffer at 16 MP (see cubecl upload bandwidth ceiling
+        // memo, 2026-05-10), so 5 duplicate uploads cost ~30 ms; one upload
+        // saves ~24 ms.
+        use crate::forks::cost::strategy_search_costs_subblock_8x8_with_handle;
+        use cubecl::prelude::*;
+        let mask_row_base_subblock: Vec<u32> = (0..nb8)
+            .map(|i| {
+                let bx_i = i % xb8;
+                let by_i = i / xb8;
+                (by_i * 8 * pw + bx_i * 8) as u32
+            })
+            .collect();
+        let h_mrb_subblock = enc
+            .client_ref()
+            .create_from_slice(u32::as_bytes(&mask_row_base_subblock));
+
         let (dct4x4_x, dct4x4_y, dct4x4_b) = dct4x4_weights_per_channel();
         let inv_4x4_x: Vec<f32> = dct4x4_x.iter().map(|w| 1.0 / w).collect();
         let inv_4x4_y: Vec<f32> = dct4x4_y.iter().map(|w| 1.0 / w).collect();
@@ -1253,8 +1273,10 @@ impl<R: Runtime> LossyEncoder<R> {
         // anti-bias was set as a starting point. Bisected on the
         // 11-image corpus: 2.16 ✓, 1.6 ✓, 1.2 ✓, 1.08 ✓ (libjxl).
         // Now at exact libjxl reference value.
-        let cost_dct4x4 = strategy_search_costs_subblock_8x8(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT4X4,
+        let cost_dct4x4 = strategy_search_costs_subblock_8x8_with_handle(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
+            &h_mrb_subblock, mask_row_base_subblock.len(),
+            RAW_STRATEGY_DCT4X4,
             &dct4x4_x, &dct4x4_y, &dct4x4_b,
             &inv_4x4_x, &inv_4x4_y, &inv_4x4_b,
             qac, qac, qac, 0, 0, scaled_constants, 1.08,
@@ -1269,14 +1291,18 @@ impl<R: Runtime> LossyEncoder<R> {
         // because at 0.95 the strat-wins photo 2684452d regresses
         // +2% (FP-tied path-shift; bisected 1.72 ✓ → 1.2 ✓ → 1.0 ✓
         // → 0.98 ✓ → 0.95 ✗).
-        let cost_dct4x8 = strategy_search_costs_subblock_8x8(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT4X8,
+        let cost_dct4x8 = strategy_search_costs_subblock_8x8_with_handle(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
+            &h_mrb_subblock, mask_row_base_subblock.len(),
+            RAW_STRATEGY_DCT4X8,
             &dct4x8_x, &dct4x8_y, &dct4x8_b,
             &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
             qac, qac, qac, 0, 0, scaled_constants, 0.98,
         );
-        let cost_dct8x4 = strategy_search_costs_subblock_8x8(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT8X4,
+        let cost_dct8x4 = strategy_search_costs_subblock_8x8_with_handle(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
+            &h_mrb_subblock, mask_row_base_subblock.len(),
+            RAW_STRATEGY_DCT8X4,
             &dct4x8_x, &dct4x8_y, &dct4x8_b,
             &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
             qac, qac, qac, 0, 0, scaled_constants, 0.98,
@@ -1298,8 +1324,10 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_id_x: Vec<f32> = id_x.iter().map(|w| 1.0 / w).collect();
         let inv_id_y: Vec<f32> = id_y.iter().map(|w| 1.0 / w).collect();
         let inv_id_b: Vec<f32> = id_b.iter().map(|w| 1.0 / w).collect();
-        let cost_identity = strategy_search_costs_subblock_8x8(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_IDENTITY,
+        let cost_identity = strategy_search_costs_subblock_8x8_with_handle(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
+            &h_mrb_subblock, mask_row_base_subblock.len(),
+            RAW_STRATEGY_IDENTITY,
             &id_x, &id_y, &id_b,
             &inv_id_x, &inv_id_y, &inv_id_b,
             qac, qac, qac, 0, 0, scaled_constants, 1.85,
@@ -1312,8 +1340,10 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_d2_x: Vec<f32> = d2_x.iter().map(|w| 1.0 / w).collect();
         let inv_d2_y: Vec<f32> = d2_y.iter().map(|w| 1.0 / w).collect();
         let inv_d2_b: Vec<f32> = d2_b.iter().map(|w| 1.0 / w).collect();
-        let cost_dct2x2 = strategy_search_costs_subblock_8x8(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_DCT2X2,
+        let cost_dct2x2 = strategy_search_costs_subblock_8x8_with_handle(
+            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
+            &h_mrb_subblock, mask_row_base_subblock.len(),
+            RAW_STRATEGY_DCT2X2,
             &d2_x, &d2_y, &d2_b,
             &inv_d2_x, &inv_d2_y, &inv_d2_b,
             qac, qac, qac, 0, 0, scaled_constants, 0.95,

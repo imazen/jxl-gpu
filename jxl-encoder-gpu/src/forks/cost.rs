@@ -1196,6 +1196,74 @@ pub fn estimate_entropy_full_strategy_batch_persistent<R: Runtime>(
     entropy_mul: f32,
     mode: CostMode,
 ) -> Vec<f32> {
+    // Single-shot wrapper: upload mask_row_base then dispatch. Callers
+    // that invoke this fn multiple times with an identical mask_row_base
+    // (e.g. the 5 sub-block strategies all on the 8×8 grid) should
+    // upload once and call `_with_handle` directly to avoid the
+    // duplicated cubecl HtoD (~6 ms per duplicate at 16 MP, given
+    // cubecl 0.10's ~0.16 GB/s HtoD ceiling).
+    let h_mrb = enc
+        .client_ref()
+        .create_from_slice(u32::as_bytes(mask_row_base));
+    estimate_entropy_full_strategy_batch_persistent_with_handle(
+        enc,
+        pixel_blocks_x,
+        pixel_blocks_y,
+        pixel_blocks_b,
+        raw_strategy,
+        weights_x_per_block,
+        weights_y_per_block,
+        weights_b_per_block,
+        inv_weights_x_per_block,
+        inv_weights_y_per_block,
+        inv_weights_b_per_block,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask_plane,
+        &h_mrb,
+        mask_row_base.len(),
+        scaled_constants,
+        entropy_mul,
+        mode,
+    )
+}
+
+/// Variant of [`estimate_entropy_full_strategy_batch_persistent`]
+/// that takes the `mask_row_base` GPU handle directly instead of a
+/// host slice. Lets the caller hoist a single upload across multiple
+/// strategy calls (e.g. the 5 sub-block 8×8 strategies that all share
+/// the same per-block row-base table).
+///
+/// `mask_row_base_len` is the logical element count (`u32` count) of
+/// the buffer behind `mask_row_base_handle` — equal to `n_blocks`.
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_entropy_full_strategy_batch_persistent_with_handle<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    pixel_blocks_x: &crate::persistent::GpuBlocks<R>,
+    pixel_blocks_y: &crate::persistent::GpuBlocks<R>,
+    pixel_blocks_b: &crate::persistent::GpuBlocks<R>,
+    raw_strategy: u8,
+    weights_x_per_block: &[f32],
+    weights_y_per_block: &[f32],
+    weights_b_per_block: &[f32],
+    inv_weights_x_per_block: &[f32],
+    inv_weights_y_per_block: &[f32],
+    inv_weights_b_per_block: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    mask_plane: &crate::persistent::GpuPlane<R>,
+    mask_row_base_handle: &cubecl::server::Handle,
+    mask_row_base_len: usize,
+    scaled_constants: (f32, f32, f32),
+    entropy_mul: f32,
+    mode: CostMode,
+) -> Vec<f32> {
     use crate::forks::cfl::{ytob_ratio, ytox_ratio};
     use crate::forks::transform::{
         apply_dct_batch_persistent, apply_idct_batch_persistent, coeff_count_per_strategy,
@@ -1210,7 +1278,7 @@ pub fn estimate_entropy_full_strategy_batch_persistent<R: Runtime>(
     debug_assert_eq!(pixel_blocks_x.num_blocks(), pixel_blocks_y.num_blocks());
     debug_assert_eq!(pixel_blocks_x.num_blocks(), pixel_blocks_b.num_blocks());
     debug_assert_eq!(pixel_blocks_x.coeffs_per_block() as usize, block_pixels);
-    debug_assert_eq!(mask_row_base.len(), n_blocks);
+    debug_assert_eq!(mask_row_base_len, n_blocks);
     debug_assert_eq!(weights_x_per_block.len(), coeff_count);
     debug_assert_eq!(weights_y_per_block.len(), coeff_count);
     debug_assert_eq!(weights_b_per_block.len(), coeff_count);
@@ -1258,16 +1326,14 @@ pub fn estimate_entropy_full_strategy_batch_persistent<R: Runtime>(
     let g_pix_err_y = apply_idct_batch_persistent(enc, &g_y_err, raw_strategy);
     let g_pix_err_b = apply_idct_batch_persistent(enc, &g_b_err, raw_strategy);
 
-    // Step 4: per-channel masked 8th-power pixel loss (no sync).
-    // Upload mask_row_base ONCE and reuse the handle across the 3
-    // channel pixel_loss calls — saves 2 cudaMallocs per cost grid.
-    let h_mrb = enc
-        .client_ref()
-        .create_from_slice(u32::as_bytes(mask_row_base));
+    // Step 4: per-channel masked 8th-power pixel loss (no sync). The
+    // mask_row_base handle is supplied by the caller — multi-strategy
+    // callers (e.g. the 5 sub-block 8×8 cost grids) hoist a single
+    // upload out of this fn and pass the same handle 5 times.
     let g_loss_x = enc.pixel_loss_blocks_with_handle_persistent(
         &g_pix_err_x,
         mask_plane,
-        &h_mrb,
+        mask_row_base_handle,
         MASK_CHANNEL_OFFSET[0],
         block_w as u32,
         block_h as u32,
@@ -1275,7 +1341,7 @@ pub fn estimate_entropy_full_strategy_batch_persistent<R: Runtime>(
     let g_loss_y = enc.pixel_loss_blocks_with_handle_persistent(
         &g_pix_err_y,
         mask_plane,
-        &h_mrb,
+        mask_row_base_handle,
         MASK_CHANNEL_OFFSET[1],
         block_w as u32,
         block_h as u32,
@@ -1283,7 +1349,7 @@ pub fn estimate_entropy_full_strategy_batch_persistent<R: Runtime>(
     let g_loss_b = enc.pixel_loss_blocks_with_handle_persistent(
         &g_pix_err_b,
         mask_plane,
-        &h_mrb,
+        mask_row_base_handle,
         MASK_CHANNEL_OFFSET[2],
         block_w as u32,
         block_h as u32,
@@ -1906,6 +1972,75 @@ pub fn strategy_search_costs_subblock_8x8<R: Runtime>(
         ytob,
         mask1x1,
         &mask_row_base,
+        scaled_constants,
+        entropy_mul,
+        CostMode::Upstream {
+            quant_for_coeffs: quant_y,
+        },
+    )
+}
+
+/// Variant of [`strategy_search_costs_subblock_8x8`] that takes a
+/// pre-uploaded `mask_row_base` GPU handle. Lets the caller hoist the
+/// upload out of a multi-strategy loop — at 16 MP cubecl 0.10's
+/// HtoD takes ~6 ms for the 1 MB mask_row_base buffer, so 5 sub-block
+/// strategies × 6 ms = 30 ms wasted on duplicate uploads. Hoisting
+/// recovers 24 ms.
+///
+/// `mask_row_base_len` must equal `(padded_width / 8) * (padded_height / 8)`.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_subblock_8x8_with_handle<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    pre_gathered_8x8_x: &crate::persistent::GpuBlocks<R>,
+    pre_gathered_8x8_y: &crate::persistent::GpuBlocks<R>,
+    pre_gathered_8x8_b: &crate::persistent::GpuBlocks<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    mask_row_base_handle: &cubecl::server::Handle,
+    mask_row_base_len: usize,
+    raw_strategy: u8,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+    entropy_mul: f32,
+) -> Vec<f32> {
+    let xb = padded_width / 8;
+    let yb = padded_height / 8;
+    let n_blocks = xb * yb;
+    debug_assert_eq!(pre_gathered_8x8_x.num_blocks() as usize, n_blocks);
+    debug_assert_eq!(pre_gathered_8x8_x.coeffs_per_block(), 64);
+    debug_assert_eq!(mask_row_base_len, n_blocks);
+
+    estimate_entropy_full_strategy_batch_persistent_with_handle(
+        enc,
+        pre_gathered_8x8_x,
+        pre_gathered_8x8_y,
+        pre_gathered_8x8_b,
+        raw_strategy,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        mask_row_base_handle,
+        mask_row_base_len,
         scaled_constants,
         entropy_mul,
         CostMode::Upstream {
