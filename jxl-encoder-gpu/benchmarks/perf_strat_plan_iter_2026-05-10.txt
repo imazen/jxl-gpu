@@ -208,5 +208,54 @@ DC-aware variant + per-channel bias). Estimated saving: similar
 magnitude (~2-3 ms / ~14% per-iter) per the kernel's existing 3.07×
 fused_dequant_idct_bench number.
 
+Cumulative state after batched-upload sweep (2026-05-10, c54acf78)
+-------------------------------------------------------------------
+
+Same image (CLIC clic2025-1024/02809272...png), 10 runs, 5 iters/run.
+Stack of changes since ab864f42:
+  - Added fused IDCT8+DC+scatter kernel (07d71dfd) and wired (dde4d755)
+  - Added 4-way fused (543f5271) — kept in tree but not wired (slower)
+  - Split pad_upload into sub-marks (228d16d5)
+  - Added perf_upload_plane microbench (45796aec)
+  - Batched 3-channel plane upload (8469f3f8)
+  - Batched 3-channel D2H download (ba826e06)
+  - Batched 7 multi-upload persistent functions (974c18f5, 0f2a2290,
+    72f71e14, c54acf78)
+
+Numbers:
+  prepare_strategy_search_plan:    66.46 ms mean,  65.30 ms min
+    cost_subblock_8x8              15.05 ms mean
+    upload_3ch                      9.13 ms mean (down from ~10.6 ms baseline)
+  encode_with_strategy_plan_adaptive:
+    per-iter mean of run-means     15.12 ms,    min 13.91 ms
+    mixed_strategy_encode_recon     8.52 ms mean (down from 8.65 ms)
+    download_crop                   2.26 ms mean (down from 2.81 ms — -19.6%)
+
+Cumulative deltas vs baseline (ab864f42, just-after-fused-DCT8-wiring):
+  mixed_strategy_encode_recon:  -1.5%  (-0.13 ms)
+  download_crop:               -19.6%  (-0.55 ms)
+  upload_3ch:                  -14.0%  (-1.5 ms est)
+  per-iter total wall-clock:    ~ unchanged (within noise)
+
+Total wall-clock unchanged within run-to-run variance because the
+optimizations are spread across multiple stages and each is a small
+fraction. The targeted-stage wins are real and architecturally
+cleaner — every multi-upload persistent function now batches its
+inputs through one cubecl storage allocation.
+
+Remaining levers documented but NOT yet pursued:
+  1. mask_row_base cross-call caching: each tile size's
+     mask_row_base is uploaded fresh per cost-grid call (~15 calls
+     for 8×8 tile size + smaller counts for others). Caching in
+     StrategySearchPlan as a GPU handle keyed by (tile_w, tile_h)
+     would skip ~14 redundant 64 KB uploads per encode prepare =
+     ~700 µs saving. Multi-file refactor.
+  2. Pre-uploaded weights/inv_weights/qac per strategy in plan:
+     similar caching pattern, potentially ~2-3 ms saved across
+     cost-grid evaluations + encode/recon.
+  3. Cross-repo: butteraugli-gpu populate-from-GPU-planes input
+     path — kills the per-iter download/re-upload loop. ~5 ms saved
+     on download_crop. Requires user authorization (cross-repo).
+
 
 
