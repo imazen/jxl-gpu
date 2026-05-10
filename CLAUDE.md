@@ -117,6 +117,122 @@ These can be done locally without touching jxl-encoder:
 - Replacing the CPU encoder. The structure is "accelerate the
   numerics, leave the rest alone."
 
+## Current perf state (2026-05-10)
+
+**GPU lossy pipeline vs CPU full encode**, real CLIC photos, paired
+A/B (10 runs each, warm), AMD Ryzen 9 7950X + RTX (CUDA backend):
+
+| Pixels | CPU min  | GPU min  | Speedup |
+|--------|----------|----------|---------|
+| 0.26 MP|   76 ms  |  31 ms   |   2.5×  |
+| 1.05 MP|  407 ms  |  60 ms   |   6.79× |
+| 2.78 MP| 1130 ms  |  96 ms   |  11.80× (peak) |
+| 16 MP  | 5088 ms  | 547 ms   |   9.29× |
+| 32 MP  |11153 ms  |1134 ms   |   9.84× |
+| 48 MP  |18102 ms  |2032 ms   |   8.91× |
+
+Caveats: GPU number is lossy pipeline only — bitstream writer is
+still CPU-only (~50-150 ms est). Real end-to-end speedup is
+~3-4× lower (still 2-5× CPU-full at 1024²+).
+
+GPU pipeline is now mostly **compute-bound** rather than sync-bound
+after the sync-barrier removal sweep (5 commits 78ca825c → d21fce00,
+delivered -10% to -18% across image sizes by removing host downloads
+that forced queue-drain stalls).
+
+Top remaining stages at 16 MP prep (~700 ms total):
+- upload_3ch (251 ms, 36%) — 192 MB f32 upload at ~1 GB/s effective
+- cost_subblock_8x8 (181 ms, 26%) — 5 strategies × 3 channels
+- pad_only (96 ms, 14%) — host memcpy of 192 MB
+- cost_dct8_dct16 (96 ms, 14%)
+
+Benches:
+- `examples/perf_strat_plan_iter` — per-stage breakdown of strat-search
+  prepare + iter (use `--target-mp N` to test resized inputs)
+- `examples/perf_cpu_vs_gpu` — CPU encode_lossy_via_cpu vs GPU
+  pipeline (use `--mode {both,cpu,gpu}` for isolation)
+- `examples/perf_upload_plane` — micro-benchmark for cubecl upload
+  per-call cost
+
+## GPU sync-barrier discipline (CRITICAL)
+
+cubecl 0.10 launches are **async**: `client.create_from_slice(...)` /
+launchers / `client.empty(...)` queue work. Only `read_one()` /
+`read()` / `sync()` force a queue-drain.
+
+**Wall-clock between two `mark()` calls does NOT measure the GPU
+work that happened in between** unless something forces sync. If a
+mark fires after only async ops, the GPU work is still queued and
+will run later.
+
+This means a `download_*` call doesn't just measure D2H transfer —
+it measures *every async kernel that was queued before it but hasn't
+finished*. The 170 ms "xyb_gab" stage at 16 MP turned out to be
+3× plane downloads, NOT GPU compute.
+
+### Rules
+
+1. **Never download data the host doesn't actually consume**
+   in production. The xyb_x/y/b and dc_grid_x/y/b host slices in
+   StrategySearchPlan are now empty Vecs — they're only consumed
+   by the AFV branch which is currently disabled. If AFV is
+   re-enabled, the AFV branch must lazily download from
+   `xyb_*_gpu` / `dc_grid_*_gpu`.
+
+2. **Batch sequential downloads** with `client.read(vec![3+ handles])`
+   — one queue-drain instead of N. See `download_planes_3ch`,
+   `download_3stats_3losses` in persistent.rs.
+
+3. **Batch sequential allocations** with
+   `client.create_tensors_from_slices(...)` or `client.empty_tensors(...)`
+   — one cudaMalloc instead of N. See `upload_planes_3ch`,
+   `dct8_quantize_fused_broadcast_w_persistent`, etc.
+
+4. **Treat marks as "queue-state checkpoints", not GPU-work
+   timers.** To time actual GPU work, add an explicit `client.sync()`
+   or trailing `read_one()` and account for the wait.
+
+## cubecl 0.10 type / API gotchas
+
+- `Array<u8>` works (probe verified in `kernels/u8_probe.rs`,
+  commit e7f252ee). Use for raw-byte uploads (e.g. interleaved sRGB
+  RGB → planar f32 conversion on GPU).
+- `Array<u32>` works for histogram / coords / packed bytes.
+- No `client.write(handle, &bytes)` — can't write into existing
+  handle. To "reuse" a buffer you must accept that
+  `create_from_slice` always allocates and copies.
+- `let x: f32 = ...` typed bindings inside `#[cube]` rejected
+  (NativeExpand<f32> → ConstantValue). Inline literals or use
+  file-level `const X: f32 = ...`.
+- Runtime array literals `let arr = [a, b, c];` not supported in
+  `#[cube]` — inline manually.
+- `cube_dim=1024` is NOT universally faster than 256: gaborish at
+  16 MP got -42% slower. Bigger cubes hurt occupancy when shared
+  mem usage is high. Match cube_dim to the kernel's working set.
+
+## Negative perf findings (don't re-litigate)
+
+These were tried and don't pay off — documented so future sessions
+don't repeat the experiments:
+
+- **4-way fused dequant_idct_dc_scatter_dct8 (cube_dim=1)** —
+  +3.4% slower than 3-way fused IDCT+DC+scatter + separate dequant.
+  Per-thread register pressure outweighs HBM-roundtrip saving.
+  Kernel + wrapper kept in tree (`dequant_idct_dc_scatter_dct8_persistent`).
+- **4-way fused wide variant (cube_dim=64)** — +3.1% mean / -6.4% min /
+  high variance. Doesn't flip the result. Kernel kept in tree
+  (`dequant_idct_dc_scatter_dct8_wide_persistent`).
+- **3-channel fused gaborish_5x5_3ch_persistent** — -36% at 1024² but
+  +7% at 16 MP. Mixed; not wired in production. Kept in tree as
+  design reference.
+- **Wide IDCT8 (idct_8x8_wide_persistent) for encode/recon** —
+  cube_dim=64 instead of 1: no measurable win, possibly slight
+  regression. Standard IDCT8 already near peak.
+- **Pre-allocated input planes** — cubecl 0.10 has no
+  write-into-existing-handle API. `create_from_slice` always
+  allocates + copies. Pool reuse doesn't reliably amortize at
+  large sizes (16 MP = ~64 MB chunks).
+
 ## Autonomous mandate
 
 **Drive this port forever, until done. Do NOT stop. Do NOT ask
