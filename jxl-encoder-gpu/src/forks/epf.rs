@@ -6,7 +6,23 @@
 
 //! GPU-substituted Edge-Preserving Filter passes.
 //!
-//! Currently covers:
+//! ## Host-slice vs persistent API
+//!
+//! The `apply_epf_step{0,1,2}_gpu` and `apply_epf_chain_gpu` wrappers
+//! in this module take host `&[f32]` planes — convenient for one-shot
+//! callers but each call uploads its inputs and downloads its outputs.
+//! For chaining multiple EPF passes (or chaining EPF after a GPU
+//! reconstruct → gab_smooth chain), use the persistent variants on
+//! `GpuEncoder` directly:
+//! - [`crate::encoder::GpuEncoder::epf_step1_persistent`]
+//! - [`crate::encoder::GpuEncoder::epf_step2_persistent`]
+//! - [`crate::encoder::GpuEncoder::pad_plane_persistent`]
+//!
+//! `LossyEncoder::encode_with_strategy_plan_adaptive_traced` uses the
+//! persistent variants — see the postpass in `lossy_encoder.rs` for the
+//! reference chain shape.
+//!
+//! ## Currently covered:
 //! - `compute_inv_sigma_map` — pure scalar, duplicated bit-for-bit
 //!   (~10 microseconds for a 1024×1024 image; no GPU win)
 //! - `apply_epf_step0_gpu` — 5×5 plus kernel with 12-neighbor SAD
