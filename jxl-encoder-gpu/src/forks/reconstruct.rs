@@ -362,6 +362,20 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
 
     let groups = group_assignments_by_strategy(assignments);
 
+    // Upload the spatial channel ONCE — every non-AFV strategy below
+    // gathers its per-strategy block subset from this GpuPlane via
+    // indexed_gather_blocks_persistent (one GPU kernel launch per
+    // strategy), replacing the host extend_from_slice loop +
+    // per-strategy upload_blocks PCIe round-trip the older code did.
+    // AFV strategies (currently disabled in production cost grids
+    // but the code path is kept) still build a host batch because
+    // forks::afv::afv_transform_batch_gpu takes a host slice.
+    let g_plane = enc.upload_plane(
+        xyb_channel,
+        padded_width as u32,
+        padded_height as u32,
+    );
+
     // Per-strategy: encode and store dequant result. Buffers live in
     // `coeff_buffers` for the lifetime of the recipe build + reconstruct
     // call below.
@@ -431,25 +445,28 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             "weights template for strategy {raw_strategy} must have {coeff_count} entries"
         );
 
-        // Step 1: host-gather pixel blocks for this strategy + upload.
         let n_blocks = coords.len();
-        let block_pixels = (tile_w * tile_h) as usize;
-        let mut batch = Vec::with_capacity(n_blocks * block_pixels);
-        for &(bx, by) in &coords {
-            let x0 = bx * 8;
-            let y0 = by * 8;
-            for dy in 0..tile_h as usize {
-                let src_off = (y0 + dy) * padded_width + x0;
-                batch.extend_from_slice(&xyb_channel[src_off..src_off + tile_w as usize]);
-            }
-        }
 
         // AFV path: forward + inverse use forks::afv (per-kind), not
         // apply_dct/idct_batch_persistent. Quantize + dequant still use
         // the persistent variants. Scatter directly into out_plane;
         // skip pushing to coeff_buffers (reconstruct_mixed_strategy_gpu
         // can't handle AFV anyway).
+        //
+        // AFV needs a host batch because afv_transform_batch_gpu takes
+        // a host slice — build it here on demand. Non-AFV strategies
+        // skip this and use the GPU indexed_gather below.
         if is_afv(raw_strategy) {
+            let block_pixels = (tile_w * tile_h) as usize;
+            let mut batch = Vec::with_capacity(n_blocks * block_pixels);
+            for &(bx, by) in &coords {
+                let x0 = bx * 8;
+                let y0 = by * 8;
+                for dy in 0..tile_h as usize {
+                    let src_off = (y0 + dy) * padded_width + x0;
+                    batch.extend_from_slice(&xyb_channel[src_off..src_off + tile_w as usize]);
+                }
+            }
             let kind = (raw_strategy - RAW_STRATEGY_AFV0) as usize;
             // Forward AFV (host-orchestrated, returns Vec<f32>).
             let coeffs_host = crate::forks::afv::afv_transform_batch_gpu(
@@ -502,7 +519,21 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             }
             continue;
         }
-        let g_pixels = enc.upload_blocks(&batch, n_blocks as u32, block_pixels as u32);
+        // GPU gather: pull this strategy's per-block tiles from the
+        // pre-uploaded plane via indexed_gather_blocks_persistent.
+        // Replaces the host extend_from_slice loop + per-strategy
+        // upload_blocks pair that the older code did. The GpuBlocks
+        // layout matches the host batch byte-for-byte (verified by
+        // test_indexed_gather_blocks_persistent_matches_host across 5
+        // tile shapes).
+        let coords_u32: Vec<(u32, u32)> =
+            coords.iter().map(|&(bx, by)| (bx as u32, by as u32)).collect();
+        let g_pixels = enc.indexed_gather_blocks_persistent(
+            &g_plane,
+            &coords_u32,
+            tile_w as u32,
+            tile_h as u32,
+        );
 
         // Step 2: persistent forward DCT → quantize → dequant chain.
         // Three GPU launches with no host roundtrips between them.
