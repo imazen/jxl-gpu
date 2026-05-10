@@ -9,12 +9,14 @@ CPU path: jxl_encoder::api::LossyConfig encode (full pipeline → JXL bytes)
 Image:    1024² = clic2025-1024/02809272...png (322 KB JXL output at d=1)
           512²  = CID22-512/validation/1025469.png
 
-| Image  | Distance | CPU min  | GPU min  | Speedup |
-|--------|----------|----------|----------|---------|
-| 1024²  | d=1.0    | 425.6 ms |  67.0 ms |  6.4×   |
-| 1024²  | d=4.0    | 607.5 ms |  68.4 ms |  8.9×   |
-| 512²   | d=1.0    |  75.9 ms |  30.9 ms |  2.5×   |
-| 512²   | d=4.0    | 136.2 ms |  28.8 ms |  4.7×   |
+| Image       | Pixels  | Distance | CPU min   | GPU min  | Speedup |
+|-------------|---------|----------|-----------|----------|---------|
+| 512²        |  0.26 MP| d=1.0    |   75.9 ms |  30.9 ms |   2.5×  |
+| 512²        |  0.26 MP| d=4.0    |  136.2 ms |  28.8 ms |   4.7×  |
+| 1024²       |  1.05 MP| d=1.0    |  425.6 ms |  67.0 ms |   6.4×  |
+| 1024²       |  1.05 MP| d=4.0    |  607.5 ms |  68.4 ms |   8.9×  |
+| 2048×1360   |  2.78 MP| d=1.0    | 1112.4 ms | 103.6 ms |  10.7×  |
+| 2048×1360   |  2.78 MP| d=4.0    | 1625.6 ms | 102.4 ms |  15.9×  |
 
 (GPU iters=1, matches CPU effort=7 which doesn't run the butteraugli
 refinement loop. e8+ adds 4 GPU iters, ~+50 ms GPU but no extra CPU
@@ -40,9 +42,27 @@ Observations
    at 1024²; 31 vs 29 ms at 512²). The cost-grid evaluation runs all
    strategies regardless; selection just changes which one is picked.
 
-4. **Extrapolation to 4K (16× pixels of 1024²):**
-   CPU likely 7-10 seconds; GPU likely 200-400 ms = 25-50× speedup.
-   Worth a real measurement next time a 4K image is on the bench.
+4. **Speedup grows monotonically with pixel count.**
+
+   | Pixels   | Speedup at d=1 | Speedup at d=4 |
+   |----------|----------------|----------------|
+   | 0.26 MP  |  2.5×          |  4.7×          |
+   | 1.05 MP  |  6.4×          |  8.9×          |
+   | 2.78 MP  | 10.7×          | 15.9×          |
+
+   At 0.26 MP the GPU's fixed setup overhead (~30 ms) dominates;
+   the parallel work is small. By 2.78 MP the parallel work has
+   amortized that overhead 3-4× over and the speedup is huge. A
+   ~true 4K image (8.3 MP, 3× the 2048×1360) would likely sustain
+   or exceed the 10-16× range — the GPU number plateaus near the
+   ~100 ms / image floor while CPU keeps scaling linearly.
+
+5. **GPU encode time barely depends on pixel count above 1 MP.**
+   1024² and 2048×1360 took 67 ms vs 104 ms for 2.65× more pixels.
+   The ~37 ms extra is mostly cost-grid + IDCT + scatter scaling
+   linearly with pixel count, but the prepare overhead (XYB,
+   gaborish, mask1x1) stays roughly fixed. Indicates the GPU is
+   under-utilized at smaller sizes — fixed-cost stages dominate.
 
 Caveats
 -------
