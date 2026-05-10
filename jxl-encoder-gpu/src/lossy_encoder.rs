@@ -154,13 +154,27 @@ fn default_gaborish_weights() -> GaborishWeights {
 /// each [`LossyEncoder::encode_with_strategy_plan_adaptive`] call;
 /// this is amortized by the encode/recon work.
 #[derive(Clone, Debug)]
-pub struct StrategySearchPlan {
+pub struct StrategySearchPlan<R: Runtime> {
     /// XYB X-channel host buffer, padded-image-size raster order.
+    /// Currently kept alongside the GPU plane below for the AFV
+    /// strategy path — `forks::afv::afv_transform_batch_gpu` takes a
+    /// host slice. Production cost grids never select AFV today, so
+    /// this could be dropped if AFV is removed from the dispatcher.
     pub xyb_x: Vec<f32>,
-    /// XYB Y-channel host buffer.
+    /// XYB Y-channel host buffer (see `xyb_x`).
     pub xyb_y: Vec<f32>,
-    /// XYB B-channel host buffer.
+    /// XYB B-channel host buffer (see `xyb_x`).
     pub xyb_b: Vec<f32>,
+    /// XYB X-channel GPU plane — the gaborished output of
+    /// `prepare_strategy_search_plan_traced`'s pipeline. Holding it
+    /// here lets the per-iter encode skip the redundant
+    /// `upload_plane(xyb_channel)` that `encode_and_reconstruct_*`
+    /// would otherwise pay every refinement iteration.
+    pub xyb_x_gpu: GpuPlane<R>,
+    /// XYB Y-channel GPU plane (see `xyb_x_gpu`).
+    pub xyb_y_gpu: GpuPlane<R>,
+    /// XYB B-channel GPU plane (see `xyb_x_gpu`).
+    pub xyb_b_gpu: GpuPlane<R>,
     /// Per-8x8-block DC grid for X channel (length = num_padded_blocks).
     pub dc_grid_x: Vec<f32>,
     /// Per-8x8-block DC grid for Y channel.
@@ -921,7 +935,7 @@ impl<R: Runtime> LossyEncoder<R> {
         g: &[f32],
         b: &[f32],
         target_distance: f32,
-    ) -> StrategySearchPlan {
+    ) -> StrategySearchPlan<R> {
         self.prepare_strategy_search_plan_traced(enc, r, g, b, target_distance, &mut |_| {})
     }
 
@@ -953,7 +967,7 @@ impl<R: Runtime> LossyEncoder<R> {
         b: &[f32],
         target_distance: f32,
         mark: &mut dyn FnMut(&'static str),
-    ) -> StrategySearchPlan {
+    ) -> StrategySearchPlan<R> {
         // Cost-grid stage uses the user-facing target distance for
         // `compute_scaled_constants`, `mul_8x8`, and the anti-bias
         // distance-ramp.
@@ -1627,6 +1641,13 @@ impl<R: Runtime> LossyEncoder<R> {
             xyb_x,
             xyb_y,
             xyb_b,
+            // GpuPlane is reference-counted under the hood (see Clone
+            // impl in persistent.rs) — the xx_g/xy_g/xb_g handles created
+            // during the gaborish stage live on; the plan just holds an
+            // extra refcount.
+            xyb_x_gpu: xx_g,
+            xyb_y_gpu: xy_g,
+            xyb_b_gpu: xb_g,
             dc_grid_x,
             dc_grid_y,
             dc_grid_b,
@@ -1645,7 +1666,7 @@ impl<R: Runtime> LossyEncoder<R> {
     pub fn encode_with_strategy_plan_adaptive(
         &self,
         enc: &GpuEncoder<R>,
-        plan: &StrategySearchPlan,
+        plan: &StrategySearchPlan<R>,
         aq_field: &[f32],
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         self.encode_with_strategy_plan_adaptive_traced(enc, plan, aq_field, &mut |_| {})
@@ -1665,7 +1686,7 @@ impl<R: Runtime> LossyEncoder<R> {
     pub fn encode_with_strategy_plan_adaptive_traced(
         &self,
         enc: &GpuEncoder<R>,
-        plan: &StrategySearchPlan,
+        plan: &StrategySearchPlan<R>,
         aq_field: &[f32],
         mark: &mut dyn FnMut(&'static str),
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
@@ -1858,6 +1879,13 @@ impl<R: Runtime> LossyEncoder<R> {
             &mut plane_x,
             &mut plane_y,
             &mut plane_b,
+            // Plumb through the GpuPlanes from the prepare stage so the
+            // per-iter encode skips the redundant upload_plane(xyb)
+            // PCIe transfer (3 × 4MB at 1024² → savings stack across
+            // refinement iters).
+            Some(&plan.xyb_x_gpu),
+            Some(&plan.xyb_y_gpu),
+            Some(&plan.xyb_b_gpu),
         );
         mark("mixed_strategy_encode_recon");
 

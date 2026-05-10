@@ -346,6 +346,14 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     // correction in upstream too.
     channel: usize,
     out_plane: &mut [f32],
+    // Optional pre-uploaded GPU plane mirroring `xyb_channel`. When
+    // `Some`, the function reuses the caller's GpuPlane and skips the
+    // internal `upload_plane(xyb_channel)` PCIe transfer — useful when
+    // the caller already produced this plane on GPU (e.g., from
+    // gaborish in `prepare_strategy_search_plan_traced`) and stored it
+    // in a `StrategySearchPlan`. The `xyb_channel` host slice is still
+    // required for the AFV strategy path (host extend_from_slice).
+    xyb_channel_gpu: Option<&crate::persistent::GpuPlane<R>>,
 ) {
     use crate::forks::transform::{
         apply_dct_batch_persistent, coeff_count_per_strategy, tile_dims_pixels, RAW_STRATEGY_DCT,
@@ -370,11 +378,20 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     // AFV strategies (currently disabled in production cost grids
     // but the code path is kept) still build a host batch because
     // forks::afv::afv_transform_batch_gpu takes a host slice.
-    let g_plane = enc.upload_plane(
-        xyb_channel,
-        padded_width as u32,
-        padded_height as u32,
-    );
+    //
+    // When the caller already has the spatial channel on GPU (e.g., the
+    // gaborished plane from prepare_strategy_search_plan_traced), they
+    // can skip this upload by passing `xyb_channel_gpu = Some(&plane)`.
+    let g_plane_owned;
+    let g_plane: &crate::persistent::GpuPlane<R> = if let Some(p) = xyb_channel_gpu {
+        debug_assert_eq!(p.width(), padded_width as u32);
+        debug_assert_eq!(p.height(), padded_height as u32);
+        p
+    } else {
+        g_plane_owned =
+            enc.upload_plane(xyb_channel, padded_width as u32, padded_height as u32);
+        &g_plane_owned
+    };
 
     // Allocate a zero-init GPU plane that 1×1-LLF non-AFV strategies
     // (DCT8 + DCT4-family + IDENTITY + DCT2X2) scatter their IDCT
@@ -884,6 +901,12 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
     out_plane_x: &mut [f32],
     out_plane_y: &mut [f32],
     out_plane_b: &mut [f32],
+    // Optional pre-uploaded GPU planes mirroring xyb_x / xyb_y / xyb_b.
+    // See `encode_and_reconstruct_mixed_strategy_single_channel`'s
+    // `xyb_channel_gpu` parameter for the rationale.
+    xyb_x_gpu: Option<&crate::persistent::GpuPlane<R>>,
+    xyb_y_gpu: Option<&crate::persistent::GpuPlane<R>>,
+    xyb_b_gpu: Option<&crate::persistent::GpuPlane<R>>,
 ) {
     encode_and_reconstruct_mixed_strategy_single_channel(
         enc,
@@ -897,6 +920,7 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
         dc_grid_x_per_8x8_block,
         0,
         out_plane_x,
+        xyb_x_gpu,
     );
     encode_and_reconstruct_mixed_strategy_single_channel(
         enc,
@@ -910,6 +934,7 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
         dc_grid_y_per_8x8_block,
         1,
         out_plane_y,
+        xyb_y_gpu,
     );
     encode_and_reconstruct_mixed_strategy_single_channel(
         enc,
@@ -923,6 +948,7 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
         dc_grid_b_per_8x8_block,
         2,
         out_plane_b,
+        xyb_b_gpu,
     );
 }
 
@@ -2449,6 +2475,7 @@ mod tests {
             &dc_grid,
             1, // Y channel for the test
             &mut out_plane,
+            None,
         );
 
         // All output pixels finite, roughly close to original (~0.5).
@@ -2520,7 +2547,7 @@ mod tests {
             let mut out = alloc::vec![0.0_f32; pw * ph];
             encode_and_reconstruct_mixed_strategy_single_channel(
                 &enc, &xyb, pw, ph, &assignments, &weights_for, &qac, &thresholds,
-                &dc_grid, 1, &mut out,
+                &dc_grid, 1, &mut out, None,
             );
             let mut sumsq = 0.0_f64;
             for i in 0..pw * ph {
@@ -2548,7 +2575,7 @@ mod tests {
             let mut out = alloc::vec![0.0_f32; pw * ph];
             encode_and_reconstruct_mixed_strategy_single_channel(
                 &enc, &xyb, pw, ph, &assignments, &weights_for, &qac, &thresholds,
-                &dc_grid, 1, &mut out,
+                &dc_grid, 1, &mut out, None,
             );
             let mut sumsq = 0.0_f64;
             let mut min_v = f32::INFINITY;
@@ -2615,7 +2642,7 @@ mod tests {
         let mut out_dct8 = alloc::vec![0.0_f32; pw * ph];
         encode_and_reconstruct_mixed_strategy_single_channel(
             &enc, &xyb, pw, ph, &assignments_dct8, &weights_for, &qac, &thresholds,
-            &dc_grid, 1, &mut out_dct8,
+            &dc_grid, 1, &mut out_dct8, None,
         );
         let mut sse_dct8 = 0.0_f64;
         for i in 0..pw * ph {
@@ -2637,7 +2664,7 @@ mod tests {
         let mut out_dct32 = alloc::vec![0.0_f32; pw * ph];
         encode_and_reconstruct_mixed_strategy_single_channel(
             &enc, &xyb, pw, ph, &assignments_dct32, &weights_for, &qac, &thresholds,
-            &dc_grid, 1, &mut out_dct32,
+            &dc_grid, 1, &mut out_dct32, None,
         );
         let mut sse_dct32 = 0.0_f64;
         for i in 0..pw * ph {

@@ -111,6 +111,45 @@ impl<R: Runtime> GpuPlane<R> {
     pub fn handle(&self) -> &Handle {
         &self.handle
     }
+
+    /// Wrap an externally-allocated GPU `Handle` as a `GpuPlane`.
+    /// Mirrors [`GpuBlocks::from_handle`]. Used by callers that need
+    /// to share the same backing GPU buffer between multiple
+    /// `GpuPlane` instances (e.g. storing a clone of a working plane
+    /// inside a long-lived plan struct without consuming the original).
+    pub fn from_handle(handle: Handle, width: u32, height: u32) -> Self {
+        Self {
+            handle,
+            width,
+            height,
+            _r: core::marker::PhantomData,
+        }
+    }
+}
+
+// Manual Clone impl: the derive would add a `where R: Clone` bound
+// (since R appears in the PhantomData), which is too strict — Runtime
+// types aren't Clone in general. Handle is reference-counted and
+// PhantomData auto-impls Clone unconditionally.
+impl<R: Runtime> Clone for GpuPlane<R> {
+    fn clone(&self) -> Self {
+        Self {
+            handle: self.handle.clone(),
+            width: self.width,
+            height: self.height,
+            _r: core::marker::PhantomData,
+        }
+    }
+}
+
+// Manual Debug — same `where R: Debug` avoidance as the Clone impl.
+impl<R: Runtime> core::fmt::Debug for GpuPlane<R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GpuPlane")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
 }
 
 /// Typed handle to a GPU-resident contiguous buffer of per-block
