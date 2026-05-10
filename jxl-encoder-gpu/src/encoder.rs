@@ -174,9 +174,13 @@ impl<R: Runtime> GpuEncoder<R> {
             n as u32,
         );
 
-        let xb = self.client.read_one(h_x).expect("read x");
-        let yb = self.client.read_one(h_y).expect("read y");
-        let bb = self.client.read_one(h_b_out).expect("read b");
+        // Batched 3-handle download — one queue-drain sync instead
+        // of three sequential read_one (matches the persistent-API
+        // pattern from ba826e06 / 814795e5).
+        let mut bytes = self.client.read(alloc::vec![h_x, h_y, h_b_out]);
+        let bb = bytes.pop().expect("read[2]");
+        let yb = bytes.pop().expect("read[1]");
+        let xb = bytes.pop().expect("read[0]");
         (
             f32::from_bytes(&xb).to_vec(),
             f32::from_bytes(&yb).to_vec(),
@@ -221,9 +225,11 @@ impl<R: Runtime> GpuEncoder<R> {
             n as u32,
         );
 
-        let rb = self.client.read_one(h_r).expect("read r");
-        let gb = self.client.read_one(h_g_out).expect("read g");
-        let bb = self.client.read_one(h_b_out).expect("read b");
+        // Batched 3-handle download (matches xyb_from_linear_rgb above).
+        let mut bytes = self.client.read(alloc::vec![h_r, h_g_out, h_b_out]);
+        let bb = bytes.pop().expect("read[2]");
+        let gb = bytes.pop().expect("read[1]");
+        let rb = bytes.pop().expect("read[0]");
         (
             f32::from_bytes(&rb).to_vec(),
             f32::from_bytes(&gb).to_vec(),
