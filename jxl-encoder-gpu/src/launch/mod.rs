@@ -30,6 +30,7 @@ pub mod gaborish;
 pub mod gather;
 pub mod histogram;
 pub mod idct4_raw;
+pub mod indexed_gather;
 pub mod identity;
 pub mod mask1x1;
 pub mod pixel_loss;

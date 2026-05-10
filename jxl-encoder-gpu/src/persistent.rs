@@ -1673,6 +1673,62 @@ impl<R: Runtime> GpuEncoder<R> {
         );
     }
 
+    /// Persistent-API indexed plane-to-blocks gather. Pulls a sparse
+    /// subset of `(bx, by)` 8×8-block-grid positions (each spanning
+    /// `tile_w × tile_h` pixels) from `plane` into a contiguous
+    /// `GpuBlocks` of `n_blocks * (tile_w * tile_h)` floats.
+    ///
+    /// Differs from [`Self::gather_blocks_persistent`] (which gathers
+    /// the FULL raster grid) — this variant lets the caller batch only
+    /// the blocks one AC strategy was assigned to.
+    ///
+    /// `coords` is a flat host slice in `[bx_0, by_0, bx_1, by_1, …]`
+    /// order. Each `(bx, by)` is in 8×8-block-grid units; the kernel
+    /// multiplies by 8 to compute the pixel-space top-left of the
+    /// strategy's tile. Plane access is bounds-unchecked — caller MUST
+    /// ensure every `(bx*8 + tile_w, by*8 + tile_h)` falls inside
+    /// `(plane.width, plane.height)`.
+    ///
+    /// Used by the mixed-strategy reconstruct path to skip the host
+    /// `extend_from_slice` per-strategy gather + the subsequent
+    /// per-strategy `upload_blocks` PCIe round-trip.
+    pub fn indexed_gather_blocks_persistent(
+        &self,
+        plane: &GpuPlane<R>,
+        coords: &[(u32, u32)],
+        tile_w: u32,
+        tile_h: u32,
+    ) -> GpuBlocks<R> {
+        let n_blocks = coords.len() as u32;
+        let coeffs_per_block = tile_w * tile_h;
+        let n_out = (n_blocks as usize) * (coeffs_per_block as usize);
+        // Flatten coords to interleaved [bx, by, bx, by, …] u32 layout.
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
+        let h_out = self.client_ref().empty(n_out * 4);
+        crate::launch::indexed_gather::indexed_gather::<R>(
+            self.client_ref(),
+            plane.handle.clone(),
+            h_coords,
+            h_out.clone(),
+            plane.width,
+            plane.n_pixels(),
+            n_blocks,
+            tile_w,
+            tile_h,
+        );
+        GpuBlocks {
+            handle: h_out,
+            num_blocks: n_blocks,
+            coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Persistent-API per-(8×8)-block DC grid: one f32 per block =
     /// mean of the 64 covered pixels. Mirrors
     /// `crate::forks::reconstruct::compute_dc_grid_per_8x8_block`
@@ -2481,6 +2537,60 @@ mod tests {
             max_err < 5e-5,
             "DCT/IDCT roundtrip via persistent API drift: {max_err:.3e}"
         );
+    }
+
+    /// `indexed_gather_blocks_persistent` must produce bit-identical
+    /// output to the host pattern `for (bx, by) in coords {
+    /// extend_from_slice(plane[(by*8+row)*W + bx*8 .. + tile_w]) }`
+    /// — same layout as the per-strategy `extend_from_slice` loop in
+    /// `forks::reconstruct::encode_and_reconstruct_mixed_strategy_single_channel`.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_indexed_gather_blocks_persistent_matches_host() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        for &(pw, ph, tile_w, tile_h) in &[
+            (32u32, 32u32, 8u32, 8u32),
+            (64, 32, 16, 8),  // DCT8x16 tile
+            (32, 64, 8, 16),  // DCT16x8 tile
+            (64, 64, 16, 16), // DCT16x16
+            (128, 128, 32, 32), // DCT32x32
+        ] {
+            let n = (pw * ph) as usize;
+            let plane: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin()).collect();
+            let g_plane = enc.upload_plane(&plane, pw, ph);
+            // Sparse coords: every other valid (bx, by) starting at (1, 0).
+            let max_bx = (pw - tile_w) / 8 + 1;
+            let max_by = (ph - tile_h) / 8 + 1;
+            let mut coords: Vec<(u32, u32)> = Vec::new();
+            for by in 0..max_by {
+                for bx in (1..max_bx).step_by(2) {
+                    coords.push((bx, by));
+                }
+            }
+            // Host reference: replicate the extend_from_slice loop.
+            let mut host_batch: Vec<f32> =
+                Vec::with_capacity(coords.len() * (tile_w as usize) * (tile_h as usize));
+            for &(bx, by) in &coords {
+                let x0 = (bx * 8) as usize;
+                let y0 = (by * 8) as usize;
+                for dy in 0..tile_h as usize {
+                    let src_off = (y0 + dy) * (pw as usize) + x0;
+                    host_batch
+                        .extend_from_slice(&plane[src_off..src_off + tile_w as usize]);
+                }
+            }
+            let g_blocks = enc.indexed_gather_blocks_persistent(&g_plane, &coords, tile_w, tile_h);
+            let gpu_batch = enc.download_blocks(&g_blocks);
+            assert_eq!(
+                gpu_batch.len(),
+                host_batch.len(),
+                "len mismatch at {pw}×{ph} tile {tile_w}×{tile_h}"
+            );
+            for (i, (g, h_)) in gpu_batch.iter().zip(host_batch.iter()).enumerate() {
+                assert_eq!(g, h_, "{pw}×{ph} tile {tile_w}×{tile_h} pixel {i}");
+            }
+        }
     }
 
     /// `dc_grid_8x8_persistent` GPU kernel must match the host scalar
