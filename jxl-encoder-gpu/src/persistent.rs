@@ -341,6 +341,86 @@ impl<R: Runtime> GpuEncoder<R> {
         (mk(h_r), mk(h_g), mk(h_b))
     }
 
+    /// Fused u8 sRGB RGB upload + sRGB→linear + planar split + edge-
+    /// replicate pad in one launch. Single ~3-bytes-per-pixel upload
+    /// instead of three 4-bytes-per-pixel f32 uploads (4× upload
+    /// bandwidth at large image sizes). Skips host pad_to_alignment
+    /// + host sRGB→linear loop.
+    ///
+    /// `src_pixels`: interleaved u8 RGB, length `src_width *
+    /// src_height * 3`. Outputs are 3 padded GpuPlanes at
+    /// `(padded_width, padded_height)` with clamp-to-edge for the
+    /// padding region. Math matches the corpus regression test's
+    /// host `to_linear` (full sRGB EOTF).
+    pub fn upload_u8_rgb_to_linear_planar_padded(
+        &self,
+        src_pixels: &[u8],
+        src_width: u32,
+        src_height: u32,
+        padded_width: u32,
+        padded_height: u32,
+    ) -> (GpuPlane<R>, GpuPlane<R>, GpuPlane<R>) {
+        let src_n = (src_width as usize) * (src_height as usize) * 3;
+        assert_eq!(
+            src_pixels.len(),
+            src_n,
+            "src_pixels len {} != src_width*src_height*3 = {}",
+            src_pixels.len(),
+            src_n,
+        );
+        assert!(padded_width >= src_width, "padded_width < src_width");
+        assert!(padded_height >= src_height, "padded_height < src_height");
+        let out_n = (padded_width as usize) * (padded_height as usize);
+        let out_bytes = out_n * 4;
+
+        // Upload src + alloc 3 outputs in one batched call (one
+        // underlying storage region, four sub-handles).
+        let descs = alloc::vec![
+            MemoryLayoutDescriptor::contiguous([src_n].into(), 1),
+            MemoryLayoutDescriptor::contiguous([out_bytes].into(), 1),
+            MemoryLayoutDescriptor::contiguous([out_bytes].into(), 1),
+            MemoryLayoutDescriptor::contiguous([out_bytes].into(), 1),
+        ];
+        // src is uploaded via create_tensors_from_slices; outputs
+        // are empty. Mix uploaded + empty by uploading one
+        // 3-tensor batch + 3 empties separately. Simpler: just
+        // create_from_slice for src and 3 empty() for outputs —
+        // fewer allocations isn't the dominant cost here since this
+        // function runs once per encode.
+        let h_src = self
+            .client_ref()
+            .create_from_slice(src_pixels);
+        let h_r = self.client_ref().empty(out_bytes);
+        let h_g = self.client_ref().empty(out_bytes);
+        let h_b = self.client_ref().empty(out_bytes);
+        // Suppress unused warning until we wire the batched alloc.
+        let _ = descs;
+
+        crate::launch::u8_rgb_prepare::u8_rgb_to_linear_planar_padded::<R>(
+            self.client_ref(),
+            h_src,
+            h_r.clone(),
+            h_g.clone(),
+            h_b.clone(),
+            src_width,
+            src_height,
+            padded_width,
+            padded_height,
+        );
+
+        let mk = |handle, w, h| GpuPlane {
+            handle,
+            width: w,
+            height: h,
+            _r: core::marker::PhantomData,
+        };
+        (
+            mk(h_r, padded_width, padded_height),
+            mk(h_g, padded_width, padded_height),
+            mk(h_b, padded_width, padded_height),
+        )
+    }
+
     /// Allocate a zero-filled GPU plane of the given shape. Useful as
     /// a destination for kernels that take pre-allocated outputs.
     ///
@@ -3303,6 +3383,76 @@ mod tests {
         for &v in &host {
             assert!((v - 0.7).abs() < 1e-5);
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_upload_u8_rgb_to_linear_planar_padded_matches_host() {
+        // The fused GPU kernel must produce planes bit-identical
+        // (or near-bit-identical, given f32 powf rounding) to the
+        // host pipeline:
+        //   u8 → host srgb→linear → host pad_to_alignment
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        // Small image with non-aligned dims so padding kicks in.
+        // src=37×29; padded=48×32 (aligned to 16).
+        let sw = 37u32;
+        let sh = 29u32;
+        let pw = 48u32;
+        let ph = 32u32;
+        let n_src = (sw as usize) * (sh as usize) * 3;
+        let n_out = (pw as usize) * (ph as usize);
+
+        // Mix of low and high bytes to exercise both EOTF branches
+        // (linear segment vs powf branch around f=0.04045).
+        let pixels: Vec<u8> = (0..n_src)
+            .map(|i| ((i.wrapping_mul(31) % 251) as u8).wrapping_add(7))
+            .collect();
+
+        // Host reference.
+        let to_linear = |c: u8| -> f32 {
+            let f = c as f32 / 255.0;
+            if f <= 0.04045 {
+                f / 12.92
+            } else {
+                ((f + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let mut host_r = alloc::vec![0.0_f32; n_out];
+        let mut host_g = alloc::vec![0.0_f32; n_out];
+        let mut host_b = alloc::vec![0.0_f32; n_out];
+        for oy in 0..ph as usize {
+            for ox in 0..pw as usize {
+                let sx = if ox < sw as usize { ox } else { sw as usize - 1 };
+                let sy = if oy < sh as usize { oy } else { sh as usize - 1 };
+                let src_off = (sy * sw as usize + sx) * 3;
+                let idx = oy * pw as usize + ox;
+                host_r[idx] = to_linear(pixels[src_off]);
+                host_g[idx] = to_linear(pixels[src_off + 1]);
+                host_b[idx] = to_linear(pixels[src_off + 2]);
+            }
+        }
+
+        // GPU.
+        let (g_r, g_g, g_b) =
+            enc.upload_u8_rgb_to_linear_planar_padded(&pixels, sw, sh, pw, ph);
+        let gpu_r = enc.download_plane(&g_r);
+        let gpu_g = enc.download_plane(&g_g);
+        let gpu_b = enc.download_plane(&g_b);
+
+        // Compare. f32 powf rounding may differ between host CPU
+        // and CUDA, so allow a tiny relative tolerance instead of
+        // bit-exact (the math is approximation either way).
+        let max_abs_diff = |a: &[f32], b: &[f32]| -> f32 {
+            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+        };
+        let dr = max_abs_diff(&host_r, &gpu_r);
+        let dg = max_abs_diff(&host_g, &gpu_g);
+        let db = max_abs_diff(&host_b, &gpu_b);
+        assert!(dr < 1e-5, "r diff {dr}");
+        assert!(dg < 1e-5, "g diff {dg}");
+        assert!(db < 1e-5, "b diff {db}");
     }
 
     #[cfg(feature = "cuda")]
