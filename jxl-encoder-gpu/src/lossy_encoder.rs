@@ -181,6 +181,17 @@ pub struct StrategySearchPlan<R: Runtime> {
     pub dc_grid_y: Vec<f32>,
     /// Per-8x8-block DC grid for B channel.
     pub dc_grid_b: Vec<f32>,
+    /// Per-8x8-block DC grid for X channel as a GPU buffer (output of
+    /// `dc_grid_8x8_persistent` — 1 f32 per block, n_padded_blocks
+    /// total). Used by the GPU LLF restore kernels in
+    /// `encode_and_reconstruct_mixed_strategy_*` to skip the per-iter
+    /// `upload_blocks(dc_grid_per_8x8_block)` PCIe transfer that the
+    /// host-only path otherwise pays.
+    pub dc_grid_x_gpu: GpuBlocks<R>,
+    /// Per-8x8-block DC grid for Y channel as a GPU buffer.
+    pub dc_grid_y_gpu: GpuBlocks<R>,
+    /// Per-8x8-block DC grid for B channel as a GPU buffer.
+    pub dc_grid_b_gpu: GpuBlocks<R>,
     /// Per-region strategy picks from the cost-grid selector.
     pub assignments: Vec<crate::pipeline::StrategyAssignment>,
     /// Target distance used for cost-grid scaling (constant across
@@ -1620,6 +1631,13 @@ impl<R: Runtime> LossyEncoder<R> {
         let dc_grid_x = enc.download_blocks(&g_dc_x);
         let dc_grid_y = enc.download_blocks(&g_dc_y);
         let dc_grid_b = enc.download_blocks(&g_dc_b);
+        // Keep the GPU dc_grid handles too — encode_with_strategy_plan_adaptive
+        // threads them into encode_and_reconstruct_* via the
+        // `dc_grid_*_gpu` Option params, skipping the per-iter
+        // upload_blocks(dc_grid_per_8x8_block) PCIe transfer.
+        let dc_grid_x_gpu = g_dc_x;
+        let dc_grid_y_gpu = g_dc_y;
+        let dc_grid_b_gpu = g_dc_b;
         mark("dc_grids");
 
         // Suppress "unused" warnings for weight Vecs that are only
@@ -1651,6 +1669,9 @@ impl<R: Runtime> LossyEncoder<R> {
             dc_grid_x,
             dc_grid_y,
             dc_grid_b,
+            dc_grid_x_gpu,
+            dc_grid_y_gpu,
+            dc_grid_b_gpu,
             assignments,
             target_distance,
             padded_width: self.padded_width,
@@ -1886,6 +1907,11 @@ impl<R: Runtime> LossyEncoder<R> {
             Some(&plan.xyb_x_gpu),
             Some(&plan.xyb_y_gpu),
             Some(&plan.xyb_b_gpu),
+            // Same trick for the per-8×8 dc_grid GPU buffers
+            // (~64 KB each at 1024², 192 KB total per encode iter).
+            Some(&plan.dc_grid_x_gpu),
+            Some(&plan.dc_grid_y_gpu),
+            Some(&plan.dc_grid_b_gpu),
         );
         mark("mixed_strategy_encode_recon");
 

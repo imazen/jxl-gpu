@@ -208,6 +208,29 @@ impl<R: Runtime> GpuBlocks<R> {
     }
 }
 
+// Manual Clone + Debug impls for GpuBlocks — same `where R: Clone /
+// Debug` avoidance as the GpuPlane impls. Handle is reference-counted
+// and PhantomData auto-impls Clone unconditionally.
+impl<R: Runtime> Clone for GpuBlocks<R> {
+    fn clone(&self) -> Self {
+        Self {
+            handle: self.handle.clone(),
+            num_blocks: self.num_blocks,
+            coeffs_per_block: self.coeffs_per_block,
+            _r: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<R: Runtime> core::fmt::Debug for GpuBlocks<R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GpuBlocks")
+            .field("num_blocks", &self.num_blocks)
+            .field("coeffs_per_block", &self.coeffs_per_block)
+            .finish()
+    }
+}
+
 /// Typed handle to GPU-resident per-block `i32` data — quantized
 /// coefficients. Same `num_blocks * coeffs_per_block` layout as
 /// [`GpuBlocks`], but with `i32` element type (kept as raw bytes
