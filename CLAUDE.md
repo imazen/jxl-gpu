@@ -361,8 +361,8 @@ strict score parity (0.5% tolerance) AND path-stable.
 | DCT16x8 / DCT8x16    | 1.21    | 1.21        | 1.21       | 0% — match    |
 | DCT32x32             | 4.0     | **3.0**     | 1.48       | 103% high     |
 | DCT32x16 / DCT16x32  | 2.5     | **2.2**     | 1.49       | 48% high      |
-| DCT64x64             | 16.0    | **6.0**     | 2.25       | 167% high     |
-| DCT64x32 / DCT32x64  | 16.0    | **6.0**     | 2.25       | 167% high     |
+| DCT64x64             | 16.0    | **5.0**     | 2.25       | 122% high     |
+| DCT64x32 / DCT32x64  | 16.0    | **5.0**     | 2.25       | 122% high     |
 
 **Three muls now at exact libjxl reference (DCT4x4, DCT2X2 +
 DCT8/DCT16/DCT16x8 already there).** Five muls still above libjxl
@@ -378,8 +378,12 @@ comments** (lossy_encoder.rs sub-blocks, cost.rs DCT32+/DCT64+),
 so future me can resume the experiment if/when missing
 counterweights land.
 
-Quality unchanged: 11 corpus images all within 0.5% tolerance
-across all retunes.
+Quality unchanged or IMPROVED: 33 (image, distance) corpus cases
+all within 0.5% tolerance across all retunes. The expanded multi-
+distance test (commit ce90f017, covers d=0.5/1.0/2.0) caught a real
+-3.9% improvement opportunity at DCT64=5 on 22ea12c9 d=0.5 that the
+d=1.0-only test had missed — locked in via expectation update
+(commit 0fdd55e8).
 
 ## Strat-search corpus quality (May 9, 2026, post DCT32/DCT64 retune)
 
