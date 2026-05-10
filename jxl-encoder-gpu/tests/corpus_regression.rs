@@ -111,10 +111,11 @@ const EXPECTED_SCORES: &[(&str, f32, f32, BestOfBothPath)] = &[
         0.5, 0.6380, BestOfBothPath::RefineDct8),
     ("clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
         0.5, 0.7292, BestOfBothPath::RefineDct8),
-    // d=0.5 score improved 0.7397 → 0.7109 (-3.9%) when DCT64 mul
-    // dropped 6 → 5. Strat-search picks DCT64 here for real gain.
+    // d=0.5 score improved 0.7397 → 0.7109 (DCT64 6→5) → 0.6957
+    // (DCT64 5→4.8) — total 5.9% improvement from the original 6.0
+    // baseline. Strat-search picks DCT64 here for real gain.
     ("clic2025-1024/22ea12c903e41583.png",
-        0.5, 0.7109, BestOfBothPath::RefineStratSearch),
+        0.5, 0.6957, BestOfBothPath::RefineStratSearch),
     ("clic2025-1024/2684452db505ddbb.png",
         0.5, 0.6667, BestOfBothPath::RefineStratSearch),
     ("gb82-sc/graph.png", 0.5, 0.5271, BestOfBothPath::SkippedStratSearchAsScreenshot),

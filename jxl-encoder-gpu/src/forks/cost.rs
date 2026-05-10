@@ -1826,12 +1826,14 @@ pub fn strategy_search_costs_dct64x64<R: Runtime>(
     //   16.0 → 6.0 (May 9 2026): bisected on the original 11-image
     //     corpus (d=1.0 only). 16 ✓, 12 ✓, 8 ✓, 6 ✓, 5 path-shifts,
     //     4 ✗ (22ea12c9 regresses +2.4%).
-    //   6.0 → 5.0 (May 9 2026 evening, this commit): once corpus
-    //     coverage expanded to d=0.5/1.0/2.0 (33 cases), DCT64=5
-    //     was found to deliver a real -3.9% improvement on
-    //     22ea12c9 d=0.5 (strat-search picks DCT64 correctly there
-    //     for actual gain). DCT64=4 regresses 22ea12c9 d=1 +2.4%
-    //     AND loses the d=0.5 win — 5.0 is the sweet spot.
+    //   6.0 → 5.0 (May 9 2026 evening): once corpus coverage
+    //     expanded to d=0.5/1.0/2.0 (33 cases), DCT64=5 was found
+    //     to deliver a real -3.9% improvement on 22ea12c9 d=0.5
+    //     (strat-search picks DCT64 correctly there for actual gain).
+    //   5.0 → 4.8 (May 9 2026 evening, this commit): finer-grained
+    //     bisection found another -2.1% on 22ea12c9 d=0.5 (cumulative
+    //     -5.9% from 6.0 baseline). 4.6 regresses (+1%), 4.5/4.0
+    //     regress at d=1 — 4.8 is the new sweet spot.
     //
     // The cost model still misses libjxl's pixel-loss penalty for
     // large transforms on detailed content — without that
@@ -1841,7 +1843,7 @@ pub fn strategy_search_costs_dct64x64<R: Runtime>(
     // missing pixel-loss term lands. Same rationale as DCT32x32.
     // The proper fix is a content-aware gate (e.g. mask1x1
     // smoothness threshold) before DCT64 even enters the cost grid.
-    let entropy_mul = 5.0_f32;
+    let entropy_mul = 4.8_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
@@ -1931,7 +1933,7 @@ pub fn strategy_search_costs_dct64x32_or_32x64<R: Runtime>(
     // DCT64x32 / DCT32x64 — same suppression rationale as DCT64x64
     // (see the corpus-sweep note above). 3.5 → 8.0 → 16.0 → 6.0 → 5.0
     // sequence; stays in lockstep with DCT64x64.
-    let entropy_mul = 5.0_f32;
+    let entropy_mul = 4.8_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
