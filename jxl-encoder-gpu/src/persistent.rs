@@ -1673,6 +1673,43 @@ impl<R: Runtime> GpuEncoder<R> {
         );
     }
 
+    /// Persistent-API per-(8×8)-block DC grid: one f32 per block =
+    /// mean of the 64 covered pixels. Mirrors
+    /// `crate::forks::reconstruct::compute_dc_grid_per_8x8_block`
+    /// (host scalar) on GPU.
+    ///
+    /// Plane dimensions must be multiples of 8. Returns a `GpuBlocks`
+    /// with `coeffs_per_block = 1` and `num_blocks = (W/8) * (H/8)`.
+    pub fn dc_grid_8x8_persistent(&self, plane: &GpuPlane<R>) -> GpuBlocks<R> {
+        assert!(
+            plane.width.is_multiple_of(8),
+            "dc_grid_8x8_persistent: width {} not multiple of 8",
+            plane.width
+        );
+        assert!(
+            plane.height.is_multiple_of(8),
+            "dc_grid_8x8_persistent: height {} not multiple of 8",
+            plane.height
+        );
+        let blocks_per_row = plane.width / 8;
+        let blocks_per_col = plane.height / 8;
+        let num_blocks = blocks_per_row * blocks_per_col;
+        let h_out = self.client_ref().empty((num_blocks as usize) * 4);
+        crate::launch::dc_grid::dc_grid_8x8::<R>(
+            self.client_ref(),
+            plane.handle.clone(),
+            h_out.clone(),
+            plane.width,
+            plane.height,
+        );
+        GpuBlocks {
+            handle: h_out,
+            num_blocks,
+            coeffs_per_block: 1,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Persistent-API mask1x1 field on the Y channel.
     pub fn mask1x1_persistent(&self, y: &GpuPlane<R>) -> GpuPlane<R> {
         let n = y.n_pixels();
@@ -2444,6 +2481,35 @@ mod tests {
             max_err < 5e-5,
             "DCT/IDCT roundtrip via persistent API drift: {max_err:.3e}"
         );
+    }
+
+    /// `dc_grid_8x8_persistent` GPU kernel must match the host scalar
+    /// `compute_dc_grid_per_8x8_block` reference exactly within fp32
+    /// rounding (1e-5 tolerance — the host computes via f32 sum, kernel
+    /// uses fp32 sum too, so order-of-summation may differ by a few
+    /// ULPs but never more than 1e-5 on bounded synthetic input).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dc_grid_8x8_persistent_matches_host() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        for &(w, h) in &[(16u32, 16u32), (32, 32), (64, 48), (128, 256)] {
+            let n = (w * h) as usize;
+            let plane: Vec<f32> = (0..n).map(|i| 0.05 * ((i as f32 * 0.013).sin() + 0.5)).collect();
+            let g_plane = enc.upload_plane(&plane, w, h);
+            let g_dc = enc.dc_grid_8x8_persistent(&g_plane);
+            let gpu_dc = enc.download_blocks(&g_dc);
+            let host_dc = crate::forks::reconstruct::compute_dc_grid_per_8x8_block(
+                &plane, w as usize, h as usize,
+            );
+            assert_eq!(gpu_dc.len(), host_dc.len(), "len mismatch at {w}×{h}");
+            for (i, (g, h_)) in gpu_dc.iter().zip(host_dc.iter()).enumerate() {
+                assert!(
+                    (g - h_).abs() < 1e-5,
+                    "{w}×{h} block {i}: gpu={g} host={h_}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "cuda")]

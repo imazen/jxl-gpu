@@ -966,7 +966,6 @@ impl<R: Runtime> LossyEncoder<R> {
             strategy_search_costs_dct64x64_persistent,
             strategy_search_costs_dct8_16x16_persistent, strategy_search_costs_subblock_8x8,
         };
-        use crate::forks::reconstruct::compute_dc_grid_per_8x8_block;
         use crate::forks::transform::{
             RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT2X2,
             RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT4X4,
@@ -1596,10 +1595,17 @@ impl<R: Runtime> LossyEncoder<R> {
         };
         mark("selector");
 
-        // Stage 6: per-channel DC grids
-        let dc_grid_x = compute_dc_grid_per_8x8_block(&xyb_x, pw, ph);
-        let dc_grid_y = compute_dc_grid_per_8x8_block(&xyb_y, pw, ph);
-        let dc_grid_b = compute_dc_grid_per_8x8_block(&xyb_b, pw, ph);
+        // Stage 6: per-channel DC grids — computed on GPU from the
+        // gaborished XYB GpuPlanes (xx_g/xy_g/xb_g still resident),
+        // then downloaded as small per-block scalars (n_blocks × 4
+        // bytes per channel — kilobytes at typical sizes vs the
+        // megabytes the plane-level host loop touches).
+        let g_dc_x = enc.dc_grid_8x8_persistent(&xx_g);
+        let g_dc_y = enc.dc_grid_8x8_persistent(&xy_g);
+        let g_dc_b = enc.dc_grid_8x8_persistent(&xb_g);
+        let dc_grid_x = enc.download_blocks(&g_dc_x);
+        let dc_grid_y = enc.download_blocks(&g_dc_y);
+        let dc_grid_b = enc.download_blocks(&g_dc_b);
         mark("dc_grids");
 
         // Suppress "unused" warnings for weight Vecs that are only
