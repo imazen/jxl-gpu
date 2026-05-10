@@ -19,7 +19,8 @@ Image:    1024² = clic2025-1024/02809272...png (322 KB JXL output at d=1)
 | clic2025/a365e654… (native)   |  2.78 MP | d=4.0    |  1625.6 ms | 102.4 ms |  15.9×  |
 | clic2025/a365e654… → Lanczos3 | 16.00 MP | d=1.0    |  5986.1 ms | 670.8 ms |   8.9×  |
 | clic2025/a365e654… → Lanczos3 | 20.00 MP | d=1.0    |  7630.9 ms | 850.2 ms |   9.0×  |
-| clic2025/a365e654… → Lanczos3 | 48.00 MP | d=1.0    | (timeout — Lanczos3 upscale > 25 min on CPU) |   |   |
+| clic2025/a365e654… → Triangle | 32.00 MP | d=1.0    | (hang — likely CPU OOM or GPU pool exhaustion; not investigated) | | |
+| clic2025/a365e654… → Triangle | 48.00 MP | d=1.0    | (hang — same)                                  |          |         |
 
 (GPU iters=1, matches CPU effort=7 which doesn't run the butteraugli
 refinement loop. e8+ adds 4 GPU iters, ~+50 ms GPU but no extra CPU
@@ -77,11 +78,18 @@ Observations
    native 16+ MP photo would. Speedup on a true native 16+ MP
    photo would likely be higher.
 
-7. **48 MP not yet measured.** Lanczos3 upscale to 48 MP from a
-   2048×1360 source took >25 min single-threaded — the timeout
-   ate before any encoding ran. Need either a smaller upscale
-   factor (chained: native 2048 → Lanczos3 to 4096 → resize again
-   if needed) or a true large source photo to measure 48 MP.
+7. **>20 MP cliff.** 32 MP and 48 MP both hung beyond a 10-min
+   timeout even with Triangle (bilinear) upscale (which is fast).
+   Triangle resize at 32 MP completes in seconds, so the hang is
+   downstream — either the CPU encoder OOMs / spends huge time on
+   AC strategy search at large sizes, or the GPU memory pool
+   blows up with ~10 plane-sized intermediates at 1+ GB total.
+   To localize: split the bench into CPU-only and GPU-only modes,
+   try each in isolation. Not investigated this session.
+
+   For now: 16-20 MP is the upper measured limit on this bench.
+   Speedup at that size is ~9× (CPU 0.37 s/MP linear; GPU 0.04
+   s/MP including amortized fixed cost).
 
 Caveats
 -------

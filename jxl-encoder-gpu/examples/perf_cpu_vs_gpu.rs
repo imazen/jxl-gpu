@@ -81,9 +81,17 @@ fn main() {
         let scale = (mp / cur_mp).sqrt();
         let nw = ((sw as f32 * scale).round() as u32).max(8);
         let nh = ((sh as f32 * scale).round() as u32).max(8);
-        // Lanczos3 preserves photo-like high-frequency detail far
-        // better than nearest/bilinear (matters for AC strategy mix).
-        let resized = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
+        // Triangle (bilinear) is much faster than Lanczos3 for large
+        // upscales; high-freq detail is reduced either way (since the
+        // source was lower-res), and we mainly want a real-photo
+        // texture profile rather than perfect resampling. Use
+        // Lanczos3 for downscale (no FilterType for "auto").
+        let filter = if nw * nh < (sw * sh) {
+            image::imageops::FilterType::Lanczos3
+        } else {
+            image::imageops::FilterType::Triangle
+        };
+        let resized = image::imageops::resize(&img, nw, nh, filter);
         img = resized;
     }
     let (w, h) = img.dimensions();
