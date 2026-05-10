@@ -103,7 +103,8 @@ pub fn dequant_dct8_kernel(
 /// are each exactly 64 f32 (one DCT8 quant matrix per channel,
 /// broadcast across all blocks). Same algorithmic semantics as the
 /// per-block variant; saves the per-block replication overhead
-/// (matched with [`quantize_dct8_kernel_broadcast_w`]).
+/// (matched with
+/// [`quantize_dct8_kernel_broadcast_w`](crate::kernels::quantize::quantize_dct8_kernel_broadcast_w)).
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
 pub fn dequant_dct8_kernel_broadcast_w(

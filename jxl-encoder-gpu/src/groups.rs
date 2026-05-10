@@ -12,7 +12,8 @@
 //! ## Why this module exists
 //!
 //! Today the GPU pipeline produces whole-image output:
-//! - [`StrategySearchPlan`] (XYB planes, DC grids, all assignments)
+//! - [`StrategySearchPlan`](crate::lossy_encoder::StrategySearchPlan)
+//!   (XYB planes, DC grids, all assignments)
 //! - per-block aq_field
 //! - per-strategy quantized AC coefficients (one batch per strategy)
 //!

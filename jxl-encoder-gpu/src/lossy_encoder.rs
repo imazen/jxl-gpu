@@ -2245,11 +2245,9 @@ impl<R: Runtime> LossyEncoder<R> {
     /// of gb82-sc except windows95.png), 0 of 16 CLIC photos
     /// false-positive. windows95.png (median 69.9) is the one
     /// false-negative — the user should pair this with
-    /// [`forks::butteraugli_loop::refine_and_encode_best_of_both`]
-    /// for guaranteed correctness on edge cases.
-    ///
-    /// [`forks::butteraugli_loop::refine_and_encode_best_of_both`]:
-    ///   crate::forks::butteraugli_loop::refine_and_encode_best_of_both
+    /// `forks::butteraugli_loop::refine_and_encode_best_of_both`
+    /// (gated behind the `butteraugli-loop` feature) for guaranteed
+    /// correctness on edge cases.
     pub fn content_looks_like_screenshot(
         &self,
         enc: &GpuEncoder<R>,

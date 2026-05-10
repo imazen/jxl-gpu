@@ -2052,7 +2052,7 @@ pub fn strategy_search_costs_subblock_8x8_with_handle<R: Runtime>(
 /// Cost grid for DCT64x64. Returns empty Vec when image dims aren't
 /// multiples of 64.
 ///
-/// libjxl entropy_mul: profile.entropy_mul_table[DCT64X64] = 2.25
+/// libjxl entropy_mul: `profile.entropy_mul_table[DCT64X64] = 2.25`
 /// (verified against jxl-encoder/src/effort.rs::EntropyMulTable::reference).
 /// As with DCT32x32, we use a higher tuned value pending the rest
 /// of the cost-model adjustments (see strategy_search_costs_dct32x32).
@@ -2160,7 +2160,7 @@ pub fn strategy_search_costs_dct64x64<R: Runtime>(
 /// Returns empty Vec when image dims aren't aligned for the chosen
 /// strategy.
 ///
-/// libjxl entropy_mul: profile.entropy_mul_table[DCT64X32] = 2.25
+/// libjxl entropy_mul: `profile.entropy_mul_table[DCT64X32] = 2.25`
 /// (same as DCT64x64). Tuned higher here pending the rest of the
 /// cost-model adjustments.
 #[allow(clippy::too_many_arguments)]
@@ -2249,7 +2249,7 @@ pub fn strategy_search_costs_dct64x32_or_32x64<R: Runtime>(
 /// Cost grid for DCT32x16 or DCT16x32 (the rectangular DCT32 family).
 /// Returns empty Vec when image dims aren't compatible.
 ///
-/// libjxl entropy_mul: profile.entropy_mul_table[DCT16X32] = 1.49
+/// libjxl entropy_mul: `profile.entropy_mul_table[DCT16X32] = 1.49`
 /// (verified against jxl-encoder/src/effort.rs::EntropyMulTable::reference).
 /// As with DCT32x32, we use a tuned higher value here pending the
 /// remaining cost-model adjustments.
@@ -2353,7 +2353,7 @@ pub fn strategy_search_costs_dct32x16_or_16x32<R: Runtime>(
 ///
 /// Returns the per-block cost grid in row-major order at the strategy's
 /// natural alignment. Use the result as `extra.dct_16x8` or
-/// `extra.dct_8x16` in [`select_partitions_16x16_full`].
+/// `extra.dct_8x16` in [`select_partitions_16x16_full`](crate::pipeline::select_partitions_16x16_full).
 ///
 /// Phase A note: hard-codes the libjxl entropy_mul (1.21 for DCT16x8/
 /// DCT8x16). Per-strategy mul/bonus/penalty post-processing deferred
