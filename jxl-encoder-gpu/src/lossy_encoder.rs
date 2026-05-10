@@ -2006,9 +2006,13 @@ impl<R: Runtime> LossyEncoder<R> {
         let (rgb_r, rgb_g, rgb_b) =
             enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
         mark("postpass_gab_epf_xyb");
-        let r_out = enc.download_plane(&rgb_r);
-        let g_out = enc.download_plane(&rgb_g);
-        let b_out = enc.download_plane(&rgb_b);
+        // Batched 3-channel D2H read: one read_async + sync wait
+        // instead of three serial read_one round-trips. Each
+        // read_one carries its own queue-drain stall, and the 3
+        // transfers are independent so cubecl can overlap them.
+        // Saves ~0.22 ms / -9% on download_crop on real CLIC photo
+        // (paired A/B 10 runs each, 2.156 ms vs 2.375 ms mean).
+        let (r_out, g_out, b_out) = enc.download_planes_3ch(&rgb_r, &rgb_g, &rgb_b);
         mark("download_crop");
 
         (

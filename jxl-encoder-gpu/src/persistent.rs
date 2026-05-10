@@ -372,6 +372,39 @@ impl<R: Runtime> GpuEncoder<R> {
         f32::from_bytes(&bytes).to_vec()
     }
 
+    /// Batched 3-channel plane download — single cubecl `read` call
+    /// instead of three separate `read_one` calls. The 3 D2H transfers
+    /// are issued asynchronously and we wait once for all of them
+    /// instead of three serial submit+wait round-trips.
+    ///
+    /// All three planes must share the same `(width, height)`.
+    /// Mirror of [`Self::upload_planes_3ch`] for the inverse direction.
+    pub fn download_planes_3ch(
+        &self,
+        r: &GpuPlane<R>,
+        g: &GpuPlane<R>,
+        b: &GpuPlane<R>,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        assert_eq!(r.width, g.width);
+        assert_eq!(r.height, g.height);
+        assert_eq!(r.width, b.width);
+        assert_eq!(r.height, b.height);
+        let mut bytes = self.client_ref().read(alloc::vec![
+            r.handle.clone(),
+            g.handle.clone(),
+            b.handle.clone(),
+        ]);
+        // Drain in order: r, g, b.
+        let b_bytes = bytes.pop().expect("read[2]");
+        let g_bytes = bytes.pop().expect("read[1]");
+        let r_bytes = bytes.pop().expect("read[0]");
+        (
+            f32::from_bytes(&r_bytes).to_vec(),
+            f32::from_bytes(&g_bytes).to_vec(),
+            f32::from_bytes(&b_bytes).to_vec(),
+        )
+    }
+
     /// Persistent-API XYB forward. Takes 3 GPU-resident planes,
     /// returns 3 GPU-resident planes. No host transfer.
     pub fn xyb_from_linear_rgb_persistent(
