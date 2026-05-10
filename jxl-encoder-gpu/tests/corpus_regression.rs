@@ -82,7 +82,7 @@ const EXPECTED_SCORES: &[(&str, f32, f32, BestOfBothPath)] = &[
         1.0, 0.8190, BestOfBothPath::RefineDct8), // uniform won
     // DCT64-sensitive photos (52/9/79 picks at mul=8 pre-fix)
     ("clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
-        1.0, 1.1587, BestOfBothPath::RefineStratSearch), // FP-tied, strat wins by epsilon
+        1.0, 1.1587, BestOfBothPath::RefineDct8), // FP-tied; epsilon flipped at DCT64=5
     ("clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
         1.0, 1.1548, BestOfBothPath::RefineDct8),
     ("clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
@@ -111,8 +111,10 @@ const EXPECTED_SCORES: &[(&str, f32, f32, BestOfBothPath)] = &[
         0.5, 0.6380, BestOfBothPath::RefineDct8),
     ("clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
         0.5, 0.7292, BestOfBothPath::RefineDct8),
+    // d=0.5 score improved 0.7397 → 0.7109 (-3.9%) when DCT64 mul
+    // dropped 6 → 5. Strat-search picks DCT64 here for real gain.
     ("clic2025-1024/22ea12c903e41583.png",
-        0.5, 0.7397, BestOfBothPath::RefineDct8),
+        0.5, 0.7109, BestOfBothPath::RefineStratSearch),
     ("clic2025-1024/2684452db505ddbb.png",
         0.5, 0.6667, BestOfBothPath::RefineStratSearch),
     ("gb82-sc/graph.png", 0.5, 0.5271, BestOfBothPath::SkippedStratSearchAsScreenshot),

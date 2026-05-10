@@ -1823,14 +1823,15 @@ pub fn strategy_search_costs_dct64x64<R: Runtime>(
     //     CLIC photos (1cba10ad +94% butteraugli vs uniform).
     //   8.0 → 16.0 (May 9 2026): one image still leaked DCT64
     //     picks at 8.0 (11f2b039 +3% loss).
-    //   16.0 → 6.0 (May 9 2026, this commit): now safe to lower with
-    //     the corpus regression test as guard. 11-image corpus
-    //     covers 1cba10ad / 11f2b039 (DCT64-sensitive) + the strat-
-    //     wins photos 22ea12c9 / 2684452d. Bisected:
-    //       16 ✓, 12 ✓, 8 ✓, 6 ✓, 5 path-shifts on 1cba10ad
-    //       (FP-tied score, refine wins by epsilon), 4 ✗ (22ea12c9
-    //       regresses by +2.4%). Settled on 6.0 — strict score
-    //       parity AND path-stable.
+    //   16.0 → 6.0 (May 9 2026): bisected on the original 11-image
+    //     corpus (d=1.0 only). 16 ✓, 12 ✓, 8 ✓, 6 ✓, 5 path-shifts,
+    //     4 ✗ (22ea12c9 regresses +2.4%).
+    //   6.0 → 5.0 (May 9 2026 evening, this commit): once corpus
+    //     coverage expanded to d=0.5/1.0/2.0 (33 cases), DCT64=5
+    //     was found to deliver a real -3.9% improvement on
+    //     22ea12c9 d=0.5 (strat-search picks DCT64 correctly there
+    //     for actual gain). DCT64=4 regresses 22ea12c9 d=1 +2.4%
+    //     AND loses the d=0.5 win — 5.0 is the sweet spot.
     //
     // The cost model still misses libjxl's pixel-loss penalty for
     // large transforms on detailed content — without that
@@ -1840,7 +1841,7 @@ pub fn strategy_search_costs_dct64x64<R: Runtime>(
     // missing pixel-loss term lands. Same rationale as DCT32x32.
     // The proper fix is a content-aware gate (e.g. mask1x1
     // smoothness threshold) before DCT64 even enters the cost grid.
-    let entropy_mul = 6.0_f32;
+    let entropy_mul = 5.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
@@ -1928,10 +1929,9 @@ pub fn strategy_search_costs_dct64x32_or_32x64<R: Runtime>(
         .collect();
 
     // DCT64x32 / DCT32x64 — same suppression rationale as DCT64x64
-    // (see the corpus-sweep note above). Bumped 3.5 → 8.0 (May 9 2026),
-    // then 8.0 → 16.0, then 16.0 → 6.0 once the corpus regression
-    // test landed as a safety net. Stays in lockstep with DCT64x64.
-    let entropy_mul = 6.0_f32;
+    // (see the corpus-sweep note above). 3.5 → 8.0 → 16.0 → 6.0 → 5.0
+    // sequence; stays in lockstep with DCT64x64.
+    let entropy_mul = 5.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
         enc,
