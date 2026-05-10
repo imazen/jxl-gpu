@@ -51,3 +51,40 @@ Notes
 - This synthetic gradient is unusually DCT64x64-heavy (57%) — real
   photos are DCT8-heavy and exercise different code paths. Re-run on
   a CLIC photo to capture realistic mix.
+
+Follow-up investigation (2026-05-10)
+------------------------------------
+Where the 5.92 ms comes from: encode_with_strategy_plan_adaptive_traced
+ends with three `enc.download_plane(&rgb_*)` calls on the GPU-resident
+linear RGB planes. `download_plane` is a `read_one` — a blocking sync
+that drains the entire CUDA queue. PCIe transfer of 3×4 MB at ~20 GB/s
+is ~0.6 ms; the rest (~5.3 ms) is the queue-drain sync stall.
+
+Why the round-trip on every iter is wasteful: callers in
+`butteraugli_loop.rs` (e.g. `refine_aq_field_gpu_with_strategy_search`)
+take the linear RGB → host-side `linear_planar_to_srgb_u8_interleaved` →
+`bg.compute_with_reference(srgb_u8)` which uploads to GPU again.
+Net effect: ~12 MB download + host conversion + 3 MB upload per iter.
+
+Two paths to fix (cross-repo dependency):
+  (a) Add `populate_linear_from_planar_gpu(target, GpuPlane×3)` to
+      butteraugli-gpu's pipeline, plus `set_distorted_from_planar_gpu`.
+      Skips both the download AND the host conversion AND the re-upload.
+      Estimated saving: ~5.5 ms/iter (33% per-iter wall-clock).
+  (b) Add `populate_opsin_from_xyb_gpu` (XYB ≈ opsin in libjxl).
+      Bigger saving since butteraugli's preprocessing skips
+      sRGB→linear→opsin entirely. We already have XYB on GPU before
+      `xyb_to_linear_rgb_planar_persistent`.
+
+Both paths require touching `~/work/zen/zenmetrics/crates/butteraugli-gpu/`,
+which the global rules forbid without user authorization.
+
+Within-repo intermediate win (does NOT need cross-repo work):
+  Move `linear_planar_to_srgb_u8_interleaved` to GPU + change
+  `download_plane` × 3 to a single u8 sRGB download. Cuts PCIe
+  bytes 4× (12 MB → 3 MB) but only saves the ~0.4 ms transfer
+  portion — the queue-drain stall remains. ~7% win, not dramatic.
+
+Decision: park this until cross-repo authorization. The
+benchmark still serves as a regression gate.
+
