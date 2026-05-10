@@ -122,25 +122,16 @@ fn default_gaborish_weights() -> GaborishWeights {
     }
 }
 
-/// High-level lossy DCT8 encoder for a fixed image size. Pre-allocates
-/// the static inputs (gaborish weights, dead-zone thresholds, unit
-/// quant matrix) once at construction so they don't re-upload per call.
-///
-/// **Arbitrary input sizes are supported.** If `width` or `height` is
-/// not a multiple of 8, the encoder pads the input on the right and
-/// bottom with edge replication (matching libjxl), runs the pipeline
-/// on the padded image, and crops the output back to the original
-/// dimensions. The padding cost is per-encode (host-side memcpy at
-/// upload time, ~4 KB extra per image at typical sizes).
-///
-/// Construct one per (width, height) to amortize the static-input
-/// upload across many encodes.
+// Note: the LossyEncoder construction docs live with the impl block
+// further down. StrategySearchPlan's docs follow immediately so the
+// doc-comments stay attached to their items (clippy
+// empty_line_after_doc_comments).
 
 /// Cached cost-grid output from
 /// [`LossyEncoder::prepare_strategy_search_plan`]. Holds everything
 /// the encode/recon stage needs that's invariant under per-block
-/// `aq_field` changes — XYB host buffers, DC grids, and strategy
-/// assignments.
+/// `aq_field` changes — XYB GPU planes, per-(8×8) DC GPU buffers,
+/// strategy assignments, and host-side companions.
 ///
 /// Why split prepare/encode: combined-mode (strat-search + butteraugli
 /// AQ refinement) would otherwise pay the cost-grid cost on every
@@ -149,10 +140,13 @@ fn default_gaborish_weights() -> GaborishWeights {
 /// caching them via this plan drops per-iter cost from ~210 ms to
 /// ~50 ms on CLIC 1024² — a ~4× speedup.
 ///
-/// The plan is plain old data (no GPU lifetimes): host buffers + a
-/// `Vec<StrategyAssignment>`. Re-uploads of XYB to GPU happen inside
-/// each [`LossyEncoder::encode_with_strategy_plan_adaptive`] call;
-/// this is amortized by the encode/recon work.
+/// The plan owns both host buffers (`xyb_*`, `dc_grid_*` — kept for the
+/// currently-unused AFV strategy branch and host-fallback paths) and
+/// GPU buffers (`xyb_*_gpu`, `dc_grid_*_gpu` — clones of cubecl
+/// reference-counted handles). Threading the GPU buffers into
+/// `encode_and_reconstruct_mixed_strategy_3channel` lets per-iter
+/// encodes skip the redundant `upload_plane(xyb)` /
+/// `upload_blocks(dc_grid)` PCIe transfers.
 #[derive(Clone, Debug)]
 pub struct StrategySearchPlan<R: Runtime> {
     /// XYB X-channel host buffer, padded-image-size raster order.
