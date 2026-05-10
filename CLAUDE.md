@@ -282,6 +282,21 @@ don't repeat the experiments:
   write-into-existing-handle API. `create_from_slice` always
   allocates + copies. Pool reuse doesn't reliably amortize at
   large sizes (16 MP = ~64 MB chunks).
+- **alloc_plane via empty() + GPU zero-fill kernel** (probed
+  2026-05-10): replacing `create_from_slice(zeros)` with
+  `client.empty()` + a tiny GPU zero_fill kernel **regressed encode
+  iter 5×** at 16 MP (605 → 2947 ms; iter-to-iter 1489→3305ms,
+  monotonically increasing). cubecl's `empty()` apparently doesn't
+  pool-reuse 64 MB buffers the way `create_from_slice` does. The
+  308 ms `alloc_recon_planes` cost is the production baseline until
+  the cubecl pinned-buffer PR lands or we cache empty handles
+  explicitly per-iter on `LossyEncoder`. See
+  `negative_perf_alloc_plane_zero_fill.md` memo for full numbers.
+
+  When measuring with `mark()`, note that `mark("alloc_recon_planes")`
+  immediately after `alloc_plane × 3` reveals 308 ms / iter at 16 MP
+  was hidden under `mixed_strategy_encode_recon`. The actual
+  encode/reconstruct GPU work is only ~28 ms / iter.
 
 ## Autonomous mandate
 

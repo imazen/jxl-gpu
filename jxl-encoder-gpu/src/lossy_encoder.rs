@@ -2008,6 +2008,19 @@ impl<R: Runtime> LossyEncoder<R> {
         // for the upload_plane(plane_*) round-trip the older code did
         // and no need for the host plane_x/y/b alloc (12 MB / iter at
         // 1024² avoided across 4 butteraugli refinement iters).
+        // alloc_plane × 3 here uploads 3 × padded_width*padded_height f32
+        // zeros via cubecl HtoD. At 16 MP that's ~308 ms per encode iter
+        // (probed 2026-05-10 with mark("alloc_recon_planes")), 51% of
+        // encode iter wall-clock — by far the largest single bottleneck.
+        //
+        // Tried replacing with `client.empty()` + GPU zero_fill kernel
+        // (commits "GPU zero-fill kernel"): regressed 5× to ~2900 ms per
+        // iter due to cubecl 0.10's empty() apparently not pool-reusing
+        // 64 MB buffers across iters the way create_from_slice does.
+        // Reverted; see `negative_perf_alloc_plane_zero_fill.md` memo.
+        //
+        // Real fix needs the cubecl pinned-buffer PR or the raw-cudarc
+        // bypass — until then this 308 ms is the production baseline.
         let recon_x_p = enc.alloc_plane(self.padded_width, self.padded_height);
         let recon_y_p = enc.alloc_plane(self.padded_width, self.padded_height);
         let recon_b_p = enc.alloc_plane(self.padded_width, self.padded_height);
