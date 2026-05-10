@@ -355,14 +355,14 @@ strict score parity (0.5% tolerance) AND path-stable.
 |----------------------|---------|-------------|------------|---------------|
 | DCT4x4               | 2.16    | **1.08**    | 1.08       | 0% — match    |
 | DCT4x8 / DCT8x4      | 1.72    | **0.98**    | 0.86       | 14% high      |
-| IDENTITY             | 2.09    | **1.95**    | 1.0428     | 87% high      |
+| IDENTITY             | 2.09    | **1.85**    | 1.0428     | 78% high      |
 | DCT2X2               | 1.90    | **0.95**    | 0.95       | 0% — match    |
 | DCT16x16             | 1.34    | 1.34        | 1.34       | 0% — match    |
 | DCT16x8 / DCT8x16    | 1.21    | 1.21        | 1.21       | 0% — match    |
 | DCT32x32             | 4.0     | **3.0**     | 1.48       | 103% high     |
 | DCT32x16 / DCT16x32  | 2.5     | **2.2**     | 1.49       | 48% high      |
-| DCT64x64             | 16.0    | **5.0**     | 2.25       | 122% high     |
-| DCT64x32 / DCT32x64  | 16.0    | **5.0**     | 2.25       | 122% high     |
+| DCT64x64             | 16.0    | **4.8**     | 2.25       | 113% high     |
+| DCT64x32 / DCT32x64  | 16.0    | **4.8**     | 2.25       | 113% high     |
 
 **Three muls now at exact libjxl reference (DCT4x4, DCT2X2 +
 DCT8/DCT16/DCT16x8 already there).** Five muls still above libjxl
