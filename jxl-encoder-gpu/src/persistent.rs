@@ -1673,6 +1673,57 @@ impl<R: Runtime> GpuEncoder<R> {
         );
     }
 
+    /// Persistent-API indexed DC-from-grid set: writes one DC value
+    /// per block into position 0 of each output coefficient block,
+    /// looking the value up from a per-(8×8)-block scalar plane.
+    ///
+    /// Mirrors the host loop inside
+    /// `forks::reconstruct::dispatch_restore_llf` for the 1×1 LLF
+    /// case (DCT8 / DCT4x4 / DCT4x8 / DCT8x4 / IDENTITY / DCT2x2 +
+    /// AFV0-3 — every strategy whose LLF rectangle is a single value).
+    ///
+    /// `dc_grid` is the per-(8×8) block scalar plane (e.g. output of
+    /// [`Self::dc_grid_8x8_persistent`]); `dc_stride` is its xsize
+    /// (`padded_width / 8`). `coords` lists the (bx, by) of each
+    /// block in the strategy's batch (raster order). `dst` is the
+    /// per-block coefficient buffer to mutate (only position 0 of
+    /// each block is touched; AC values untouched).
+    ///
+    /// `dst.coeffs_per_block` must be ≥ 1; the strategy's natural
+    /// coefficient count works (64 for DCT8/DCT4-family/IDENTITY/DCT2x2,
+    /// also 64 for AFV).
+    pub fn set_dc_from_grid_indexed_persistent(
+        &self,
+        dc_grid: &GpuBlocks<R>,
+        coords: &[(u32, u32)],
+        dst: &GpuBlocks<R>,
+        dc_stride: u32,
+    ) {
+        assert_eq!(
+            dc_grid.coeffs_per_block, 1,
+            "dc_grid must have coeffs_per_block=1; got {}",
+            dc_grid.coeffs_per_block
+        );
+        assert_eq!(coords.len() as u32, dst.num_blocks);
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
+        crate::launch::set_dc::set_dc_from_grid_indexed::<R>(
+            self.client_ref(),
+            dc_grid.handle.clone(),
+            h_coords,
+            dst.handle.clone(),
+            dc_grid.num_blocks as usize,
+            dst.total_floats(),
+            dc_stride,
+            dst.coeffs_per_block,
+            dst.num_blocks,
+        );
+    }
+
     /// Persistent-API indexed plane-to-blocks gather. Pulls a sparse
     /// subset of `(bx, by)` 8×8-block-grid positions (each spanning
     /// `tile_w × tile_h` pixels) from `plane` into a contiguous
@@ -2537,6 +2588,57 @@ mod tests {
             max_err < 5e-5,
             "DCT/IDCT roundtrip via persistent API drift: {max_err:.3e}"
         );
+    }
+
+    /// `set_dc_from_grid_indexed_persistent` must write
+    /// `dc_grid[by * stride + bx]` into `dst[i * cpb + 0]` for each
+    /// block in `coords`, leaving AC positions untouched. Bit-exact
+    /// vs the equivalent host loop.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_set_dc_from_grid_indexed_persistent_matches_host() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // 8×4 block grid → 32 dc values. Sparse coords picking 5 blocks
+        // out of 32; cpb=64 (DCT8 shape).
+        let xsize_blocks_8 = 8u32;
+        let ysize_blocks_8 = 4u32;
+        let n_total = (xsize_blocks_8 * ysize_blocks_8) as usize;
+        let dc_host: Vec<f32> = (0..n_total).map(|i| i as f32 * 1.5 + 0.7).collect();
+        let g_dc = enc.upload_blocks(&dc_host, n_total as u32, 1);
+        let coords: Vec<(u32, u32)> = vec![
+            (0, 0),
+            (3, 1),
+            (7, 2),
+            (5, 3),
+            (1, 0),
+        ];
+        let cpb = 64u32;
+        let n_strat_blocks = coords.len();
+        // Initialize dst with sentinel values to verify only DC is written.
+        let init: Vec<f32> = (0..(n_strat_blocks * cpb as usize))
+            .map(|i| -((i as f32) + 1.0))
+            .collect();
+        let g_dst = enc.upload_blocks(&init, n_strat_blocks as u32, cpb);
+        enc.set_dc_from_grid_indexed_persistent(&g_dc, &coords, &g_dst, xsize_blocks_8);
+        let got = enc.download_blocks(&g_dst);
+        for (i, &(bx, by)) in coords.iter().enumerate() {
+            let dc_idx = (by * xsize_blocks_8 + bx) as usize;
+            // Position 0 of each strategy block.
+            assert_eq!(
+                got[i * cpb as usize],
+                dc_host[dc_idx],
+                "DC mismatch at block {i} (bx={bx}, by={by})"
+            );
+            // AC positions untouched.
+            for k in 1..cpb as usize {
+                assert_eq!(
+                    got[i * cpb as usize + k],
+                    init[i * cpb as usize + k],
+                    "AC drifted at block {i} slot {k}"
+                );
+            }
+        }
     }
 
     /// `indexed_gather_blocks_persistent` must produce bit-identical
