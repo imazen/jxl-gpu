@@ -1673,6 +1673,59 @@ impl<R: Runtime> GpuEncoder<R> {
         );
     }
 
+    /// Persistent-API indexed LLF restore for DCT16×8 / DCT8×16
+    /// strategies (1×2 or 2×1 DC-grid → 2 LLF positions per block).
+    /// GPU equivalent of the `RAW_STRATEGY_DCT16X8 | DCT8X16` arm of
+    /// `forks::reconstruct::dispatch_restore_llf`.
+    ///
+    /// `dc_step` differentiates the two strategies:
+    /// - DCT16×8 (vertical pair, dc_grid[(by, bx), (by+1, bx)]):
+    ///   `dc_step = dc_stride`.
+    /// - DCT8×16 (horizontal pair, dc_grid[(by, bx), (by, bx+1)]):
+    ///   `dc_step = 1`.
+    ///
+    /// Writes only positions [0] and [1] of each block; AC coefficients
+    /// untouched. `dst.coeffs_per_block` must be ≥ 2 (typically 128 for
+    /// these strategies).
+    pub fn set_llf_dct16x8_or_8x16_indexed_persistent(
+        &self,
+        dc_grid: &GpuBlocks<R>,
+        coords: &[(u32, u32)],
+        dst: &GpuBlocks<R>,
+        dc_stride: u32,
+        dc_step: u32,
+    ) {
+        assert_eq!(
+            dc_grid.coeffs_per_block, 1,
+            "dc_grid must have coeffs_per_block=1; got {}",
+            dc_grid.coeffs_per_block
+        );
+        assert!(
+            dst.coeffs_per_block >= 2,
+            "dst.coeffs_per_block must be >= 2; got {}",
+            dst.coeffs_per_block
+        );
+        assert_eq!(coords.len() as u32, dst.num_blocks);
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
+        crate::launch::set_llf::set_llf_dct16x8_or_8x16_indexed::<R>(
+            self.client_ref(),
+            dc_grid.handle.clone(),
+            h_coords,
+            dst.handle.clone(),
+            dc_grid.num_blocks as usize,
+            dst.total_floats(),
+            dc_stride,
+            dc_step,
+            dst.coeffs_per_block,
+            dst.num_blocks,
+        );
+    }
+
     /// Persistent-API indexed DC-from-grid set: writes one DC value
     /// per block into position 0 of each output coefficient block,
     /// looking the value up from a per-(8×8)-block scalar plane.
@@ -2688,6 +2741,70 @@ mod tests {
             }
             for (i, (g, e)) in dst.iter().zip(expected.iter()).enumerate() {
                 assert_eq!(g, e, "{pw}×{ph} tile {tile_w}×{tile_h} pixel {i}");
+            }
+        }
+    }
+
+    /// `set_llf_dct16x8_or_8x16_indexed_persistent` must match the
+    /// host scalar `forks::reconstruct::restore_llf_dct16x8_or_8x16`
+    /// applied per-block within fp32 rounding.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_set_llf_dct16x8_or_8x16_indexed_persistent_matches_host() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // 16×8 DC grid (in 8×8-block units) covering a 128×64 image.
+        let xsize_blocks_8 = 16u32;
+        let ysize_blocks_8 = 8u32;
+        let n_total = (xsize_blocks_8 * ysize_blocks_8) as usize;
+        let dc_host: Vec<f32> = (0..n_total).map(|i| (i as f32 * 0.31).sin() * 0.7).collect();
+        let g_dc = enc.upload_blocks(&dc_host, n_total as u32, 1);
+        // Test both DCT16x8 (vertical pair, dc_step = stride)
+        // and DCT8x16 (horizontal pair, dc_step = 1).
+        for &(label, dc_step) in &[("DCT16x8", xsize_blocks_8), ("DCT8x16", 1u32)] {
+            // Sparse coords: pick blocks where both dc_grid reads stay in-range.
+            let mut coords: Vec<(u32, u32)> = Vec::new();
+            for by in 0..(ysize_blocks_8 - 1) {
+                for bx in 0..(xsize_blocks_8 - 1) {
+                    coords.push((bx, by));
+                }
+            }
+            let cpb = 128u32;
+            // Init dst with sentinels to verify only positions 0/1 get written.
+            let init: Vec<f32> = (0..(coords.len() * cpb as usize))
+                .map(|i| -((i as f32) + 1.0))
+                .collect();
+            let g_dst = enc.upload_blocks(&init, coords.len() as u32, cpb);
+            enc.set_llf_dct16x8_or_8x16_indexed_persistent(
+                &g_dc, &coords, &g_dst, xsize_blocks_8, dc_step,
+            );
+            let got = enc.download_blocks(&g_dst);
+            for (i, &(bx, by)) in coords.iter().enumerate() {
+                let dc0_idx = (by * xsize_blocks_8 + bx) as usize;
+                let dc1_idx = dc0_idx + dc_step as usize;
+                let dc0 = dc_host[dc0_idx];
+                let dc1 = dc_host[dc1_idx];
+                let host_llf = crate::forks::reconstruct::restore_llf_dct16x8_or_8x16(dc0, dc1);
+                let g0 = got[i * cpb as usize];
+                let g1 = got[i * cpb as usize + 1];
+                assert!(
+                    (g0 - host_llf[0]).abs() < 1e-5,
+                    "{label} block {i} llf0: gpu={g0} host={}",
+                    host_llf[0]
+                );
+                assert!(
+                    (g1 - host_llf[1]).abs() < 1e-5,
+                    "{label} block {i} llf1: gpu={g1} host={}",
+                    host_llf[1]
+                );
+                // AC positions untouched.
+                for k in 2..cpb as usize {
+                    assert_eq!(
+                        got[i * cpb as usize + k],
+                        init[i * cpb as usize + k],
+                        "{label} block {i} AC drift at slot {k}"
+                    );
+                }
             }
         }
     }

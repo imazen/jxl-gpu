@@ -615,6 +615,41 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             continue;
         }
 
+        // 1×2 / 2×1-LLF GPU fast path for DCT16×8 / DCT8×16 — same chain
+        // shape as the 1×1-LLF path above but with the matching
+        // 2-position LLF kernel.
+        use crate::forks::transform::{RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT8X16};
+        if raw_strategy == RAW_STRATEGY_DCT16X8 || raw_strategy == RAW_STRATEGY_DCT8X16 {
+            // dc_step = stride for vertical pair (DCT16x8), 1 for
+            // horizontal pair (DCT8x16). dc_stride is xsize_blocks_8.
+            let dc_step = if raw_strategy == RAW_STRATEGY_DCT16X8 {
+                xsize_blocks_8 as u32
+            } else {
+                1u32
+            };
+            enc.set_llf_dct16x8_or_8x16_indexed_persistent(
+                &g_dc_grid,
+                &coords_u32,
+                &g_dequant,
+                xsize_blocks_8 as u32,
+                dc_step,
+            );
+            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
+                enc,
+                &g_dequant,
+                raw_strategy,
+            );
+            enc.indexed_scatter_blocks_persistent(
+                &g_recon,
+                &coords_u32,
+                &g_out_plane,
+                tile_w as u32,
+                tile_h as u32,
+            );
+            used_gpu_for_any = true;
+            continue;
+        }
+
         // Step 3: download dequant result for host LLF restore.
         // (LLF restore is per-block scalar work; deferring to host
         // avoids a separate GPU kernel per strategy. Future work could
