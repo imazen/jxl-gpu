@@ -88,3 +88,43 @@ Within-repo intermediate win (does NOT need cross-repo work):
 Decision: park this until cross-repo authorization. The
 benchmark still serves as a regression gate.
 
+Re-run with prepare-stage breakdown (2026-05-10, second run)
+------------------------------------------------------------
+
+prepare_strategy_search_plan: 76.40 ms
+  cost_subblock_8x8                  15.85 ms (21%)  — 5 strategies (DCT4x4, DCT4x8, DCT8x4, IDENT, DCT2x2)
+  cost_dct64_family                  15.40 ms (20%)  — DCT64x64 + DCT64x32/32x64
+  pad_upload                         13.74 ms (18%)  — host pad + 3× 4MB upload
+  cost_dct32x16_and_16x32             7.25 ms (10%)
+  cost_dct8_dct16                     7.09 ms (9%)
+  xyb_gab                             5.79 ms (8%)
+  cost_dct32x32                       3.61 ms (5%)
+  cost_dct8x16                        3.58 ms (5%)
+  cost_dct16x8                        3.28 ms (4%)
+  dc_grids                            0.65 ms
+  selector                            0.15 ms
+  mask1x1                             0.00 ms (folded into next-stage Instant::now)
+  cost_afv                            0.00 ms (disabled in production)
+  start                               0.00 ms
+
+Run-to-run variance is real (~10 ms on prepare, ~3 ms on per-iter mean
+between this run and the first). Take ratios, not absolutes, when
+comparing runs.
+
+Top targets ranked by reward:vs:risk for future optimization:
+  1. cost_subblock_8x8 (15.85 ms): 5 strategies × 3 channels = 15
+     forward DCT8 + quant + dequant + IDCT + L2 chains. Each strategy
+     has its own kernel chain. Sharing the gathered 8×8 GpuBlocks
+     across all 5 strategies (already done per read-pass note
+     a5034f4f) is one fusion. Sharing forward DCT8 output across
+     dct4x4 / dct4x8 / dct8x4 cost grids would be the next.
+  2. cost_dct64_family (15.40 ms): 3 strategies, 64×64 and 64×32 /
+     32×64 transforms. Non-square variants dominate by total ops.
+  3. pad_upload (13.74 ms): host pad + 3× upload. Pad is 12 MB host
+     memcpy (~1 ms). Upload should be ~1-2 ms at PCIe 4.0 x16. Where
+     the other ~10 ms goes is unclear — possibly cubecl alloc-pool
+     overhead per call, possibly upload sync stall. Worth profiling
+     before optimizing — the simple "move pad to GPU" fix only saves
+     1-2 ms unless cubecl alloc is the real cost.
+
+

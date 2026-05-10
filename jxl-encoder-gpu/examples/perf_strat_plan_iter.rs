@@ -33,6 +33,7 @@ fn main() {
 
 #[cfg(all(feature = "cuda", feature = "encoder"))]
 fn main() {
+    use std::collections::BTreeMap;
     use std::time::Instant;
 
     use jxl_encoder_gpu::encoder::GpuEncoder;
@@ -82,15 +83,34 @@ fn main() {
     drop(warm_plan);
 
     // ── prepare_strategy_search_plan timing ──
+    let mut prep_stages: BTreeMap<&'static str, f64> = BTreeMap::new();
+    let mut last_prep = Instant::now();
     let t0 = Instant::now();
-    let plan = lossy.prepare_strategy_search_plan(&enc, &r, &g, &b, distance);
+    let plan = lossy.prepare_strategy_search_plan_traced(
+        &enc,
+        &r,
+        &g,
+        &b,
+        distance,
+        &mut |label: &'static str| {
+            let now = Instant::now();
+            let elapsed = now.duration_since(last_prep).as_secs_f64() * 1000.0;
+            *prep_stages.entry(label).or_insert(0.0) += elapsed;
+            last_prep = now;
+        },
+    );
     let dt_prepare = t0.elapsed();
     println!("\nprepare_strategy_search_plan: {:.2} ms", dt_prepare.as_secs_f64() * 1000.0);
+    println!("  prepare stage breakdown (sorted by total):");
+    let mut prep_entries: Vec<(&&'static str, &f64)> = prep_stages.iter().collect();
+    prep_entries.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+    for (label, ms) in prep_entries {
+        println!("    {:32} {:7.2} ms", label, ms);
+    }
 
     // Plan-side strategy histogram (helps explain timings — DCT8-heavy
     // photos hit the 1×1-LLF GPU path, large-transform-heavy hit the
     // bigger LLF kernels).
-    use std::collections::BTreeMap;
     let mut histo: BTreeMap<u8, usize> = BTreeMap::new();
     for a in &plan.assignments {
         *histo.entry(a.raw_strategy).or_insert(0) += 1;
