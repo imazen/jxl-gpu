@@ -293,6 +293,55 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Batched 3-channel plane upload — single cubecl
+    /// `create_tensors_from_slices` call instead of three separate
+    /// `upload_plane` calls. cubecl reserves all 3 buffers in one
+    /// underlying storage allocation, paying cudaMalloc + queue-submit
+    /// overhead once.
+    ///
+    /// All three planes must share the same `(width, height)`.
+    /// Per `perf_upload_plane` microbench (median 3.18 ms / 4 MB =
+    /// 1.26 GB/s), per-call sync dominates the 3-separate-call cost.
+    /// Batching is the only in-process path to amortize that overhead
+    /// without an async / pinned-buffer cubecl extension.
+    pub fn upload_planes_3ch(
+        &self,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        width: u32,
+        height: u32,
+    ) -> (GpuPlane<R>, GpuPlane<R>, GpuPlane<R>) {
+        use cubecl::server::MemoryLayoutDescriptor;
+        let n = (width as usize) * (height as usize);
+        assert_eq!(r.len(), n, "r length mismatch");
+        assert_eq!(g.len(), n, "g length mismatch");
+        assert_eq!(b.len(), n, "b length mismatch");
+        let n_bytes = n * 4;
+        let r_bytes = f32::as_bytes(r);
+        let g_bytes = f32::as_bytes(g);
+        let b_bytes = f32::as_bytes(b);
+        // Same shape as create_from_slice's internal layout: bytes-shaped
+        // contiguous descriptor with elem_size=1.
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1), r_bytes),
+            (MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1), g_bytes),
+            (MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1), b_bytes),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        // Drain in order: r, g, b.
+        let h_b = layouts.pop().expect("layouts[2]").memory;
+        let h_g = layouts.pop().expect("layouts[1]").memory;
+        let h_r = layouts.pop().expect("layouts[0]").memory;
+        let mk = |handle| GpuPlane {
+            handle,
+            width,
+            height,
+            _r: core::marker::PhantomData,
+        };
+        (mk(h_r), mk(h_g), mk(h_b))
+    }
+
     /// Allocate a zero-filled GPU plane of the given shape. Useful as
     /// a destination for kernels that take pre-allocated outputs.
     ///

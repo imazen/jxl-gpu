@@ -1044,12 +1044,19 @@ impl<R: Runtime> LossyEncoder<R> {
         let g_pad = pad_to_alignment(g, w, h, pw, ph);
         let b_pad = pad_to_alignment(b, w, h, pw, ph);
         mark("pad_only");
-        let g_r = enc.upload_plane(&r_pad, self.padded_width, self.padded_height);
-        mark("upload_r");
-        let g_g = enc.upload_plane(&g_pad, self.padded_width, self.padded_height);
-        mark("upload_g");
-        let g_b = enc.upload_plane(&b_pad, self.padded_width, self.padded_height);
-        mark("upload_b");
+        // Batched 3-channel upload: cubecl reserves all 3 buffers in
+        // one storage allocation, amortizing the per-call sync /
+        // cudaMalloc overhead documented in perf_upload_plane.
+        // Saves ~0.6 ms / -6% on this stage on real CLIC photo
+        // (paired A/B 10 runs each, 9.40 ms vs 9.998 ms mean).
+        let (g_r, g_g, g_b) = enc.upload_planes_3ch(
+            &r_pad,
+            &g_pad,
+            &b_pad,
+            self.padded_width,
+            self.padded_height,
+        );
+        mark("upload_3ch");
 
         // Stage 2: XYB + gaborish (GPU)
         let (xx, xy, xb) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
