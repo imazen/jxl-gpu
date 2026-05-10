@@ -1639,16 +1639,25 @@ impl<R: Runtime> LossyEncoder<R> {
         mark("selector");
 
         // Stage 6: per-channel DC grids — computed on GPU from the
-        // gaborished XYB GpuPlanes (xx_g/xy_g/xb_g still resident),
-        // then downloaded as small per-block scalars (n_blocks × 4
-        // bytes per channel — kilobytes at typical sizes vs the
-        // megabytes the plane-level host loop touches).
+        // gaborished XYB GpuPlanes (xx_g/xy_g/xb_g still resident).
+        //
+        // Skip the host download (same reasoning as the xyb host
+        // download removal in 78ca825c). The `dc_grid_*` host
+        // slices in StrategySearchPlan are only consumed by the
+        // AFV branch of encode_and_reconstruct_mixed_strategy_single_channel
+        // and the dispatch_restore_llf fallback — both inactive in
+        // production strat-search. The GPU handles
+        // (`dc_grid_*_gpu`) flow into the encode/recon GPU LLF
+        // kernels via dc_grid_gpu = Some.
+        //
+        // SAFETY: see plan.xyb_x notes. Re-enabling AFV requires
+        // lazy download of dc_grid_*_gpu in the AFV branch.
         let g_dc_x = enc.dc_grid_8x8_persistent(&xx_g);
         let g_dc_y = enc.dc_grid_8x8_persistent(&xy_g);
         let g_dc_b = enc.dc_grid_8x8_persistent(&xb_g);
-        let dc_grid_x = enc.download_blocks(&g_dc_x);
-        let dc_grid_y = enc.download_blocks(&g_dc_y);
-        let dc_grid_b = enc.download_blocks(&g_dc_b);
+        let dc_grid_x: Vec<f32> = Vec::new();
+        let dc_grid_y: Vec<f32> = Vec::new();
+        let dc_grid_b: Vec<f32> = Vec::new();
         // Keep the GPU dc_grid handles too — encode_with_strategy_plan_adaptive
         // threads them into encode_and_reconstruct_* via the
         // `dc_grid_*_gpu` Option params, skipping the per-iter
@@ -1758,11 +1767,14 @@ impl<R: Runtime> LossyEncoder<R> {
             aq_field.len(),
             nb8,
         );
-        // plan.xyb_x/y/b are empty Vecs (intentional — see comment
-        // in prepare_strategy_search_plan_traced where we skip the
-        // download). If AFV is re-enabled, callers that consume
-        // these need to lazily populate from xyb_*_gpu.
-        debug_assert_eq!(plan.dc_grid_x.len(), nb8);
+        // plan.xyb_x/y/b AND plan.dc_grid_x/y/b are empty Vecs
+        // (intentional — see comments in
+        // prepare_strategy_search_plan_traced where we skip the
+        // downloads). Both are only consumed by the AFV branch in
+        // encode_and_reconstruct_mixed_strategy_single_channel,
+        // which is currently disabled in production. If AFV is
+        // re-enabled, callers that consume these need to lazily
+        // populate from xyb_*_gpu / dc_grid_*_gpu.
 
         // Stage 7: encode + reconstruct via mixed-strategy IDCT.
         // Per-block qac comes from `aq_field` directly — this is what
