@@ -1,0 +1,53 @@
+perf_strat_plan_iter baseline
+=============================
+
+Date: 2026-05-10
+Commit (parent at run): 5127c040 (style(reconstruct): drop redundant & on g_plane / g_dc_grid / g_out_plane)
+Hardware: AMD Ryzen 9 7950X + CUDA GPU (cubecl 0.10 CUDA backend)
+Build: cargo build --release -p jxl-encoder-gpu --features 'cuda encoder'
+Input: synthetic 1024x1024 gradient + per-pixel jitter (in-example, no corpus)
+Distance: 1.0
+Iters: 5 (after 1 warmup)
+
+This is the *baseline* per-iter cost of the strat-search +
+GPU-resident encode/recon pipeline after the work in:
+  - a0489e58 .. 5127c040
+which made all 15 non-AFV strategies fully GPU-resident through the
+LLF chain and removed the merge-back download. Future regressions on
+this number indicate something added a stray PCIe round-trip or a
+host fallback path on the strat-search hot loop.
+
+Output:
+-------
+prepare_strategy_search_plan: 66.28 ms
+plan: 445 strategy assignments
+  DCT8     =   192 (43.1%)
+  DCT64x64 =   253 (56.9%)
+
+encode_with_strategy_plan_adaptive_traced × 5:
+  iter 0: 15.19 ms
+  iter 1: 20.19 ms
+  iter 2: 17.52 ms
+  iter 3: 15.42 ms
+  iter 4: 14.92 ms
+
+encode-with-plan summary: mean 16.65 ms, min 14.92 ms (over 5 iters)
+
+stage breakdown (mean across 5 iters, sorted by total):
+  mixed_strategy_encode_recon         8.36 ms/iter
+  download_crop                       5.92 ms/iter
+  postpass_gab_epf_xyb                0.36 ms/iter
+
+Notes
+-----
+- 50% of per-iter wall-clock is mixed_strategy_encode_recon (the GPU
+  encode + scatter chain). 36% is download_crop (PCIe pull of the
+  reconstructed XYB plane back to host so the host-side metric +
+  refinement can read it).
+- For the butteraugli refinement loop, download_crop is unnecessary
+  if the next iter's metric / aq-field update can run on GPU. That
+  is the next obvious optimization (~5.9 ms/iter saving, ~36% of
+  per-iter wall-clock).
+- This synthetic gradient is unusually DCT64x64-heavy (57%) — real
+  photos are DCT8-heavy and exercise different code paths. Re-run on
+  a CLIC photo to capture realistic mix.
