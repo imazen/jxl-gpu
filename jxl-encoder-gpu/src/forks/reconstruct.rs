@@ -362,6 +362,24 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     // time. `dc_grid_per_8x8_block` host slice is still required for
     // the AFV branch's `coeffs[0] = mean` host loop.
     dc_grid_gpu: Option<&crate::persistent::GpuBlocks<R>>,
+    // Optional GPU output plane. When `Some`, the per-strategy IDCT
+    // output is scattered directly into this plane (caller-supplied
+    // zero-init expected — same coverage-disjoint invariant) and the
+    // function skips the internal upload-zeros + download-and-merge
+    // pair. When `None`, the function allocates an internal
+    // zero-filled GpuPlane, scatters into it, and at function exit
+    // downloads it and adds to `out_plane` (the host buffer).
+    //
+    // Use `Some` when the caller's downstream pipeline can consume
+    // GpuPlane directly (e.g., the postpass gab_smooth +
+    // EPF + xyb_to_linear chain in lossy_encoder). The host
+    // `out_plane` still must be supplied for the AFV branch (which
+    // host-scatters there) and as a fallback target — but when
+    // `out_plane_gpu` is `Some`, the function ALSO routes AFV writes
+    // to the GpuPlane via indexed_scatter so `out_plane` is left
+    // untouched. (AFV is currently never selected in production cost
+    // grids.)
+    out_plane_gpu: Option<&crate::persistent::GpuPlane<R>>,
 ) {
     use crate::forks::transform::{
         apply_dct_batch_persistent, coeff_count_per_strategy, tile_dims_pixels, RAW_STRATEGY_DCT,
@@ -401,20 +419,23 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         &g_plane_owned
     };
 
-    // Allocate a zero-init GPU plane that 1×1-LLF non-AFV strategies
-    // (DCT8 + DCT4-family + IDENTITY + DCT2X2) scatter their IDCT
-    // output into directly. Other strategies (rect-DCT16/DCT32/DCT64
-    // family + AFV) still write the host out_plane via the existing
-    // path. At function exit we add g_out_plane back into out_plane —
-    // disjoint per-pixel coverage means addition equals union.
-    //
-    // Why disjoint: AC strategy assignments partition the image's 8×8
-    // grid; every pixel is covered by exactly one strategy. Both
-    // out_plane (caller-supplied zero-init) and g_out_plane (uploaded
-    // zeros) start blank, so adding their non-zero positions is the
-    // strategy-set union with no overlap.
-    let zero_plane: Vec<f32> = vec![0.0_f32; padded_width * padded_height];
-    let g_out_plane = enc.upload_plane(&zero_plane, padded_width as u32, padded_height as u32);
+    // GPU output plane: when the caller provides one, scatter directly
+    // into it (no internal upload-zeros, no download+merge at exit).
+    // When None, allocate one internally — disjoint per-pixel coverage
+    // (AC strategy assignments partition the image's 8×8 grid) means
+    // adding the GPU and host out planes at the end equals the union
+    // with no overlap.
+    let g_out_plane_owned;
+    let g_out_plane: &crate::persistent::GpuPlane<R> = if let Some(p) = out_plane_gpu {
+        debug_assert_eq!(p.width(), padded_width as u32);
+        debug_assert_eq!(p.height(), padded_height as u32);
+        p
+    } else {
+        // alloc_plane (commit 0a04ed89) returns an actually-zeroed
+        // buffer — no need for an explicit upload_plane(&zeros).
+        g_out_plane_owned = enc.alloc_plane(padded_width as u32, padded_height as u32);
+        &g_out_plane_owned
+    };
     let mut used_gpu_for_any = false;
 
     // Upload the per-(8×8)-block DC grid ONCE (caller-supplied). Used
@@ -572,9 +593,25 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 kind,
             );
             // Scatter: 8×8 region per block (AFV uses 8×8 tiles).
-            for (i, &(bx, by)) in coords.iter().enumerate() {
-                let src = &pixels_host[i * 64..i * 64 + 64];
-                scatter_block_to_plane(out_plane, src, bx, by, raw_strategy, padded_width);
+            // When the caller routed output through a GpuPlane, upload
+            // the AFV pixels and indexed_scatter on GPU so we don't
+            // touch the host out_plane (which the caller may not
+            // intend to consume); when None, host-scatter as before.
+            if out_plane_gpu.is_some() {
+                let g_pixels = enc.upload_blocks(&pixels_host, n_blocks as u32, 64);
+                let coords_u32: Vec<(u32, u32)> = coords
+                    .iter()
+                    .map(|&(bx, by)| (bx as u32, by as u32))
+                    .collect();
+                enc.indexed_scatter_blocks_persistent(
+                    &g_pixels, &coords_u32, g_out_plane, 8u32, 8u32,
+                );
+                used_gpu_for_any = true;
+            } else {
+                for (i, &(bx, by)) in coords.iter().enumerate() {
+                    let src = &pixels_host[i * 64..i * 64 + 64];
+                    scatter_block_to_plane(out_plane, src, bx, by, raw_strategy, padded_width);
+                }
             }
             continue;
         }
@@ -874,9 +911,12 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     // g_out_plane on GPU; here we download once and add into the host
     // out_plane. Disjoint per-pixel coverage (AC strategy partitioning)
     // means addition equals union with no overlap. Skip the download
-    // entirely if no GPU-fast-path strategy fired this call.
-    if used_gpu_for_any {
-        let gpu_out = enc.download_plane(&g_out_plane);
+    // entirely if no GPU-fast-path strategy fired this call OR if the
+    // caller supplied an out_plane_gpu (in which case the strategies
+    // already scattered directly into the caller's buffer — no merge
+    // needed and the host out_plane was untouched).
+    if used_gpu_for_any && out_plane_gpu.is_none() {
+        let gpu_out = enc.download_plane(g_out_plane);
         debug_assert_eq!(gpu_out.len(), out_plane.len());
         for (o, g) in out_plane.iter_mut().zip(gpu_out.iter()) {
             *o += *g;
@@ -933,6 +973,13 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
     dc_grid_x_gpu: Option<&crate::persistent::GpuBlocks<R>>,
     dc_grid_y_gpu: Option<&crate::persistent::GpuBlocks<R>>,
     dc_grid_b_gpu: Option<&crate::persistent::GpuBlocks<R>>,
+    // Optional GPU output planes mirroring out_plane_x / out_plane_y /
+    // out_plane_b. See `_single_channel`'s `out_plane_gpu` for the
+    // rationale (skip merge-back, scatter directly into caller's
+    // GpuPlane so downstream postpass can chain without re-uploading).
+    out_plane_x_gpu: Option<&crate::persistent::GpuPlane<R>>,
+    out_plane_y_gpu: Option<&crate::persistent::GpuPlane<R>>,
+    out_plane_b_gpu: Option<&crate::persistent::GpuPlane<R>>,
 ) {
     encode_and_reconstruct_mixed_strategy_single_channel(
         enc,
@@ -948,6 +995,7 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
         out_plane_x,
         xyb_x_gpu,
         dc_grid_x_gpu,
+        out_plane_x_gpu,
     );
     encode_and_reconstruct_mixed_strategy_single_channel(
         enc,
@@ -963,6 +1011,7 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
         out_plane_y,
         xyb_y_gpu,
         dc_grid_y_gpu,
+        out_plane_y_gpu,
     );
     encode_and_reconstruct_mixed_strategy_single_channel(
         enc,
@@ -978,6 +1027,7 @@ pub fn encode_and_reconstruct_mixed_strategy_3channel<R: Runtime>(
         out_plane_b,
         xyb_b_gpu,
         dc_grid_b_gpu,
+        out_plane_b_gpu,
     );
 }
 
@@ -2506,6 +2556,7 @@ mod tests {
             &mut out_plane,
             None,
             None,
+            None,
         );
 
         // All output pixels finite, roughly close to original (~0.5).
@@ -2577,7 +2628,7 @@ mod tests {
             let mut out = alloc::vec![0.0_f32; pw * ph];
             encode_and_reconstruct_mixed_strategy_single_channel(
                 &enc, &xyb, pw, ph, &assignments, &weights_for, &qac, &thresholds,
-                &dc_grid, 1, &mut out, None, None,
+                &dc_grid, 1, &mut out, None, None, None,
             );
             let mut sumsq = 0.0_f64;
             for i in 0..pw * ph {
@@ -2605,7 +2656,7 @@ mod tests {
             let mut out = alloc::vec![0.0_f32; pw * ph];
             encode_and_reconstruct_mixed_strategy_single_channel(
                 &enc, &xyb, pw, ph, &assignments, &weights_for, &qac, &thresholds,
-                &dc_grid, 1, &mut out, None, None,
+                &dc_grid, 1, &mut out, None, None, None,
             );
             let mut sumsq = 0.0_f64;
             let mut min_v = f32::INFINITY;
@@ -2672,7 +2723,7 @@ mod tests {
         let mut out_dct8 = alloc::vec![0.0_f32; pw * ph];
         encode_and_reconstruct_mixed_strategy_single_channel(
             &enc, &xyb, pw, ph, &assignments_dct8, &weights_for, &qac, &thresholds,
-            &dc_grid, 1, &mut out_dct8, None, None,
+            &dc_grid, 1, &mut out_dct8, None, None, None,
         );
         let mut sse_dct8 = 0.0_f64;
         for i in 0..pw * ph {
@@ -2694,7 +2745,7 @@ mod tests {
         let mut out_dct32 = alloc::vec![0.0_f32; pw * ph];
         encode_and_reconstruct_mixed_strategy_single_channel(
             &enc, &xyb, pw, ph, &assignments_dct32, &weights_for, &qac, &thresholds,
-            &dc_grid, 1, &mut out_dct32, None, None,
+            &dc_grid, 1, &mut out_dct32, None, None, None,
         );
         let mut sse_dct32 = 0.0_f64;
         for i in 0..pw * ph {

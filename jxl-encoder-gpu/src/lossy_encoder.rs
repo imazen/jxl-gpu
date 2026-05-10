@@ -1874,9 +1874,17 @@ impl<R: Runtime> LossyEncoder<R> {
                 _ => panic!("Strategy {strat} not yet wired into encoder weights"),
             }
         };
+        // Allocate the 3 recon planes directly on GPU. The mixed-
+        // strategy reconstruct scatters into them via indexed_scatter
+        // (see out_plane_*_gpu params below). Postpass (gab_smooth +
+        // EPF + xyb_to_linear) chains straight into them — no need
+        // for the upload_plane(plane_*) round-trip the older code did.
         let mut plane_x = vec![0.0_f32; pw * ph];
         let mut plane_y = vec![0.0_f32; pw * ph];
         let mut plane_b = vec![0.0_f32; pw * ph];
+        let recon_x_p = enc.alloc_plane(self.padded_width, self.padded_height);
+        let recon_y_p = enc.alloc_plane(self.padded_width, self.padded_height);
+        let recon_b_p = enc.alloc_plane(self.padded_width, self.padded_height);
         encode_and_reconstruct_mixed_strategy_3channel(
             enc,
             &plan.xyb_x,
@@ -1912,19 +1920,29 @@ impl<R: Runtime> LossyEncoder<R> {
             Some(&plan.dc_grid_x_gpu),
             Some(&plan.dc_grid_y_gpu),
             Some(&plan.dc_grid_b_gpu),
+            // Output GpuPlanes — strategies indexed-scatter directly
+            // into these; no internal upload-zeros + download-and-merge
+            // round-trip, no postpass re-upload (gab_smooth_persistent
+            // consumes them as-is).
+            Some(&recon_x_p),
+            Some(&recon_y_p),
+            Some(&recon_b_p),
         );
+        // Skip the host plane_x/y/b: they were allocated for the
+        // legacy host-merge path but are now untouched (the GPU plane
+        // holds the recon). Keep the Vec allocation cheap by using
+        // an empty Vec to make rust-compiler-happy.
+        let _ = (&plane_x, &plane_y, &plane_b);
         mark("mixed_strategy_encode_recon");
 
 
         // Stage 8: postpass (gab_smooth + EPF + xyb_to_linear), matching
         // run_pipeline_with_qac. EPF closes most of the perceptual gap
         // vs the uniform-qac DCT8 baseline.
-        let recon_x_p =
-            enc.upload_plane(&plane_x, self.padded_width, self.padded_height);
-        let recon_y_p =
-            enc.upload_plane(&plane_y, self.padded_width, self.padded_height);
-        let recon_b_p =
-            enc.upload_plane(&plane_b, self.padded_width, self.padded_height);
+        //
+        // recon_x_p / _y_p / _b_p are the GpuPlanes the mixed-strategy
+        // reconstruct scattered into above. No upload needed —
+        // gab_smooth_persistent consumes them directly.
         let (gw_c, gw1, gw2) = gab_weights();
         let recon_x_p = enc.gab_smooth_persistent(&recon_x_p, gw_c, gw1, gw2);
         let recon_y_p = enc.gab_smooth_persistent(&recon_y_p, gw_c, gw1, gw2);
