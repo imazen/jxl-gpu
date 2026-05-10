@@ -31,6 +31,7 @@ pub mod gather;
 pub mod histogram;
 pub mod idct4_raw;
 pub mod indexed_gather;
+pub mod indexed_scatter;
 pub mod identity;
 pub mod mask1x1;
 pub mod pixel_loss;

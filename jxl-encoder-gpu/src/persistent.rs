@@ -1780,6 +1780,53 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Persistent-API indexed per-block-buffer → spatial-plane scatter.
+    /// Inverse of [`Self::indexed_gather_blocks_persistent`]: takes
+    /// batched per-block pixels and writes them back into `plane` at
+    /// each `(bx, by)`'s tile rectangle.
+    ///
+    /// `coords` is the same `[(bx, by)]` shape used by indexed_gather
+    /// (each in 8×8-block-grid units). Tiles outside any covered
+    /// `(bx, by)` are untouched in `plane`.
+    ///
+    /// `blocks.coeffs_per_block` must equal `tile_w * tile_h`. Plane
+    /// access is bounds-unchecked — caller MUST ensure every
+    /// `(bx*8 + tile_w, by*8 + tile_h)` falls inside
+    /// `(plane.width, plane.height)`.
+    ///
+    /// Used by the GPU-resident mixed-strategy reconstruct path to
+    /// scatter per-strategy IDCT outputs back into a destination
+    /// GpuPlane without the host-side `scatter_block_to_plane` loop +
+    /// `apply_idct_batch_gpu`'s implicit download.
+    pub fn indexed_scatter_blocks_persistent(
+        &self,
+        blocks: &GpuBlocks<R>,
+        coords: &[(u32, u32)],
+        plane: &GpuPlane<R>,
+        tile_w: u32,
+        tile_h: u32,
+    ) {
+        assert_eq!(blocks.num_blocks, coords.len() as u32);
+        assert_eq!(blocks.coeffs_per_block, tile_w * tile_h);
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
+        crate::launch::indexed_scatter::indexed_scatter::<R>(
+            self.client_ref(),
+            blocks.handle.clone(),
+            h_coords,
+            plane.handle.clone(),
+            plane.width,
+            plane.n_pixels(),
+            blocks.num_blocks,
+            tile_w,
+            tile_h,
+        );
+    }
+
     /// Persistent-API per-(8×8)-block DC grid: one f32 per block =
     /// mean of the 64 covered pixels. Mirrors
     /// `crate::forks::reconstruct::compute_dc_grid_per_8x8_block`
@@ -2588,6 +2635,61 @@ mod tests {
             max_err < 5e-5,
             "DCT/IDCT roundtrip via persistent API drift: {max_err:.3e}"
         );
+    }
+
+    /// `indexed_scatter_blocks_persistent` must round-trip with
+    /// `indexed_gather_blocks_persistent`: gathering a sparse subset
+    /// of (bx, by) tiles from a plane and then scattering them back to
+    /// a fresh plane at the same coords yields a plane with those
+    /// tiles bit-equal to the original and untouched pixels at zero
+    /// (since the destination is allocated zero-filled).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_indexed_scatter_roundtrip_with_gather() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        for &(pw, ph, tile_w, tile_h) in &[
+            (32u32, 32u32, 8u32, 8u32),
+            (64, 32, 16, 8),
+            (32, 64, 8, 16),
+            (64, 64, 16, 16),
+        ] {
+            let n = (pw * ph) as usize;
+            let plane: Vec<f32> = (0..n).map(|i| (i as f32 * 0.011 + 0.3).cos()).collect();
+            let g_plane = enc.upload_plane(&plane, pw, ph);
+            // Sparse coords: every other valid (bx, by).
+            let max_bx = (pw - tile_w) / 8 + 1;
+            let max_by = (ph - tile_h) / 8 + 1;
+            let mut coords: Vec<(u32, u32)> = Vec::new();
+            for by in (0..max_by).step_by(2) {
+                for bx in (0..max_bx).step_by(2) {
+                    coords.push((bx, by));
+                }
+            }
+            let g_blocks =
+                enc.indexed_gather_blocks_persistent(&g_plane, &coords, tile_w, tile_h);
+            // Upload an explicitly-zero-initialized destination — alloc_plane
+            // returns uninitialized memory (cubecl's empty(); see persistent.rs:231).
+            let zero = vec![0.0_f32; n];
+            let g_dst = enc.upload_plane(&zero, pw, ph);
+            enc.indexed_scatter_blocks_persistent(&g_blocks, &coords, &g_dst, tile_w, tile_h);
+            let dst = enc.download_plane(&g_dst);
+            // Build expected: 0 everywhere, original pixels in covered tiles.
+            let mut expected = vec![0.0_f32; n];
+            for &(bx, by) in &coords {
+                let x0 = (bx * 8) as usize;
+                let y0 = (by * 8) as usize;
+                for dy in 0..tile_h as usize {
+                    for dx in 0..tile_w as usize {
+                        let off = (y0 + dy) * pw as usize + (x0 + dx);
+                        expected[off] = plane[off];
+                    }
+                }
+            }
+            for (i, (g, e)) in dst.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(g, e, "{pw}×{ph} tile {tile_w}×{tile_h} pixel {i}");
+            }
+        }
     }
 
     /// `set_dc_from_grid_indexed_persistent` must write
