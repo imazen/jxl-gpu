@@ -1172,12 +1172,12 @@ impl<R: Runtime> LossyEncoder<R> {
             qac, qac, qac, 0, 0, scaled_constants, 0.98,
         );
 
-        // IDENTITY: 2.09 → 1.95 (May 9 2026, modest 7% reduction
-        // gated by corpus regression test). libjxl reference is 1.0428
-        // but going much below 1.95 path-shifts on the strat-wins
-        // photos (07b9f93f flips RefineStratSearch → RefineDct8 at
-        // 1.8 even though score change is +0.36% < tolerance — but
-        // path label is enforced strictly).
+        // IDENTITY: 2.09 → 1.85 (May 9 2026, ~12% reduction gated by
+        // corpus regression test). libjxl reference is 1.0428 but
+        // going below 1.85 path-shifts on the strat-wins photos
+        // (07b9f93f flips RefineStratSearch → RefineDct8 at 1.7 with
+        // a +0.36% score change — within tolerance but the path
+        // label flips, which the test enforces).
         //
         // We tried libjxl's kFavor2X2AtHighQuality discount
         // (`entropy_mul -= 0.4*((5-d)/5)^2` at d<5) earlier — it
@@ -1192,7 +1192,7 @@ impl<R: Runtime> LossyEncoder<R> {
             enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask, RAW_STRATEGY_IDENTITY,
             &id_x, &id_y, &id_b,
             &inv_id_x, &inv_id_y, &inv_id_b,
-            qac, qac, qac, 0, 0, scaled_constants, 1.95,
+            qac, qac, qac, 0, 0, scaled_constants, 1.85,
         );
 
         // DCT2X2: 1.90 → 0.95 (libjxl reference, May 9 2026, gated by
