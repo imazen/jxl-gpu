@@ -1314,6 +1314,52 @@ impl<R: Runtime> GpuEncoder<R> {
         f64::from_bytes(&bytes).to_vec()
     }
 
+    /// Batched 3-channel stats (i32-as-f32) + 3-channel f64 losses
+    /// download — one cubecl `client.read` call (one queue-drain
+    /// sync) instead of six sequential `read_one` calls. Used by
+    /// cost-grid functions in forks/cost.rs that finalize with
+    /// (3 stats + 3 losses) host-side combination.
+    ///
+    /// Returns `((x, y, b) f32 stats, (x, y, b) f64 losses)`.
+    pub fn download_3stats_3losses(
+        &self,
+        x_stats: &GpuBlocks<R>,
+        y_stats: &GpuBlocks<R>,
+        b_stats: &GpuBlocks<R>,
+        x_loss: &GpuBlocks<R>,
+        y_loss: &GpuBlocks<R>,
+        b_loss: &GpuBlocks<R>,
+    ) -> ((Vec<f32>, Vec<f32>, Vec<f32>), (Vec<f64>, Vec<f64>, Vec<f64>)) {
+        let mut bytes = self.client_ref().read(alloc::vec![
+            x_stats.handle.clone(),
+            y_stats.handle.clone(),
+            b_stats.handle.clone(),
+            x_loss.handle.clone(),
+            y_loss.handle.clone(),
+            b_loss.handle.clone(),
+        ]);
+        // Drain in reverse order so named bindings match descriptor
+        // order (same convention as upload_planes_3ch).
+        let bl = bytes.pop().expect("read[5]");
+        let yl = bytes.pop().expect("read[4]");
+        let xl = bytes.pop().expect("read[3]");
+        let bs = bytes.pop().expect("read[2]");
+        let ys = bytes.pop().expect("read[1]");
+        let xs = bytes.pop().expect("read[0]");
+        (
+            (
+                f32::from_bytes(&xs).to_vec(),
+                f32::from_bytes(&ys).to_vec(),
+                f32::from_bytes(&bs).to_vec(),
+            ),
+            (
+                f64::from_bytes(&xl).to_vec(),
+                f64::from_bytes(&yl).to_vec(),
+                f64::from_bytes(&bl).to_vec(),
+            ),
+        )
+    }
+
     /// Persistent-API fused DCT8 + quantize. One kernel launch instead
     /// of two (DCT then quantize); ~2.84× faster at 1024² per the
     /// fused_dct_quant_bench results. Bit-exact with the split chain.

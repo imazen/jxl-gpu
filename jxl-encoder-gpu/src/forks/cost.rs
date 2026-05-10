@@ -904,13 +904,14 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
     );
 
     // Step 5: now download stats + losses (only the small final
-    // outputs — no intermediate downloads).
-    let x_stats = enc.download_blocks(&g_x_stats);
-    let y_stats = enc.download_blocks(&g_y_stats);
-    let b_stats = enc.download_blocks(&g_b_stats);
-    let loss_x = enc.download_blocks_f64(&g_loss_x);
-    let loss_y = enc.download_blocks_f64(&g_loss_y);
-    let loss_b = enc.download_blocks_f64(&g_loss_b);
+    // outputs — no intermediate downloads). One batched
+    // client.read instead of six sequential read_one syncs —
+    // saves 5 queue-drain stalls.
+    let ((x_stats, y_stats, b_stats), (loss_x, loss_y, loss_b)) = enc
+        .download_3stats_3losses(
+            &g_x_stats, &g_y_stats, &g_b_stats,
+            &g_loss_x, &g_loss_y, &g_loss_b,
+        );
 
     // Step 6: combine per-channel losses via CHANNEL_MUL (host).
     let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
@@ -1288,13 +1289,15 @@ pub fn estimate_entropy_full_strategy_batch_persistent<R: Runtime>(
         block_h as u32,
     );
 
-    // Step 5: download only the small final stats and losses.
-    let x_stats = enc.download_blocks(&g_x_stats);
-    let y_stats = enc.download_blocks(&g_y_stats);
-    let b_stats = enc.download_blocks(&g_b_stats);
-    let mut loss_x = enc.download_blocks_f64(&g_loss_x);
-    let loss_y = enc.download_blocks_f64(&g_loss_y);
-    let loss_b = enc.download_blocks_f64(&g_loss_b);
+    // Step 5: download only the small final stats and losses. One
+    // batched client.read instead of six sequential read_one
+    // syncs (saves 5 queue-drain stalls).
+    let ((x_stats, y_stats, b_stats), (loss_x_init, loss_y, loss_b)) = enc
+        .download_3stats_3losses(
+            &g_x_stats, &g_y_stats, &g_b_stats,
+            &g_loss_x, &g_loss_y, &g_loss_b,
+        );
+    let mut loss_x = loss_x_init;
 
     // Step 6: extract per-block entropy + apply X-channel multi-block weight.
     let entropy_x = extract_per_block_entropy(&x_stats, n_blocks);
