@@ -703,6 +703,30 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         // DCT2X2 (every strategy whose llf_dim_x = llf_dim_y = 1, except
         // AFV which is handled by the dedicated branch above).
         if llf_x == 1 && llf_y == 1 {
+            // DCT8 (the dominant strategy on real photos — ~99% of
+            // blocks on most CLIC content) gets a single fused launch
+            // for set_dc + IDCT8 + scatter, skipping the intermediate
+            // g_recon GpuBlocks roundtrip (~256 bytes/block of HBM
+            // traffic). Bit-identical to the split chain — proven by
+            // test_idct_8x8_set_dc_scatter_matches_split.
+            if raw_strategy == RAW_STRATEGY_DCT {
+                enc.idct_8x8_set_dc_scatter_persistent(
+                    &g_dequant,
+                    g_dc_grid,
+                    &coords_u32,
+                    g_out_plane,
+                    xsize_blocks_8 as u32,
+                );
+                used_gpu_for_any = true;
+                continue;
+            }
+
+            // Other 1×1-LLF strategies (DCT4×4, DCT4×8, DCT8×4,
+            // IDENTITY, DCT2x2) keep the split chain — each has its
+            // own IDCT kernel, and at <1% of block share on photos
+            // the fusion ROI doesn't justify per-strategy fused
+            // variants yet.
+            //
             // GPU LLF restore: writes dc_grid[by * stride + bx] into
             // position 0 of each block. AC positions untouched.
             enc.set_dc_from_grid_indexed_persistent(
