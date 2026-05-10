@@ -49,84 +49,99 @@ type Backend = cubecl::cuda::CudaRuntime;
 
 const CORPUS_ROOT: &str = "/home/lilith/work/codec-corpus";
 
-/// Per-image expected scores from `refine_and_encode_smart` at d=1.0,
-/// 4 iters. Tolerance is 0.5% — tight enough to catch silent
+/// Per-(image, distance) expected scores from `refine_and_encode_smart`
+/// at 4 iters. Tolerance is 0.5% — tight enough to catch silent
 /// regressions, loose enough to absorb GPU floating-point determinism
 /// jitter across runs.
 ///
-/// (image_subpath, expected_score, expected_path)
+/// (image_subpath, distance, expected_score, expected_path)
 ///
-/// All scores captured 2026-05-09 with commits up to 5c9e0910 (the
-/// last cost-model state where smart turnkey is at strict-best across
-/// the CLIC + gb82-sc corpus).
-const EXPECTED_SCORES: &[(&str, f32, BestOfBothPath)] = &[
-    // CLIC photos — smart should not regress vs the committed
-    // best-of-3 winners measured during this session.
-    (
-        "clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
-        1.1475,
-        BestOfBothPath::Tie,
-    ),
-    (
-        "clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
-        1.2089,
-        BestOfBothPath::RefineStratSearch,
-    ),
-    (
-        "clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
-        1.0999,
-        BestOfBothPath::RefineDct8, // uniform won (refine REGRESSED on this image)
-    ),
-    (
-        "clic2025-1024/1e2f9d41529197f1.png", // approximate; exact filename below
-        0.8190,
-        BestOfBothPath::RefineDct8, // uniform won
-    ),
-    // DCT64-sensitive photos — earlier (mul=8) these had 52 / 9 / 79
-    // DCT64 picks respectively. With mul=16 they're shut out and
-    // smart strat-search matches refine+DCT8. Including them in the
-    // regression set so future DCT64 mul changes are caught.
-    (
-        "clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
-        1.1587,
-        // Scores tie but FP-comparison resolves to RefineStratSearch
-        // (strat-search wins by epsilon < tolerance).
-        BestOfBothPath::RefineStratSearch,
-    ),
-    (
-        "clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
-        1.1548,
-        BestOfBothPath::RefineDct8,
-    ),
-    (
-        "clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
-        1.1556,
-        BestOfBothPath::RefineDct8,
-    ),
-    // Strat-search-winning photos — exercise the strat-search-wins
-    // path so cost-model changes that disable wins are caught.
-    (
-        "clic2025-1024/22ea12c903e41583.png",
-        1.1716,
-        BestOfBothPath::RefineStratSearch,
-    ),
-    (
-        "clic2025-1024/2684452db505ddbb.png",
-        1.1868,
-        BestOfBothPath::RefineStratSearch,
-    ),
-    // Screenshots — discriminator should fire, smart picks best of
-    // {uniform, refine+DCT8} per the May 9 best-of-2-on-screenshot fix.
-    (
-        "gb82-sc/graph.png",
-        1.0528,
-        BestOfBothPath::SkippedStratSearchAsScreenshot,
-    ),
-    (
-        "gb82-sc/gmessages.png",
-        0.9266,
-        BestOfBothPath::SkippedStratSearchAsScreenshot,
-    ),
+/// All d=1.0 scores captured 2026-05-09 with commits up to 5c9e0910;
+/// d=0.5 and d=2.0 captured the same evening after the cost-model
+/// retune (commits 7a503551 / e813b414 / 65ba3074 / bc3393f0).
+///
+/// Distance coverage spans the production-relevant range:
+/// - d=0.5: high-quality web (the "wow this looks great" tier)
+/// - d=1.0: libjxl reference / "visually transparent" target
+/// - d=2.0: aggressive web compression where bytes really matter
+///
+/// At d=2.0, refinement statistically regresses on many photos (the
+/// `refine_aq_field_gpu_smart` distance-gate threshold is 1.5 for
+/// exactly this reason). Smart's best-of-3 catches that by
+/// comparing against uniform and picking the winner, so smart never
+/// regresses uniform even at d=2.0.
+const EXPECTED_SCORES: &[(&str, f32, f32, BestOfBothPath)] = &[
+    // ===== d=1.0 (the original 11-image set) =====
+    ("clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
+        1.0, 1.1475, BestOfBothPath::Tie),
+    ("clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
+        1.0, 1.2089, BestOfBothPath::RefineStratSearch),
+    ("clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
+        1.0, 1.0999, BestOfBothPath::RefineDct8), // uniform won
+    ("clic2025-1024/1e2f9d41529197f1.png",
+        1.0, 0.8190, BestOfBothPath::RefineDct8), // uniform won
+    // DCT64-sensitive photos (52/9/79 picks at mul=8 pre-fix)
+    ("clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
+        1.0, 1.1587, BestOfBothPath::RefineStratSearch), // FP-tied, strat wins by epsilon
+    ("clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
+        1.0, 1.1548, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
+        1.0, 1.1556, BestOfBothPath::RefineDct8),
+    // Strat-search-winning photos
+    ("clic2025-1024/22ea12c903e41583.png",
+        1.0, 1.1716, BestOfBothPath::RefineStratSearch),
+    ("clic2025-1024/2684452db505ddbb.png",
+        1.0, 1.1868, BestOfBothPath::RefineStratSearch),
+    // Screenshots — discriminator fires
+    ("gb82-sc/graph.png", 1.0, 1.0528, BestOfBothPath::SkippedStratSearchAsScreenshot),
+    ("gb82-sc/gmessages.png", 1.0, 0.9266, BestOfBothPath::SkippedStratSearchAsScreenshot),
+
+    // ===== d=0.5 (high-quality web) =====
+    ("clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
+        0.5, 0.6641, BestOfBothPath::RefineStratSearch),
+    ("clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
+        0.5, 0.6705, BestOfBothPath::Tie),
+    ("clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
+        0.5, 0.5272, BestOfBothPath::Tie),
+    ("clic2025-1024/1e2f9d41529197f1.png",
+        0.5, 0.5071, BestOfBothPath::Tie),
+    ("clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
+        0.5, 0.6554, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
+        0.5, 0.6380, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
+        0.5, 0.7292, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/22ea12c903e41583.png",
+        0.5, 0.7397, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/2684452db505ddbb.png",
+        0.5, 0.6667, BestOfBothPath::RefineStratSearch),
+    ("gb82-sc/graph.png", 0.5, 0.5271, BestOfBothPath::SkippedStratSearchAsScreenshot),
+    ("gb82-sc/gmessages.png", 0.5, 0.5265, BestOfBothPath::SkippedStratSearchAsScreenshot),
+
+    // ===== d=2.0 (aggressive web compression) =====
+    // At d>1.5, refinement statistically regresses on most photos.
+    // Smart's best-of-3 catches that — most cases pick the uniform
+    // candidate (reported as RefineDct8 path label).
+    ("clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
+        2.0, 2.1525, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
+        2.0, 2.0550, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
+        2.0, 1.8807, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/1e2f9d41529197f1.png",
+        2.0, 1.5000, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
+        2.0, 1.9975, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
+        2.0, 2.0202, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
+        2.0, 2.0866, BestOfBothPath::RefineStratSearch),
+    ("clic2025-1024/22ea12c903e41583.png",
+        2.0, 2.0949, BestOfBothPath::RefineDct8),
+    ("clic2025-1024/2684452db505ddbb.png",
+        2.0, 2.1252, BestOfBothPath::RefineDct8),
+    ("gb82-sc/graph.png", 2.0, 1.4447, BestOfBothPath::SkippedStratSearchAsScreenshot),
+    ("gb82-sc/gmessages.png", 2.0, 1.6462, BestOfBothPath::SkippedStratSearchAsScreenshot),
 ];
 
 /// Tolerance for score comparison. 0.5% is tight enough to catch
@@ -134,7 +149,6 @@ const EXPECTED_SCORES: &[(&str, f32, BestOfBothPath)] = &[
 /// ≤0.01% on these workloads).
 const TOLERANCE: f32 = 0.005;
 
-const DISTANCE: f32 = 1.0;
 const ITERS: usize = 4;
 
 #[test]
@@ -156,7 +170,7 @@ fn corpus_regression_smart_turnkey_d1_iter4() {
     let mut failures = Vec::<String>::new();
     let mut ran = 0usize;
 
-    for (subpath, expected_score, expected_path) in EXPECTED_SCORES {
+    for (subpath, distance, expected_score, expected_path) in EXPECTED_SCORES {
         let mut full_path = format!("{CORPUS_ROOT}/{subpath}");
         if !std::path::Path::new(&full_path).exists() {
             // Try fuzzy match by hash prefix (CLIC images have varying
@@ -218,10 +232,10 @@ fn corpus_regression_smart_turnkey_d1_iter4() {
 
         let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, w, h);
         let mut bg = ButteraugliLoopGpu::new_multires(&enc, w, h);
-        let initial_aq = lossy.compute_aq_field(&enc, &r, &g, &b, DISTANCE);
+        let initial_aq = lossy.compute_aq_field(&enc, &r, &g, &b, *distance);
 
         let result = refine_and_encode_smart(
-            &enc, &lossy, &mut bg, &r, &g, &b, &pixels, &initial_aq, DISTANCE, ITERS,
+            &enc, &lossy, &mut bg, &r, &g, &b, &pixels, &initial_aq, *distance, ITERS,
         );
         let (_rec_r, _rec_g, _rec_b, path, scores) = match result {
             Ok(v) => v,
@@ -240,7 +254,7 @@ fn corpus_regression_smart_turnkey_d1_iter4() {
         let path_match = path == *expected_path;
         if rel_err > TOLERANCE || !path_match {
             failures.push(format!(
-                "{subpath}: score expected={expected_score:.4} actual={actual_score:.4} \
+                "{subpath} @ d={distance}: score expected={expected_score:.4} actual={actual_score:.4} \
                  rel_err={rel_err:.4} (tol={TOLERANCE:.4}); \
                  path expected={expected_path:?} actual={path:?}",
             ));
@@ -258,5 +272,13 @@ fn corpus_regression_smart_turnkey_d1_iter4() {
     }
     assert!(ran > 0, "corpus_regression: no images ran (all missing?)");
     let tol_pct = TOLERANCE * 100.0;
-    eprintln!("corpus_regression: {ran} images, all within {tol_pct:.1}% tolerance");
+    let distinct_imgs = EXPECTED_SCORES
+        .iter()
+        .map(|(p, _, _, _)| *p)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    eprintln!(
+        "corpus_regression: {ran} (image, distance) cases ran across \
+         {distinct_imgs} distinct images, all within {tol_pct:.1}% tolerance"
+    );
 }
