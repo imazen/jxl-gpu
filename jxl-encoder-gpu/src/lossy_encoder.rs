@@ -368,16 +368,18 @@ pub fn block_means_to_qac_field_with_range(
 /// Pad a `width × height` plane up to `padded_width × padded_height` with
 /// edge-replication on the right/bottom. Output buffer is allocated by
 /// this function; caller passes empty Vec or pre-allocated of correct size.
-fn pad_to_alignment(
-    src: &[f32],
+fn pad_to_alignment<'a>(
+    src: &'a [f32],
     width: usize,
     height: usize,
     padded_width: usize,
     padded_height: usize,
-) -> alloc::vec::Vec<f32> {
+) -> alloc::borrow::Cow<'a, [f32]> {
     debug_assert_eq!(src.len(), width * height);
     if width == padded_width && height == padded_height {
-        return src.to_vec();
+        // No padding needed — borrow the input slice directly. Saves
+        // a host memcpy (~3 ms at 1024², larger as image scales).
+        return alloc::borrow::Cow::Borrowed(src);
     }
     let mut out = vec![0.0_f32; padded_width * padded_height];
     // Copy interior rows + replicate right edge per source row.
@@ -398,7 +400,7 @@ fn pad_to_alignment(
             out.copy_within(src_row_in_dst..src_row_in_dst + padded_width, dst_off);
         }
     }
-    out
+    alloc::borrow::Cow::Owned(out)
 }
 
 // =============================================================================
