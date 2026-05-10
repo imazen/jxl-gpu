@@ -57,10 +57,33 @@ fn main() {
 
     if raw_args.len() >= 3 && raw_args[1] == "--image" {
         let path = &raw_args[2];
-        iters = raw_args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
-        let img = image::open(path)
+        // Optional --target-mp M after the path: upscale (Triangle) or
+        // downscale (Lanczos3) to that megapixel target. Useful for
+        // testing the same source at multiple sizes without staging
+        // intermediate PNGs.
+        let mut target_mp: Option<f32> = None;
+        let mut iter_arg_pos = 3;
+        if raw_args.get(3).map(|s| s.as_str()) == Some("--target-mp") {
+            target_mp = raw_args.get(4).and_then(|s| s.parse().ok());
+            iter_arg_pos = 5;
+        }
+        iters = raw_args.get(iter_arg_pos).and_then(|s| s.parse().ok()).unwrap_or(5);
+        let mut img = image::open(path)
             .unwrap_or_else(|e| panic!("failed to open {path}: {e}"))
             .to_rgb8();
+        if let Some(mp) = target_mp {
+            let (sw, sh) = img.dimensions();
+            let cur_mp = (sw as f32 * sh as f32) / 1_000_000.0;
+            let scale = (mp / cur_mp).sqrt();
+            let nw = ((sw as f32 * scale).round() as u32).max(8);
+            let nh = ((sh as f32 * scale).round() as u32).max(8);
+            let filter = if nw * nh < (sw * sh) {
+                image::imageops::FilterType::Lanczos3
+            } else {
+                image::imageops::FilterType::Triangle
+            };
+            img = image::imageops::resize(&img, nw, nh, filter);
+        }
         let (w, h) = img.dimensions();
         width = w;
         height = h;
@@ -85,7 +108,11 @@ fn main() {
         r = rr;
         g = gg;
         b = bb;
-        source_label = format!("image={path}");
+        source_label = if let Some(mp) = target_mp {
+            format!("image={path} (resized to {} MP)", mp)
+        } else {
+            format!("image={path}")
+        };
     } else {
         width = raw_args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1024);
         height = raw_args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1024);
