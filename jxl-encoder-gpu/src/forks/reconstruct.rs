@@ -656,18 +656,34 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         );
 
         // Step 2: persistent forward DCT → quantize → dequant chain.
-        // Three GPU launches with no host roundtrips between them.
-        let g_coeffs = apply_dct_batch_persistent(enc, &g_pixels, raw_strategy);
-        let g_quant = enc.quantize_large_blocks_broadcast_w_persistent(
-            &g_coeffs,
-            &weights_template,
-            &qac_for_strategy,
-            thresholds,
-            grid_w,
-            grid_h,
-            llf_x,
-            llf_y,
-        );
+        // For DCT8 (raw_strategy == RAW_STRATEGY_DCT) the forward DCT
+        // and quantize collapse into one fused kernel — saves the
+        // intermediate g_coeffs global-memory roundtrip (per-block
+        // 256 bytes never written/read at the SM↔HBM boundary).
+        // Bit-identical to the split chain — verified by
+        // test_fused_dct8_quantize_persistent (per-block) and
+        // test_fused_dct8_quantize_broadcast_w_matches_perblock
+        // (broadcast-W bridge to the per-block test).
+        let g_quant = if raw_strategy == RAW_STRATEGY_DCT {
+            enc.dct8_quantize_fused_broadcast_w_persistent(
+                &g_pixels,
+                &weights_template,
+                &qac_for_strategy,
+                thresholds,
+            )
+        } else {
+            let g_coeffs = apply_dct_batch_persistent(enc, &g_pixels, raw_strategy);
+            enc.quantize_large_blocks_broadcast_w_persistent(
+                &g_coeffs,
+                &weights_template,
+                &qac_for_strategy,
+                thresholds,
+                grid_w,
+                grid_h,
+                llf_x,
+                llf_y,
+            )
+        };
         let g_dequant = if raw_strategy == RAW_STRATEGY_DCT {
             enc.dequant_strategy_dct8_persistent(
                 &g_quant,
