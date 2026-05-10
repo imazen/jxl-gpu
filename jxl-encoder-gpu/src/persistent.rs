@@ -1209,13 +1209,24 @@ impl<R: Runtime> GpuEncoder<R> {
         );
         assert_eq!(qac_qm.len() as u32, pixels.num_blocks);
         let n = pixels.total_floats();
-        let h_w = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(weights_template));
-        let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
-        let h_thr = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(thresholds));
+        // Batch the 3 small input uploads (weights + qac + thresholds)
+        // into one cubecl create_tensors_from_slices call. Same
+        // amortization story as upload_planes_3ch (8469f3f8): one
+        // storage allocation + one bulk transfer instead of 3
+        // separate cudaMalloc + cudaMemcpy round-trips.
+        use cubecl::server::MemoryLayoutDescriptor;
+        let w_bytes = f32::as_bytes(weights_template);
+        let qac_bytes = f32::as_bytes(qac_qm);
+        let thr_bytes = f32::as_bytes(&thresholds[..]);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
+            (MemoryLayoutDescriptor::contiguous([qac_bytes.len()].into(), 1), qac_bytes),
+            (MemoryLayoutDescriptor::contiguous([thr_bytes.len()].into(), 1), thr_bytes),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_thr = layouts.pop().expect("layouts[2]").memory;
+        let h_qac = layouts.pop().expect("layouts[1]").memory;
+        let h_w = layouts.pop().expect("layouts[0]").memory;
         let h_out = self.client_ref().empty(n * 4);
         dct8_quantize_fused_broadcast_w_wide::<R>(
             self.client_ref(),
