@@ -33,6 +33,7 @@ fn main() {
 
     let raw_args: Vec<String> = std::env::args().collect();
     let mut image_path: Option<String> = None;
+    let mut target_mp: Option<f32> = None;
     let mut effort: u8 = 7;
     let mut distance: f32 = 1.0;
     let mut iters: usize = 4; // butteraugli refinement at e8+
@@ -42,6 +43,12 @@ fn main() {
         match raw_args[i].as_str() {
             "--image" => {
                 image_path = Some(raw_args[i + 1].clone());
+                i += 2;
+            }
+            "--target-mp" => {
+                // Resize the loaded image so its pixel count matches
+                // the requested megapixels, preserving aspect ratio.
+                target_mp = Some(raw_args[i + 1].parse().expect("--target-mp M"));
                 i += 2;
             }
             "--effort" => {
@@ -65,18 +72,28 @@ fn main() {
     }
     let image_path = image_path.expect("--image PATH required");
 
-    println!(
-        "perf_cpu_vs_gpu: image={image_path} effort={effort} distance={distance} \
-         iters={iters} runs={runs}"
-    );
-
-    let img = image::open(&image_path)
+    let mut img = image::open(&image_path)
         .unwrap_or_else(|e| panic!("open {image_path}: {e}"))
         .to_rgb8();
+    if let Some(mp) = target_mp {
+        let (sw, sh) = img.dimensions();
+        let cur_mp = (sw as f32 * sh as f32) / 1_000_000.0;
+        let scale = (mp / cur_mp).sqrt();
+        let nw = ((sw as f32 * scale).round() as u32).max(8);
+        let nh = ((sh as f32 * scale).round() as u32).max(8);
+        // Lanczos3 preserves photo-like high-frequency detail far
+        // better than nearest/bilinear (matters for AC strategy mix).
+        let resized = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3);
+        img = resized;
+    }
     let (w, h) = img.dimensions();
     let pixels_u8: Vec<u8> = img.into_raw();
+    println!(
+        "perf_cpu_vs_gpu: image={image_path} (final {}x{}, {:.2} MP) effort={effort} distance={distance} \
+         iters={iters} runs={runs}",
+        w, h, (w as f32 * h as f32) / 1_000_000.0
+    );
     let n = (w * h) as usize;
-    println!("  dims: {w}×{h} = {n} pixels");
 
     let to_linear = |c: u8| -> f32 {
         let f = c as f32 / 255.0;
