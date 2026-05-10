@@ -32,18 +32,24 @@
 //!
 //! ## Usage
 //!
-//! ```rust,ignore
+//! ```rust
 //! use jxl_encoder_gpu::groups::GroupGeometry;
 //!
 //! let geom = GroupGeometry::for_padded(1024, 1024);
-//! assert_eq!(geom.num_groups, 16); // 4 × 4 grid
+//! assert_eq!(geom.num_groups(), 16); // 4 × 4 grid
 //!
-//! for g in geom.iter() {
+//! // Pretend per-block scratch buffers (one f32 per padded 8×8 block,
+//! // one StrategyAssignment per logical encode region).
+//! let aq_field: Vec<f32> = vec![1.0; geom.num_padded_blocks_8()];
+//! let assignments = Vec::new();
+//!
+//! for bounds in geom.iter() {
 //!     // Slice per-block aq_field for this group
-//!     let aq_slice = geom.gather_per_block(&aq_field, g);
+//!     let aq_slice = geom.gather_per_block_f32(&aq_field, bounds);
 //!     // Slice strategy assignments for this group
-//!     let asn_slice = geom.partition_assignments(&assignments, g);
-//!     // …feed into future bitstream handoff…
+//!     let asn_slice = geom.partition_assignments(&assignments, bounds);
+//!     assert_eq!(aq_slice.len(), bounds.num_blocks());
+//!     assert!(asn_slice.is_empty()); // (no assignments in the demo)
 //! }
 //! ```
 
