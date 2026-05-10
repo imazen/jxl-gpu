@@ -635,6 +635,139 @@ pub fn idct_8x8_set_dc_scatter_kernel(
     }
 }
 
+/// 4-way fused: dequant + DC restore + IDCT8 + indexed scatter for
+/// the DCT8 encode/recon hot path. One launch replaces four:
+///
+///   dequant_strategy_dct8_persistent → set_dc_from_grid_indexed →
+///   apply_idct_batch_persistent (DCT8) → indexed_scatter
+///
+/// Per block (one cube):
+///   1. Read `(bx, by)` from `coords[block_idx*2..]`
+///   2. Read `dc = dc_grid[by * dc_stride + bx]`
+///   3. For coef `i` in 0..64:
+///        q_int = quant[block_idx*64 + i]
+///        bias the i32 via `adjust_quant_bias` (channel-specific)
+///        scratch[i] = biased * weights_template[i] * (1 / qac[block_idx])
+///   4. Overwrite scratch[0] with `dc`
+///   5. IDCT8 (row pass + transpose + col pass) — same idct1d_8 calls
+///      as `idct_8x8_kernel` and `idct_8x8_set_dc_scatter_kernel`
+///   6. Scatter the resulting 8×8 pixels into `plane[(by*8+dy)*W + bx*8+dx]`
+///
+/// Bias formula (matching `dequant_strategy_kernel_broadcast_w_dct8`):
+///   q_int == 0           → 0
+///   |q_int| < 1.125      → sign(q_int) * channel_bias
+///   else                 → q - 0.145 / q
+///
+/// `channel_bias` per libjxl: X = 0.945_349_93, Y = 0.929_945_5,
+/// B = 0.950_064_9. Caller supplies the right one for the channel
+/// being processed.
+///
+/// Bit-identical to the 4-stage split chain — verified by
+/// `test_dequant_idct_dc_scatter_matches_split` in persistent.rs
+/// across all 3 channels.
+///
+/// Saves the intermediate `g_dequant` GpuBlocks roundtrip
+/// (~256 bytes/block × N blocks of HBM traffic — 12 MB/iter at 1024²
+/// × 3 channels) on top of the existing fused IDCT+DC+scatter.
+#[allow(clippy::too_many_arguments)]
+#[cube(launch_unchecked)]
+pub fn dequant_idct_dc_scatter_dct8_kernel(
+    quant: &Array<i32>,
+    weights: &Array<f32>,
+    qac: &Array<f32>,
+    dc_grid: &Array<f32>,
+    coords: &Array<u32>,
+    plane: &mut Array<f32>,
+    plane_width: u32,
+    dc_stride: u32,
+    n_blocks: u32,
+    channel_bias: f32,
+) {
+    const BIAS_RECIP: f32 = 0.145;
+
+    let block_idx = ABSOLUTE_POS;
+    let n = n_blocks as usize;
+    if block_idx >= n {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+
+    let bx = coords[block_idx * 2usize] as usize;
+    let by = coords[block_idx * 2usize + 1usize] as usize;
+    let dc_stride_us = dc_stride as usize;
+    let dc = dc_grid[by * dc_stride_us + bx];
+    let inv_qac = 1.0f32 / qac[block_idx];
+
+    let mut scratch = SharedMemory::<f32>::new(64usize);
+    let mut transposed = SharedMemory::<f32>::new(64usize);
+
+    // Dequant directly into shared memory (broadcast weights).
+    let mut i: u32 = 0u32;
+    while i < 64u32 {
+        let iu = i as usize;
+        let q_int = quant[off + iu];
+        let biased = if q_int == 0i32 {
+            f32::new(0.0)
+        } else {
+            let q = q_int as f32;
+            if f32::abs(q) < 1.125f32 {
+                if q > 0.0f32 { channel_bias } else { -channel_bias }
+            } else {
+                q - BIAS_RECIP / q
+            }
+        };
+        scratch[iu] = biased * weights[iu] * inv_qac;
+        i += 1u32;
+    }
+    // Restore DC.
+    scratch[0usize] = dc;
+
+    // Row pass.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        idct1d_8(&mut scratch, r * 8u32);
+        r += 1u32;
+    }
+
+    // Transpose.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            transposed[cu * 8usize + ru] = scratch[ru * 8usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // Column pass.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        idct1d_8(&mut transposed, r * 8u32);
+        r += 1u32;
+    }
+
+    // Indexed scatter into plane.
+    let pw = plane_width as usize;
+    let dst_y0 = by * 8usize;
+    let dst_x0 = bx * 8usize;
+    let mut dy: u32 = 0u32;
+    while dy < 8u32 {
+        let dyu = dy as usize;
+        let dst_row = (dst_y0 + dyu) * pw + dst_x0;
+        let src_row = dyu * 8usize;
+        let mut dx: u32 = 0u32;
+        while dx < 8u32 {
+            let dxu = dx as usize;
+            plane[dst_row + dxu] = transposed[src_row + dxu];
+            dx += 1u32;
+        }
+        dy += 1u32;
+    }
+}
+
 /// Inverse 8x8 DCT for `num_blocks` contiguous blocks.
 #[cube(launch_unchecked)]
 pub fn idct_8x8_kernel(input: &Array<f32>, output: &mut Array<f32>) {

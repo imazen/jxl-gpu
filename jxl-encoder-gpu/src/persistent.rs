@@ -61,7 +61,8 @@ use crate::launch::dct4::{
 };
 use crate::launch::dct2x2::{dct2x2_forward, dct2x2_inverse};
 use crate::launch::dct8::{
-    dct_8x8, dct_8x8_wide, idct_8x8, idct_8x8_set_dc_scatter, idct_8x8_wide,
+    dct_8x8, dct_8x8_wide, dequant_idct_dc_scatter_dct8, idct_8x8, idct_8x8_set_dc_scatter,
+    idct_8x8_wide,
 };
 use crate::launch::identity::{identity_forward, identity_inverse};
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
@@ -731,6 +732,79 @@ impl<R: Runtime> GpuEncoder<R> {
             coeffs_per_block: 64,
             _r: core::marker::PhantomData,
         }
+    }
+
+    /// 4-way fused: dequant + DC restore + IDCT8 + indexed scatter.
+    /// Single launch replacing four:
+    ///   `dequant_strategy_dct8_persistent →
+    ///    set_dc_from_grid_indexed_persistent →
+    ///    idct_8x8_persistent (DCT8) →
+    ///    indexed_scatter_blocks_persistent`
+    ///
+    /// `channel`: 0 = X, 1 = Y, 2 = B (selects the per-channel
+    /// `adjust_quant_bias` constant — same convention as
+    /// [`Self::dequant_strategy_dct8_persistent`]).
+    ///
+    /// Skips both the `g_dequant` (~256 bytes/block per channel) and
+    /// `g_recon` (same size) HBM roundtrips on the encode/recon
+    /// hot path, on top of the savings already delivered by
+    /// [`Self::idct_8x8_set_dc_scatter_persistent`].
+    ///
+    /// Bit-identical to the 4-stage split chain — verified by
+    /// `test_dequant_idct_dc_scatter_matches_split` across all 3
+    /// channels.
+    pub fn dequant_idct_dc_scatter_dct8_persistent(
+        &self,
+        quant: &GpuI32Blocks<R>,
+        weights_template: &[f32],
+        qac_qm: &[f32],
+        dc_grid: &GpuBlocks<R>,
+        coords: &[(u32, u32)],
+        plane: &GpuPlane<R>,
+        dc_stride: u32,
+        channel: usize,
+    ) {
+        const BIAS_X: f32 = 0.945_349_93;
+        const BIAS_Y: f32 = 0.929_945_5;
+        const BIAS_B: f32 = 0.950_064_9;
+        let channel_bias = match channel {
+            0 => BIAS_X,
+            1 => BIAS_Y,
+            2 => BIAS_B,
+            _ => panic!(
+                "dequant_idct_dc_scatter_dct8_persistent: channel must be 0, 1, or 2; got {channel}"
+            ),
+        };
+        assert_eq!(quant.coeffs_per_block, 64);
+        assert_eq!(quant.num_blocks as usize, coords.len());
+        assert_eq!(weights_template.len(), 64);
+        assert_eq!(qac_qm.len() as u32, quant.num_blocks);
+        let mut flat: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(coords.len() * 2);
+        for &(bx, by) in coords {
+            flat.push(bx);
+            flat.push(by);
+        }
+        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
+        let h_w = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(weights_template));
+        let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
+        let dc_grid_len = dc_grid.total_floats();
+        dequant_idct_dc_scatter_dct8::<R>(
+            self.client_ref(),
+            quant.handle.clone(),
+            h_w,
+            h_qac,
+            dc_grid.handle.clone(),
+            h_coords,
+            plane.handle.clone(),
+            plane.n_pixels(),
+            plane.width,
+            dc_grid_len,
+            dc_stride,
+            quant.num_blocks,
+            channel_bias,
+        );
     }
 
     /// Fused IDCT8 + DC restore + indexed scatter — replaces the
@@ -2923,6 +2997,83 @@ mod tests {
             q_perblock_host, q_broadcast_host,
             "broadcast-W fused must match per-block fused when weights are replicated"
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_dequant_idct_dc_scatter_matches_split() {
+        // The 4-way fused dequant + DC + IDCT + scatter must produce
+        // a plane bit-identical to the split chain it replaces, for
+        // each of the three channels (X = 0, Y = 1, B = 2 — different
+        // channel_bias).
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        let xb = 4u32;
+        let yb = 3u32;
+        let pw = (xb * 8) as u32;
+        let ph = (yb * 8) as u32;
+        let n_blocks = (xb * yb) as u32;
+        let n = (n_blocks as usize) * 64;
+
+        // Mix of zeros, |q|<1.125, and larger ints to exercise all 3
+        // branches of the bias formula.
+        let quant: Vec<i32> = (0..n)
+            .map(|i| {
+                let v = (i.wrapping_mul(31) % 13) as i32 - 6;
+                if i % 7 == 0 { 0 } else { v }
+            })
+            .collect();
+        let weights_template: Vec<f32> =
+            (0..64usize).map(|i| 0.5 + 0.7 * ((i * 17 % 251) as f32 / 251.0)).collect();
+        let qac: Vec<f32> = (0..n_blocks as usize).map(|b| 3.5 + 0.1 * b as f32).collect();
+        let dc_host: Vec<f32> = (0..n_blocks).map(|i| 0.4 + 0.05 * i as f32).collect();
+        let mut coords: Vec<(u32, u32)> = Vec::with_capacity(n_blocks as usize);
+        for by in 0..yb {
+            for bx in 0..xb {
+                coords.push((bx, by));
+            }
+        }
+
+        for channel in [0_usize, 1, 2] {
+            // Build fresh GPU buffers per iteration — split chain
+            // mutates the dequant intermediate via set_dc.
+            let g_quant_split = enc.upload_i32_blocks(&quant, n_blocks, 64);
+            let g_quant_fused = enc.upload_i32_blocks(&quant, n_blocks, 64);
+            let g_dc = enc.upload_blocks(&dc_host, n_blocks, 1);
+
+            // ── Split chain: dequant → set_dc → idct → scatter ───
+            let g_dequant =
+                enc.dequant_strategy_dct8_persistent(&g_quant_split, &weights_template, &qac, channel);
+            let g_plane_split = enc.alloc_plane(pw, ph);
+            enc.set_dc_from_grid_indexed_persistent(&g_dc, &coords, &g_dequant, xb);
+            let g_recon = enc.idct_8x8_persistent(&g_dequant);
+            enc.indexed_scatter_blocks_persistent(&g_recon, &coords, &g_plane_split, 8u32, 8u32);
+            let plane_split = enc.download_plane(&g_plane_split);
+
+            // ── Fused chain: single launch ────────────────────────
+            let g_plane_fused = enc.alloc_plane(pw, ph);
+            enc.dequant_idct_dc_scatter_dct8_persistent(
+                &g_quant_fused,
+                &weights_template,
+                &qac,
+                &g_dc,
+                &coords,
+                &g_plane_fused,
+                xb,
+                channel,
+            );
+            let plane_fused = enc.download_plane(&g_plane_fused);
+
+            assert_eq!(plane_split.len(), plane_fused.len());
+            for (i, (&a, &b)) in plane_split.iter().zip(plane_fused.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "channel {channel} idx {i}: split={a} fused={b}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "cuda")]
