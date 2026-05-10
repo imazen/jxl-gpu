@@ -419,9 +419,20 @@ impl<R: Runtime> GpuEncoder<R> {
         let w = r.width;
         let h = r.height;
         let n = r.n_pixels();
-        let h_x = self.client_ref().empty(n * 4);
-        let h_y = self.client_ref().empty(n * 4);
-        let h_b_out = self.client_ref().empty(n * 4);
+        // Batched 3-way alloc for x/y/b output planes — one
+        // underlying storage allocation instead of three separate
+        // cudaMallocs. Big win at large image sizes (~64 MB per
+        // plane) where individual cudaMalloc dominates.
+        let n_bytes = n * 4;
+        let descs = alloc::vec![
+            MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+            MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+            MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+        ];
+        let mut layouts = self.client_ref().empty_tensors(descs);
+        let h_b_out = layouts.pop().expect("layouts[2]").memory;
+        let h_y = layouts.pop().expect("layouts[1]").memory;
+        let h_x = layouts.pop().expect("layouts[0]").memory;
         xyb_forward::<R>(
             self.client_ref(),
             r.handle.clone(),
@@ -464,9 +475,18 @@ impl<R: Runtime> GpuEncoder<R> {
         let w = x.width;
         let h = x.height;
         let n = x.n_pixels();
-        let h_r = self.client_ref().empty(n * 4);
-        let h_g = self.client_ref().empty(n * 4);
-        let h_b = self.client_ref().empty(n * 4);
+        // Batched 3-way alloc — same amortization as
+        // xyb_from_linear_rgb_persistent.
+        let n_bytes = n * 4;
+        let descs = alloc::vec![
+            MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+            MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+            MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+        ];
+        let mut layouts = self.client_ref().empty_tensors(descs);
+        let h_b = layouts.pop().expect("layouts[2]").memory;
+        let h_g = layouts.pop().expect("layouts[1]").memory;
+        let h_r = layouts.pop().expect("layouts[0]").memory;
         xyb_inverse::<R>(
             self.client_ref(),
             x.handle.clone(),

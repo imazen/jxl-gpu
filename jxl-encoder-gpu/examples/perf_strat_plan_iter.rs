@@ -154,24 +154,54 @@ fn main() {
     drop(warm_plan);
 
     // ── prepare_strategy_search_plan timing ──
+    // Run prepare 3 times back-to-back to detect cubecl pool-warmup
+    // behavior at large image sizes (xyb_gab regression at 16+ MP
+    // appears to be cudaMalloc per encode for ~64 MB output buffers).
     let mut prep_stages: BTreeMap<&'static str, f64> = BTreeMap::new();
-    let mut last_prep = Instant::now();
-    let t0 = Instant::now();
-    let plan = lossy.prepare_strategy_search_plan_traced(
-        &enc,
-        &r,
-        &g,
-        &b,
-        distance,
-        &mut |label: &'static str| {
-            let now = Instant::now();
-            let elapsed = now.duration_since(last_prep).as_secs_f64() * 1000.0;
-            *prep_stages.entry(label).or_insert(0.0) += elapsed;
-            last_prep = now;
-        },
+    let mut prep_totals: Vec<f64> = Vec::new();
+    let mut plan_holder: Option<_> = None;
+    for prep_idx in 0..3 {
+        let mut last_prep = Instant::now();
+        let t0 = Instant::now();
+        let mut local_stages: BTreeMap<&'static str, f64> = BTreeMap::new();
+        let plan = lossy.prepare_strategy_search_plan_traced(
+            &enc,
+            &r,
+            &g,
+            &b,
+            distance,
+            &mut |label: &'static str| {
+                let now = Instant::now();
+                let elapsed = now.duration_since(last_prep).as_secs_f64() * 1000.0;
+                *local_stages.entry(label).or_insert(0.0) += elapsed;
+                last_prep = now;
+            },
+        );
+        let dt_prepare = t0.elapsed().as_secs_f64() * 1000.0;
+        prep_totals.push(dt_prepare);
+        println!("\nprepare run {prep_idx}: {:.2} ms", dt_prepare);
+        for (label, ms) in &local_stages {
+            *prep_stages.entry(label).or_insert(0.0) += ms;
+        }
+        if prep_idx == 0 {
+            // Show the first-run breakdown (worst case, before any pool warmup).
+            let mut entries: Vec<_> = local_stages.iter().collect();
+            entries.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+            for (label, ms) in entries {
+                println!("    {:32} {:7.2} ms", label, ms);
+            }
+        }
+        if prep_idx == 2 {
+            plan_holder = Some(plan);
+        }
+    }
+    let plan = plan_holder.unwrap();
+    let dt_prepare = std::time::Duration::from_secs_f64(prep_totals[2] / 1000.0);
+    println!(
+        "\nprepare_strategy_search_plan (last of 3): {:.2} ms (totals: {:?})",
+        dt_prepare.as_secs_f64() * 1000.0,
+        prep_totals
     );
-    let dt_prepare = t0.elapsed();
-    println!("\nprepare_strategy_search_plan: {:.2} ms", dt_prepare.as_secs_f64() * 1000.0);
     println!("  prepare stage breakdown (sorted by total):");
     let mut prep_entries: Vec<(&&'static str, &f64)> = prep_stages.iter().collect();
     prep_entries.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
