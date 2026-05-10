@@ -39,4 +39,5 @@ pub mod quantize;
 pub mod set_dc;
 pub mod set_llf;
 pub mod sse_reduce;
+pub mod u8_probe;
 pub mod xyb;
