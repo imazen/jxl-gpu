@@ -1,10 +1,16 @@
 //! Phase 3 Component 2: host-side partition selector test.
 //!
-//! Pure host-side test (no GPU dependency). Verifies the partition
-//! selector picks the lower-cost choice on synthetic cost grids.
+//! Pure host-side test (no GPU dependency, but depends on the
+//! `encoder` feature for the `pipeline` module). Verifies the
+//! partition selector picks the lower-cost choice on synthetic cost
+//! grids.
 
 // Test fixtures use vec![..; n] for ergonomic readability; allowed in test code.
 #![allow(clippy::useless_vec)]
+// `pipeline` is gated behind `encoder`; without the feature this whole
+// test file should compile to nothing (CI's `cpu`-only build path
+// otherwise breaks here).
+#![cfg(feature = "encoder")]
 
 use jxl_encoder_gpu::pipeline::{
     CostGrids16x16, CostGrids32x32, CostGrids64x64, Partition16x16, Partition32x32, Partition64x64,
