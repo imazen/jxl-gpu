@@ -615,6 +615,31 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             continue;
         }
 
+        // 4×4-LLF GPU fast path for DCT32×32.
+        use crate::forks::transform::RAW_STRATEGY_DCT32X32;
+        if raw_strategy == RAW_STRATEGY_DCT32X32 {
+            enc.set_llf_dct32x32_indexed_persistent(
+                &g_dc_grid,
+                &coords_u32,
+                &g_dequant,
+                xsize_blocks_8 as u32,
+            );
+            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
+                enc,
+                &g_dequant,
+                raw_strategy,
+            );
+            enc.indexed_scatter_blocks_persistent(
+                &g_recon,
+                &coords_u32,
+                &g_out_plane,
+                tile_w as u32,
+                tile_h as u32,
+            );
+            used_gpu_for_any = true;
+            continue;
+        }
+
         // 2×2-LLF GPU fast path for DCT16×16.
         use crate::forks::transform::RAW_STRATEGY_DCT16X16;
         if raw_strategy == RAW_STRATEGY_DCT16X16 {
