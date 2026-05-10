@@ -146,6 +146,20 @@ Top remaining stages at 16 MP prep (~700 ms total):
 - pad_only (96 ms, 14%) — host memcpy of 192 MB
 - cost_dct8_dct16 (96 ms, 14%)
 
+**u8 input fast-path** (commit a7d9be33, 2026-05-10): For callers that
+already hold raw interleaved sRGB u8 RGB (the standard PNG-decoded
+layout), use `LossyEncoder::prepare_strategy_search_plan_traced_from_u8`
+instead of `_traced`. Skips host sRGB-EOTF + 3× pad_to_alignment + 3×
+larger upload. End-to-end paired A/B (perf_strat_plan_u8_vs_f32):
+
+| Pixels  | f32 path | u8 path | Speedup | Δ saved |
+|---------|---------:|--------:|--------:|--------:|
+| 1.05 MP |  29.4 ms | 24.0 ms |  1.22×  |  −5 ms  |
+| 16 MP   |   703 ms |  499 ms |  1.41×  | −204 ms |
+
+Bound below by cubecl 0.10's slow upload — see "cubecl upload
+bandwidth" below for the deeper ceiling.
+
 Benches:
 - `examples/perf_strat_plan_iter` — per-stage breakdown of strat-search
   prepare + iter (use `--target-mp N` to test resized inputs)
@@ -153,6 +167,42 @@ Benches:
   pipeline (use `--mode {both,cpu,gpu}` for isolation)
 - `examples/perf_upload_plane` — micro-benchmark for cubecl upload
   per-call cost
+- `examples/perf_u8_upload_vs_f32` — u8 vs f32 upload, isolated
+- `examples/perf_strat_plan_u8_vs_f32` — full prepare A/B with both
+  input forms
+
+## cubecl upload bandwidth ceiling (2026-05-10)
+
+cubecl 0.10's `create_from_slice` does NOT pin host memory before
+`cuMemcpyHtoDAsync`, so HtoD caps at ~1 GB/s on a PCIe 4.0 x16 link
+that the hardware can sustain at 50 GB/s.
+
+Microbenches (RTX 5070, PCIe 4.0, paired same-host runs;
+`examples/perf_raw_cuda_upload`):
+
+| Size   | cubecl create_from_slice | raw cudarc pageable | raw cudarc pinned | cubecl gap |
+|--------|-------------------------:|--------------------:|------------------:|-----------:|
+| 4 MB   |              1.26 GB/s   |        13.7 GB/s    |       32.9 GB/s   |    26×     |
+| 48 MB  |              0.16 GB/s   |        12.8 GB/s    |       47.2 GB/s   |   295×     |
+| 192 MB |              0.13 GB/s   |        11.0 GB/s    |       49.7 GB/s   |   382×     |
+
+`cudaMalloc` itself is negligible (0.47 ms at 192 MB). cubecl's losses
+are pure: pageable bounce-buffering inside the driver + redundant
+`Vec<u8>` host memcpy in cubecl's upload path
+(`cubecl-runtime/src/client.rs:212` `do_create_from_slices` skips
+`staging()`).
+
+**Workarounds** (in priority order):
+1. **Wait for upstream cubecl pinned-buffer support** (PR drafted on
+   `lilith/cubecl` branch `feat/pinned-upload`, awaits review). Lifts
+   4-48 MB transfers to ~12 GB/s, no jxl-encoder-gpu changes needed.
+2. **Bypass cubecl for uploads on hot paths.** Maintain our own pinned
+   staging-buffer pool via `cudarc`, upload via `cuMemcpyHtoDAsync`
+   from pinned, hand the resulting device pointer to cubecl as a
+   `Handle` of a borrowed allocation. Required for transfers > pool
+   `max_page_size` (~50 MB) where even pinned cubecl falls back.
+3. **Send less data** — the `_from_u8` path above is the cheap
+   first cut (3× smaller upload + 1 fused launch).
 
 ## GPU sync-barrier discipline (CRITICAL)
 
