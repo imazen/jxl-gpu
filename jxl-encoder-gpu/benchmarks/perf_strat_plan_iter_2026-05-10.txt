@@ -127,4 +127,48 @@ Top targets ranked by reward:vs:risk for future optimization:
      before optimizing — the simple "move pad to GPU" fix only saves
      1-2 ms unless cubecl alloc is the real cost.
 
+Real CLIC photo run (2026-05-10, after fused-DCT8 wiring ab8a5bed)
+------------------------------------------------------------------
+
+Image: clic2025-1024/02809272b4ca9b08...png (1024×1024)
+Strategy mix: 99.6% DCT8 (16116 blocks), 0.4% DCT16x16 (67 blocks)
+
+prepare_strategy_search_plan: 69.95 ms
+  cost_subblock_8x8                  15.06 ms (22%)
+  cost_dct64_family                  14.20 ms (20%)   [DCT64 not picked but cost grid still runs]
+  pad_upload                         12.64 ms (18%)
+  cost_dct8_dct16                     6.96 ms (10%)
+  cost_dct32x16_and_16x32             6.24 ms (9%)
+  xyb_gab                             5.06 ms (7%)
+  cost_dct32x32                       3.38 ms (5%)
+  cost_dct8x16                        3.02 ms (4%)
+  cost_dct16x8                        2.86 ms (4%)
+  dc_grids                            0.29 ms
+  selector                            0.23 ms
+
+encode_with_strategy_plan_adaptive_traced × 5:
+  iter 0: 14.17 ms   iter 1: 21.81   iter 2: 21.44   iter 3: 17.33   iter 4: 14.19
+  mean 17.79 ms, min 14.17 ms
+
+  mixed_strategy_encode_recon        10.36 ms/iter (the fused-DCT8 path
+                                                    is on every block)
+  download_crop                       2.81 ms/iter (lower than synthetic
+                                                    ~6 ms — different
+                                                    GpuPlane lifetimes)
+  postpass_gab_epf_xyb                0.69 ms/iter
+
+Compared to synthetic-gradient runs (which were 57% DCT64x64, 43% DCT8):
+- mean per-iter: 17.79 (real, 99.6% DCT8) vs 19-21 ms (synthetic mix)
+- min per-iter: 14.17 (real) vs 14.92-17.57 (synthetic)
+
+Real photo runs FASTER per iter despite having 100% of blocks go through
+the DCT8 fused path. Suggests the fused kernel does benefit, but
+within-run variance (min vs max ~7 ms gap) makes single-run
+measurements unreliable. For confident perf claims, need:
+  - 10+ runs of the same image
+  - Statistical comparison (paired or sign test) vs the un-wired
+    baseline at the same commit / image
+  - Or: zenbench-style interleaved A/B execution
+
+
 

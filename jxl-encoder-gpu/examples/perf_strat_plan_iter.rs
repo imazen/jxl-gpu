@@ -16,10 +16,16 @@
 //! Run with:
 //!   cargo run -p jxl-encoder-gpu --features 'cuda encoder' \
 //!     --release --example perf_strat_plan_iter [width [height [iters]]]
+//!   cargo run -p jxl-encoder-gpu --features 'cuda encoder' \
+//!     --release --example perf_strat_plan_iter --image PATH [iters]
 //!
-//! Defaults: 1024 × 1024, 5 iters.
+//! Defaults: 1024 × 1024 synthetic gradient, 5 iters.
 //!
-//! Synthetic input only (gradient + noise) — no corpus dependency.
+//! With `--image PATH`, decodes the PNG/JPEG/etc and converts to
+//! linear RGB; dimensions come from the image. Use a real CLIC photo
+//! to get realistic strategy distributions (synthetic gradients hit
+//! >50% DCT64x64; real photos are DCT8-heavy).
+//!
 //! Reports wall-clock per stage so a future run on this commit's
 //! baseline can be compared against later changes.
 
@@ -41,35 +47,73 @@ fn main() {
 
     type B = cubecl::cuda::CudaRuntime;
 
-    // Parse args: width height iters.
-    let args: Vec<String> = std::env::args().collect();
-    let width: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1024);
-    let height: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1024);
-    let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+    // Parse args: either positional [width [height [iters]]] or
+    // --image PATH [iters].
+    let raw_args: Vec<String> = std::env::args().collect();
     let distance: f32 = 1.0;
 
-    println!(
-        "perf_strat_plan_iter: {width}×{height}, {iters} iters at distance={distance}"
-    );
+    let (width, height, r, g, b, source_label): (u32, u32, Vec<f32>, Vec<f32>, Vec<f32>, String);
+    let iters: usize;
 
-    // Synthetic image: low-frequency gradient + per-pixel jitter (hash).
-    let n = (width as usize) * (height as usize);
-    let make_channel = |seed: u32| -> Vec<f32> {
-        let mut v = Vec::with_capacity(n);
-        for i in 0..n {
-            let x = (i as u32 % width) as f32 / width as f32;
-            let y = (i as u32 / width) as f32 / height as f32;
-            let jitter = ((i as u32).wrapping_mul(2654435761).wrapping_add(seed) as f32
-                / u32::MAX as f32
-                - 0.5)
-                * 0.04;
-            v.push((0.20 + 0.60 * x + 0.10 * y + jitter).clamp(0.0, 1.0));
+    if raw_args.len() >= 3 && raw_args[1] == "--image" {
+        let path = &raw_args[2];
+        iters = raw_args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+        let img = image::open(path)
+            .unwrap_or_else(|e| panic!("failed to open {path}: {e}"))
+            .to_rgb8();
+        let (w, h) = img.dimensions();
+        width = w;
+        height = h;
+        let pixels: Vec<u8> = img.into_raw();
+        let n = (w * h) as usize;
+        let to_linear = |c: u8| -> f32 {
+            let f = c as f32 / 255.0;
+            if f <= 0.04045 {
+                f / 12.92
+            } else {
+                ((f + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let mut rr = Vec::with_capacity(n);
+        let mut gg = Vec::with_capacity(n);
+        let mut bb = Vec::with_capacity(n);
+        for chunk in pixels.chunks_exact(3) {
+            rr.push(to_linear(chunk[0]));
+            gg.push(to_linear(chunk[1]));
+            bb.push(to_linear(chunk[2]));
         }
-        v
-    };
-    let r = make_channel(11);
-    let g = make_channel(23);
-    let b = make_channel(37);
+        r = rr;
+        g = gg;
+        b = bb;
+        source_label = format!("image={path}");
+    } else {
+        width = raw_args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1024);
+        height = raw_args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1024);
+        iters = raw_args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+        // Synthetic image: low-frequency gradient + per-pixel jitter (hash).
+        let n = (width as usize) * (height as usize);
+        let make_channel = |seed: u32| -> Vec<f32> {
+            let mut v = Vec::with_capacity(n);
+            for i in 0..n {
+                let x = (i as u32 % width) as f32 / width as f32;
+                let y = (i as u32 / width) as f32 / height as f32;
+                let jitter = ((i as u32).wrapping_mul(2654435761).wrapping_add(seed) as f32
+                    / u32::MAX as f32
+                    - 0.5)
+                    * 0.04;
+                v.push((0.20 + 0.60 * x + 0.10 * y + jitter).clamp(0.0, 1.0));
+            }
+            v
+        };
+        r = make_channel(11);
+        g = make_channel(23);
+        b = make_channel(37);
+        source_label = "synthetic gradient".to_string();
+    }
+
+    println!(
+        "perf_strat_plan_iter: {width}×{height} ({source_label}), {iters} iters at distance={distance}"
+    );
 
     let enc: GpuEncoder<B> = GpuEncoder::new();
     let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, width, height);
