@@ -2417,11 +2417,11 @@ impl<R: Runtime> LossyEncoder<R> {
 
         let (rgb_r, rgb_g, rgb_b) =
             enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
-        (
-            enc.download_plane(&rgb_r),
-            enc.download_plane(&rgb_g),
-            enc.download_plane(&rgb_b),
-        )
+        // Batched 3-channel D2H read — one client.read with one
+        // queue-drain sync instead of three sequential read_one calls
+        // (matches the same swap done for the strat-search path's
+        // download_crop in ba826e06).
+        enc.download_planes_3ch(&rgb_r, &rgb_g, &rgb_b)
     }
 }
 
