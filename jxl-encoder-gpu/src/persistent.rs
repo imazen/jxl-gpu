@@ -71,7 +71,9 @@ use crate::launch::dequant_simple::{
 };
 use crate::launch::entropy::entropy_coeffs_pixel_broadcast_w;
 use crate::launch::epf::{epf_step1, epf_step2, pad_plane};
-use crate::launch::fused_dct_quant::{dct8_quantize_fused_wide, dequant_idct8_fused_y_wide};
+use crate::launch::fused_dct_quant::{
+    dct8_quantize_fused_broadcast_w_wide, dct8_quantize_fused_wide, dequant_idct8_fused_y_wide,
+};
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::gaborish_5x5;
 use crate::launch::gather::{gather_blocks, scatter_blocks};
@@ -958,6 +960,63 @@ impl<R: Runtime> GpuEncoder<R> {
             self.client_ref(),
             pixels.handle.clone(),
             weights.handle.clone(),
+            h_qac,
+            h_thr,
+            h_out.clone(),
+            pixels.num_blocks,
+        );
+        GpuI32Blocks {
+            handle: h_out,
+            num_blocks: pixels.num_blocks,
+            coeffs_per_block: 64,
+            _r: core::marker::PhantomData,
+        }
+    }
+
+    /// Broadcast-weights variant of [`Self::dct8_quantize_fused_persistent`].
+    ///
+    /// Same fused DCT8 + quantize math, but `weights_template` is exactly
+    /// 64 floats (one quant matrix) broadcast across all blocks rather
+    /// than `num_blocks × 64` per-block weights. Matches the shape of
+    /// [`Self::quantize_large_blocks_broadcast_w_persistent`] so the
+    /// encode/recon DCT8 path can adopt fused execution without
+    /// inflating PCIe traffic.
+    ///
+    /// Inputs:
+    /// - `pixels`: per-block pixel-domain blocks (`coeffs_per_block == 64`)
+    /// - `weights_template`: exactly 64 inverse-quant entries (one matrix)
+    /// - `qac_qm`: per-block scale slice (host)
+    /// - `thresholds`: 4-quadrant dead-zone thresholds
+    ///
+    /// Returns quantized i32 blocks (`GpuI32Blocks` with same num_blocks).
+    pub fn dct8_quantize_fused_broadcast_w_persistent(
+        &self,
+        pixels: &GpuBlocks<R>,
+        weights_template: &[f32],
+        qac_qm: &[f32],
+        thresholds: &[f32; 4],
+    ) -> GpuI32Blocks<R> {
+        assert_eq!(pixels.coeffs_per_block, 64);
+        assert_eq!(
+            weights_template.len(),
+            64,
+            "weights_template must be exactly 64 entries (got {})",
+            weights_template.len()
+        );
+        assert_eq!(qac_qm.len() as u32, pixels.num_blocks);
+        let n = pixels.total_floats();
+        let h_w = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(weights_template));
+        let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
+        let h_thr = self
+            .client_ref()
+            .create_from_slice(f32::as_bytes(thresholds));
+        let h_out = self.client_ref().empty(n * 4);
+        dct8_quantize_fused_broadcast_w_wide::<R>(
+            self.client_ref(),
+            pixels.handle.clone(),
+            h_w,
             h_qac,
             h_thr,
             h_out.clone(),
@@ -2768,6 +2827,53 @@ mod tests {
         assert_eq!(
             q_fused_host, q_split_host,
             "fused DCT+quant must match split"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_fused_dct8_quantize_broadcast_w_matches_perblock() {
+        // The broadcast-W fused variant must produce bit-identical
+        // quantized output to the per-block fused variant when the
+        // per-block weights are a tiled replica of the template.
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let nb = 16_u32;
+        let n = (nb as usize) * 64;
+
+        // Non-uniform pixels so the DCT outputs vary per block.
+        let pixels: Vec<f32> =
+            (0..n).map(|i| ((i.wrapping_mul(31) % 251) as f32 / 251.0 - 0.5) * 0.6).collect();
+        // Non-uniform per-coef weights template so the broadcast index
+        // path differs from a constant.
+        let weights_template: Vec<f32> = (0..64_usize)
+            .map(|i| 0.5 + 0.7 * ((i.wrapping_mul(17) % 251) as f32 / 251.0))
+            .collect();
+        let mut weights_replicated = vec![0.0_f32; n];
+        for b in 0..nb as usize {
+            weights_replicated[b * 64..(b + 1) * 64].copy_from_slice(&weights_template);
+        }
+        // Per-block qac varies — the kernel reads qac_qm[block_idx].
+        let qac: Vec<f32> = (0..nb as usize).map(|b| 3.5 + 0.1 * b as f32).collect();
+        let thr = [0.56_f32, 0.62, 0.62, 0.62];
+
+        let p_blocks = enc.upload_blocks(&pixels, nb, 64);
+        let w_blocks = enc.upload_blocks(&weights_replicated, nb, 64);
+
+        let q_perblock =
+            enc.dct8_quantize_fused_persistent(&p_blocks, &w_blocks, &qac, &thr);
+        let q_broadcast = enc.dct8_quantize_fused_broadcast_w_persistent(
+            &p_blocks,
+            &weights_template,
+            &qac,
+            &thr,
+        );
+
+        let q_perblock_host = enc.download_i32_blocks(&q_perblock);
+        let q_broadcast_host = enc.download_i32_blocks(&q_broadcast);
+        assert_eq!(
+            q_perblock_host, q_broadcast_host,
+            "broadcast-W fused must match per-block fused when weights are replicated"
         );
     }
 

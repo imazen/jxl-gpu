@@ -420,3 +420,117 @@ pub fn dct8_quantize_fused_wide_kernel(
         idx += 1u32;
     }
 }
+
+/// Broadcast-weights variant of [`fn@dct8_quantize_fused_wide_kernel`].
+///
+/// Identical math, but `weights` is a single 64-float template
+/// broadcast across all blocks (`weights[iu]` instead of
+/// `weights[off + iu]`). Saves `(num_blocks - 1) × 64 × 4` bytes of
+/// upload traffic when callers would have replicated the same matrix
+/// per-block — matches `quantize_large_blocks_broadcast_w_persistent`'s
+/// shape so the encode/recon DCT8 path can chain into the fused
+/// kernel without inflating PCIe traffic.
+#[cube(launch_unchecked)]
+pub fn dct8_quantize_fused_broadcast_w_wide_kernel(
+    pixels: &Array<f32>,
+    weights: &Array<f32>,
+    qac_qm: &Array<f32>,
+    thresholds: &Array<f32>,
+    output: &mut Array<i32>,
+) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = qac_qm.len();
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let off = block_idx * 64usize;
+    let unit = UNIT_POS;
+    let private_base = unit * 64u32;
+    let private_base_us = private_base as usize;
+
+    let mut scratch = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut transposed = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+
+    // ── Forward DCT8 (mirrors dct_8x8_wide_kernel) ─────────────────
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            scratch[private_base_us + row_off_us + cu] = pixels[off + row_off_us + cu];
+            c += 1u32;
+        }
+        dct1d_8_local(&mut scratch, private_base + row_off);
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            scratch[private_base_us + row_off_us + cu] =
+                scratch[private_base_us + row_off_us + cu] * ONE_OVER_8;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            transposed[private_base_us + cu * 8usize + ru] =
+                scratch[private_base_us + ru * 8usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        dct1d_8_local(&mut transposed, private_base + row_off);
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            transposed[private_base_us + row_off_us + cu] =
+                transposed[private_base_us + row_off_us + cu] * ONE_OVER_8;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // ── Quantize from shared memory using broadcast weights ────────
+    let qac = qac_qm[block_idx];
+    let t0 = thresholds[0usize];
+    let t1 = thresholds[1usize];
+    let t2 = thresholds[2usize];
+    let t3 = thresholds[3usize];
+
+    output[off] = 0i32; // DC
+
+    let mut idx: u32 = 1u32;
+    while idx < 64u32 {
+        let iu = idx as usize;
+        let y = idx / 8u32;
+        let x = idx - y * 8u32;
+        let row_hi = y >= 4u32;
+        let col_hi = x >= 4u32;
+        let thr = if row_hi {
+            if col_hi { t3 } else { t2 }
+        } else if col_hi {
+            t1
+        } else {
+            t0
+        };
+        let coef = transposed[private_base_us + iu];
+        // Broadcast weights: index by coef position (0..64), no `off`.
+        let val = coef * (1.0f32 / weights[iu]) * qac;
+        let absv = f32::abs(val);
+        output[off + iu] = if absv < thr {
+            i32::new(0)
+        } else {
+            round_ties_even_to_i32(val)
+        };
+        idx += 1u32;
+    }
+}
