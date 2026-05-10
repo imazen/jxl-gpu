@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 
 use cubecl::Runtime;
 use cubecl::prelude::*;
-use cubecl::server::Handle;
+use cubecl::server::{Handle, MemoryLayoutDescriptor};
 
 use crate::encoder::GpuEncoder;
 use crate::launch::dc_restore::restore_dc;
@@ -312,7 +312,6 @@ impl<R: Runtime> GpuEncoder<R> {
         width: u32,
         height: u32,
     ) -> (GpuPlane<R>, GpuPlane<R>, GpuPlane<R>) {
-        use cubecl::server::MemoryLayoutDescriptor;
         let n = (width as usize) * (height as usize);
         assert_eq!(r.len(), n, "r length mismatch");
         assert_eq!(g.len(), n, "g length mismatch");
@@ -1016,12 +1015,17 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(inv_weights_template.len() as u32, n);
         let total = block_c.total_floats();
         let num_blocks = block_c.num_blocks;
-        let h_w = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(weights_template));
-        let h_iw = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(inv_weights_template));
+        // Batched 2-way upload: weights + inv_weights in one storage
+        // alloc. Cost grid hot path — runs many times per encode.
+        let w_bytes = f32::as_bytes(weights_template);
+        let iw_bytes = f32::as_bytes(inv_weights_template);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
+            (MemoryLayoutDescriptor::contiguous([iw_bytes.len()].into(), 1), iw_bytes),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_iw = layouts.pop().expect("layouts[1]").memory;
+        let h_w = layouts.pop().expect("layouts[0]").memory;
         let h_err = self.client_ref().empty(total * 4);
         let h_out = self.client_ref().empty((num_blocks as usize) * 4 * 4);
         entropy_coeffs_pixel_broadcast_w::<R>(
@@ -1214,7 +1218,6 @@ impl<R: Runtime> GpuEncoder<R> {
         // amortization story as upload_planes_3ch (8469f3f8): one
         // storage allocation + one bulk transfer instead of 3
         // separate cudaMalloc + cudaMemcpy round-trips.
-        use cubecl::server::MemoryLayoutDescriptor;
         let w_bytes = f32::as_bytes(weights_template);
         let qac_bytes = f32::as_bytes(qac_qm);
         let thr_bytes = f32::as_bytes(&thresholds[..]);
@@ -1645,13 +1648,20 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(weights_template.len(), block_size);
         assert_eq!(qac_qm.len() as u32, coeffs.num_blocks);
         let n = coeffs.total_floats();
-        let h_w = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(weights_template));
-        let h_q = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
-        let h_t = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(&thresholds[..]));
+        // Batched 3-way upload: same amortization story as
+        // dct8_quantize_fused_broadcast_w_persistent (974c18f5).
+        let w_bytes = f32::as_bytes(weights_template);
+        let q_bytes = f32::as_bytes(qac_qm);
+        let t_bytes = f32::as_bytes(&thresholds[..]);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
+            (MemoryLayoutDescriptor::contiguous([q_bytes.len()].into(), 1), q_bytes),
+            (MemoryLayoutDescriptor::contiguous([t_bytes.len()].into(), 1), t_bytes),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_t = layouts.pop().expect("layouts[2]").memory;
+        let h_q = layouts.pop().expect("layouts[1]").memory;
+        let h_w = layouts.pop().expect("layouts[0]").memory;
         let h_o = self.client_ref().empty(n * 4);
         quantize_large_broadcast_w::<R>(
             self.client_ref(),
@@ -1693,12 +1703,16 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(weights_template.len(), bs);
         assert_eq!(qac_per_block.len() as u32, quant.num_blocks);
         let n = quant.total_ints();
-        let h_w = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(weights_template));
-        let h_q = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(qac_per_block));
+        // Batched 2-way upload: weights + qac in one storage alloc.
+        let w_bytes = f32::as_bytes(weights_template);
+        let q_bytes = f32::as_bytes(qac_per_block);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
+            (MemoryLayoutDescriptor::contiguous([q_bytes.len()].into(), 1), q_bytes),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_q = layouts.pop().expect("layouts[1]").memory;
+        let h_w = layouts.pop().expect("layouts[0]").memory;
         let h_o = self.client_ref().empty(n * 4);
         dequant_strategy_broadcast_w::<R>(
             self.client_ref(),
@@ -1740,12 +1754,16 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(weights_template.len(), bs);
         assert_eq!(qac_per_block.len() as u32, quant.num_blocks);
         let n = quant.total_ints();
-        let h_w = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(weights_template));
-        let h_q = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(qac_per_block));
+        // Batched 2-way upload: weights + qac in one storage alloc.
+        let w_bytes = f32::as_bytes(weights_template);
+        let q_bytes = f32::as_bytes(qac_per_block);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
+            (MemoryLayoutDescriptor::contiguous([q_bytes.len()].into(), 1), q_bytes),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_q = layouts.pop().expect("layouts[1]").memory;
+        let h_w = layouts.pop().expect("layouts[0]").memory;
         let h_o = self.client_ref().empty(n * 4);
         dequant_strategy_broadcast_w_dct8::<R>(
             self.client_ref(),
