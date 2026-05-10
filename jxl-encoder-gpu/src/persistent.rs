@@ -865,11 +865,19 @@ impl<R: Runtime> GpuEncoder<R> {
             flat.push(bx);
             flat.push(by);
         }
-        let h_coords = self.client_ref().create_from_slice(u32::as_bytes(&flat));
-        let h_w = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(weights_template));
-        let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
+        // Batched 3-way upload: coords + weights + qac.
+        let coords_b = u32::as_bytes(&flat);
+        let w_bytes = f32::as_bytes(weights_template);
+        let qac_b = f32::as_bytes(qac_qm);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([coords_b.len()].into(), 1), coords_b),
+            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
+            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_qac = layouts.pop().expect("layouts[2]").memory;
+        let h_w = layouts.pop().expect("layouts[1]").memory;
+        let h_coords = layouts.pop().expect("layouts[0]").memory;
         let dc_grid_len = dc_grid.total_floats();
         dequant_idct_dc_scatter_dct8::<R>(
             self.client_ref(),
@@ -1159,10 +1167,16 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(pixels.num_blocks, weights.num_blocks);
         assert_eq!(qac_qm.len() as u32, pixels.num_blocks);
         let n = pixels.total_floats();
-        let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
-        let h_thr = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(thresholds));
+        // Batched 2-way upload: qac + thresholds.
+        let qac_b = f32::as_bytes(qac_qm);
+        let thr_b = f32::as_bytes(thresholds);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
+            (MemoryLayoutDescriptor::contiguous([thr_b.len()].into(), 1), thr_b),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_thr = layouts.pop().expect("layouts[1]").memory;
+        let h_qac = layouts.pop().expect("layouts[0]").memory;
         let h_out = self.client_ref().empty(n * 4);
         dct8_quantize_fused_wide::<R>(
             self.client_ref(),
@@ -1554,10 +1568,16 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(coeffs.num_blocks, weights.num_blocks);
         assert_eq!(qac_qm.len() as u32, coeffs.num_blocks);
         let n = coeffs.total_floats();
-        let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
-        let h_thr = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(thresholds));
+        // Batched 2-way upload: qac + thresholds.
+        let qac_b = f32::as_bytes(qac_qm);
+        let thr_b = f32::as_bytes(thresholds);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
+            (MemoryLayoutDescriptor::contiguous([thr_b.len()].into(), 1), thr_b),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_thr = layouts.pop().expect("layouts[1]").memory;
+        let h_qac = layouts.pop().expect("layouts[0]").memory;
         let h_out = self.client_ref().empty(n * 4);
         quantize_dct8::<R>(
             self.client_ref(),
@@ -1597,10 +1617,16 @@ impl<R: Runtime> GpuEncoder<R> {
         assert_eq!(weights.coeffs_per_block, 64);
         assert_eq!(qac_qm.len() as u32, coeffs.num_blocks);
         let n = coeffs.total_floats();
-        let h_qac = self.client_ref().create_from_slice(f32::as_bytes(qac_qm));
-        let h_thr = self
-            .client_ref()
-            .create_from_slice(f32::as_bytes(thresholds));
+        // Batched 2-way upload: qac + thresholds.
+        let qac_b = f32::as_bytes(qac_qm);
+        let thr_b = f32::as_bytes(thresholds);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
+            (MemoryLayoutDescriptor::contiguous([thr_b.len()].into(), 1), thr_b),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_thr = layouts.pop().expect("layouts[1]").memory;
+        let h_qac = layouts.pop().expect("layouts[0]").memory;
         let h_out = self.client_ref().empty(n * 4);
         quantize_dct8_broadcast_w::<R>(
             self.client_ref(),
