@@ -3040,6 +3040,90 @@ mod tests {
         }
     }
 
+    /// Smoke test for the u8-input fast-path
+    /// [`LossyEncoder::prepare_strategy_search_plan_traced_from_u8`].
+    /// Verifies it runs end-to-end without panicking and produces a
+    /// strategy plan equivalent to the f32 path for the same content
+    /// (same number of assignments, plausible strategy distribution).
+    /// Bit-exact match is NOT asserted because the GPU sRGB EOTF
+    /// kernel and host EOTF can differ by ULP-level rounding, which
+    /// can flip strategy picks at boundaries.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_prepare_strategy_search_plan_from_u8_smoke() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        let w = 64_u32;
+        let h = 64_u32;
+        let lossy = LossyEncoder::new(&enc, w, h);
+        let n = (w * h) as usize;
+
+        // Synthetic interleaved sRGB u8 RGB. Plain gradient ensures
+        // every block falls into the same strategy (DCT8) — the test
+        // will tolerate strategy shifts but validates basic structure.
+        let mut pixels_u8: Vec<u8> = Vec::with_capacity(n * 3);
+        for i in 0..n {
+            let t = (i as f32 / n as f32) * 255.0;
+            pixels_u8.push((30.0 + 0.6 * t).clamp(0.0, 255.0) as u8);
+            pixels_u8.push((50.0 + 0.5 * t).clamp(0.0, 255.0) as u8);
+            pixels_u8.push((70.0 + 0.4 * t).clamp(0.0, 255.0) as u8);
+        }
+
+        // Host sRGB EOTF for the f32 reference path.
+        let to_linear = |c: u8| -> f32 {
+            let v = c as f32 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let mut r_lin = Vec::with_capacity(n);
+        let mut g_lin = Vec::with_capacity(n);
+        let mut b_lin = Vec::with_capacity(n);
+        for chunk in pixels_u8.chunks_exact(3) {
+            r_lin.push(to_linear(chunk[0]));
+            g_lin.push(to_linear(chunk[1]));
+            b_lin.push(to_linear(chunk[2]));
+        }
+
+        // f32 reference plan + u8 fast-path plan.
+        let plan_f32 = lossy.prepare_strategy_search_plan(&enc, &r_lin, &g_lin, &b_lin, 1.0);
+        let plan_u8 =
+            lossy.prepare_strategy_search_plan_traced_from_u8(&enc, &pixels_u8, 1.0, &mut |_| {});
+
+        // Structural parity: same number of assignments, same padded dims.
+        assert_eq!(plan_f32.assignments.len(), plan_u8.assignments.len());
+        assert_eq!(plan_f32.padded_width, plan_u8.padded_width);
+        assert_eq!(plan_f32.padded_height, plan_u8.padded_height);
+        assert_eq!(plan_f32.target_distance, plan_u8.target_distance);
+
+        // Strategy distribution should be very close (allow tiny
+        // boundary flips from sRGB EOTF rounding differences). For a
+        // smooth gradient at d=1 we expect 100% DCT8 from both paths.
+        use std::collections::BTreeMap;
+        let histo = |plan: &StrategySearchPlan<B>| -> BTreeMap<u8, usize> {
+            let mut h = BTreeMap::new();
+            for a in &plan.assignments {
+                *h.entry(a.raw_strategy).or_insert(0) += 1;
+            }
+            h
+        };
+        let h_f32 = histo(&plan_f32);
+        let h_u8 = histo(&plan_u8);
+        // Expect ≥ 95% agreement on the dominant strategy. (Smooth
+        // gradient → DCT8 dominant. Allow a few flips from EOTF noise.)
+        let dominant = *h_f32.iter().max_by_key(|(_, c)| **c).unwrap().0;
+        let f32_dom = *h_f32.get(&dominant).unwrap();
+        let u8_dom = *h_u8.get(&dominant).unwrap_or(&0);
+        let agreement = u8_dom as f32 / f32_dom as f32;
+        assert!(
+            agreement >= 0.95,
+            "u8 path dominant-strategy agreement too low: {:.3} (h_f32={:?}, h_u8={:?})",
+            agreement, h_f32, h_u8,
+        );
+    }
+
     /// Phase A MVP smoke test: encode_one_with_strategy_search_dct8_16
     /// runs end-to-end on a 64×64 gradient, produces finite output of
     /// correct size. Quality validation deferred to demo + corpus
