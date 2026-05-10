@@ -228,9 +228,17 @@ impl<R: Runtime> GpuEncoder<R> {
 
     /// Allocate a zero-filled GPU plane of the given shape. Useful as
     /// a destination for kernels that take pre-allocated outputs.
+    ///
+    /// The buffer is uploaded as `vec![0.0; n]` rather than via
+    /// `client.empty()` because the cubecl `empty()` returns
+    /// uninitialized memory, contradicting this function's "zero-filled"
+    /// contract — see test_indexed_scatter_roundtrip_with_gather (where
+    /// the originally-broken alloc_plane silently broke a sparse-scatter
+    /// roundtrip's untouched-pixel assertion).
     pub fn alloc_plane(&self, width: u32, height: u32) -> GpuPlane<R> {
         let n = (width as usize) * (height as usize);
-        let handle = self.client_ref().empty(n * 4);
+        let zeros = alloc::vec![0.0_f32; n];
+        let handle = self.client_ref().create_from_slice(f32::as_bytes(&zeros));
         GpuPlane {
             handle,
             width,
@@ -586,9 +594,15 @@ impl<R: Runtime> GpuEncoder<R> {
     }
 
     /// Allocate zero-filled per-block GPU buffer.
+    ///
+    /// See [`Self::alloc_plane`] for the rationale on uploading
+    /// `vec![0; n]` instead of using `client.empty()` (which returns
+    /// uninitialized memory and silently breaks the "zero-filled"
+    /// docstring contract).
     pub fn alloc_blocks(&self, num_blocks: u32, coeffs_per_block: u32) -> GpuBlocks<R> {
         let n = (num_blocks as usize) * (coeffs_per_block as usize);
-        let handle = self.client_ref().empty(n * 4);
+        let zeros = alloc::vec![0.0_f32; n];
+        let handle = self.client_ref().create_from_slice(f32::as_bytes(&zeros));
         GpuBlocks {
             handle,
             num_blocks,
@@ -2970,6 +2984,36 @@ mod tests {
         );
     }
 
+    /// `alloc_plane` and `alloc_blocks` MUST return zero-filled
+    /// buffers — the docstrings claim it. The originally-broken impl
+    /// used `client.empty()` (uninitialized memory) and silently
+    /// produced non-zero garbage, which broke
+    /// test_indexed_scatter_roundtrip_with_gather. This guard test
+    /// would have caught that.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_alloc_plane_and_alloc_blocks_are_zero_filled() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        for &(w, h) in &[(8u32, 8u32), (32, 32), (64, 48)] {
+            let p = enc.alloc_plane(w, h);
+            let host = enc.download_plane(&p);
+            for (i, &v) in host.iter().enumerate() {
+                assert_eq!(v, 0.0_f32, "alloc_plane {w}×{h} index {i} not zero: {v}");
+            }
+        }
+        for &(nb, cpb) in &[(1u32, 64u32), (8, 256), (32, 1024)] {
+            let b = enc.alloc_blocks(nb, cpb);
+            let host = enc.download_blocks(&b);
+            for (i, &v) in host.iter().enumerate() {
+                assert_eq!(
+                    v, 0.0_f32,
+                    "alloc_blocks {nb}×{cpb} index {i} not zero: {v}"
+                );
+            }
+        }
+    }
+
     /// `indexed_scatter_blocks_persistent` must round-trip with
     /// `indexed_gather_blocks_persistent`: gathering a sparse subset
     /// of (bx, by) tiles from a plane and then scattering them back to
@@ -3001,10 +3045,9 @@ mod tests {
             }
             let g_blocks =
                 enc.indexed_gather_blocks_persistent(&g_plane, &coords, tile_w, tile_h);
-            // Upload an explicitly-zero-initialized destination — alloc_plane
-            // returns uninitialized memory (cubecl's empty(); see persistent.rs:231).
-            let zero = vec![0.0_f32; n];
-            let g_dst = enc.upload_plane(&zero, pw, ph);
+            // alloc_plane is now actually zero-filled (see
+            // test_alloc_plane_and_alloc_blocks_are_zero_filled).
+            let g_dst = enc.alloc_plane(pw, ph);
             enc.indexed_scatter_blocks_persistent(&g_blocks, &coords, &g_dst, tile_w, tile_h);
             let dst = enc.download_plane(&g_dst);
             // Build expected: 0 everywhere, original pixels in covered tiles.
