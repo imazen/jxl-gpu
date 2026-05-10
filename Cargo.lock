@@ -1868,6 +1868,7 @@ dependencies = [
  "butteraugli-gpu",
  "bytemuck",
  "cubecl",
+ "cudarc",
  "fast-ssim2",
  "image",
  "imgref",

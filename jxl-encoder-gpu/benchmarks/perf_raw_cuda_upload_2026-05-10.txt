@@ -1,0 +1,33 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.12s
+     Running `target/release/examples/perf_raw_cuda_upload`
+perf_raw_cuda_upload: cudarc 0.19, RTX-class GPU
+warmup=1, runs=5, all sizes in bytes
+
+device 0: NVIDIA GeForce RTX 5070  (cap (12, 0), has_async_alloc=true)
+
+=== cudaMalloc + cudaFree (no copy) ===
+size                                  min ms   median ms     mean ms
+  4 MB (1 MP f32 plane)                  0.160       0.171       0.170
+  48 MB (16 MP RGB u8 interleaved)       0.168       0.184       0.189
+  192 MB (16 MP × 3 padded f32 planes)       0.467       0.483       0.544
+
+=== Path B: pageable Vec<u8> → device (cuMemcpyHtoD_v2 sync) ===
+size                                  min ms   median ms     mean ms  GB/s (min)
+  4 MB (1 MP f32 plane)                  0.305       0.343       0.341      13.745
+  48 MB (16 MP RGB u8 interleaved)       3.930       4.617       4.467      12.806
+  192 MB (16 MP × 3 padded f32 planes)      18.261      18.492      18.605      11.025
+
+=== Path C: pinned host → device (cuMemHostAlloc + cuMemcpyHtoDAsync) ===
+size                                  min ms   median ms     mean ms  GB/s (min)
+  4 MB (1 MP f32 plane)                  0.128       0.129       0.131      32.873
+  48 MB (16 MP RGB u8 interleaved)       1.067       1.092       1.096      47.190
+  192 MB (16 MP × 3 padded f32 planes)       4.050       4.078       4.074      49.715
+
+=== Cubecl-side reference (already measured, separate run) ===
+  size                               median ms  GB/s (effective)  vs PCIe ~16 GB/s
+  4 MB f32 plane (cubecl)                 3.18            1.26           0.08×
+  48 MB u8 RGB (cubecl)                    298            0.16           0.01×
+  192 MB f32 padded (cubecl)              1423            0.13          0.008×
+
+Deltas above show how much bandwidth cubecl 0.10's create_from_slice
+is leaving on the table relative to raw cuMemcpyHtoD.

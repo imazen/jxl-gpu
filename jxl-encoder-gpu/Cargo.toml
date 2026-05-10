@@ -47,3 +47,16 @@ image = { workspace = true }
 jxl = { workspace = true }
 fast-ssim2 = { workspace = true }
 imgref = { workspace = true }
+# Raw CUDA driver bindings — used only by examples/perf_raw_cuda_upload.rs
+# to benchmark cuMemcpyHtoD directly, bypassing cubecl. Matches the
+# version cubecl-cuda already pulls in transitively (0.19.x), so no
+# extra resolver pain. Features kept minimal: just driver + std.
+# cuda-version-from-build-system + fallback-* match cubecl-cuda's
+# feature set to ensure unified linkage.
+cudarc = { version = "0.19.4", default-features = false, features = [
+    "std",
+    "driver",
+    "cuda-version-from-build-system",
+    "fallback-dynamic-loading",
+    "fallback-latest",
+] }
