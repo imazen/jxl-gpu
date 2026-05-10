@@ -101,6 +101,7 @@
 use alloc::vec::Vec;
 
 use cubecl::Runtime;
+use cubecl::prelude::*;
 
 use crate::encoder::GpuEncoder;
 
@@ -872,26 +873,31 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
     let g_pix_err_b = enc.idct_8x8_persistent(&g_b_err);
 
     // Step 4: per-channel masked 8th-power pixel loss (no sync).
-    let g_loss_x = enc.pixel_loss_blocks_persistent(
+    // Upload mask_row_base ONCE and reuse the handle across the 3
+    // channel pixel_loss calls — saves 2 cudaMallocs.
+    let h_mrb = enc
+        .client_ref()
+        .create_from_slice(u32::as_bytes(mask_row_base));
+    let g_loss_x = enc.pixel_loss_blocks_with_handle_persistent(
         &g_pix_err_x,
         mask_plane,
-        mask_row_base,
+        &h_mrb,
         MASK_CHANNEL_OFFSET[0],
         8,
         8,
     );
-    let g_loss_y = enc.pixel_loss_blocks_persistent(
+    let g_loss_y = enc.pixel_loss_blocks_with_handle_persistent(
         &g_pix_err_y,
         mask_plane,
-        mask_row_base,
+        &h_mrb,
         MASK_CHANNEL_OFFSET[1],
         8,
         8,
     );
-    let g_loss_b = enc.pixel_loss_blocks_persistent(
+    let g_loss_b = enc.pixel_loss_blocks_with_handle_persistent(
         &g_pix_err_b,
         mask_plane,
-        mask_row_base,
+        &h_mrb,
         MASK_CHANNEL_OFFSET[2],
         8,
         8,
@@ -1252,26 +1258,31 @@ pub fn estimate_entropy_full_strategy_batch_persistent<R: Runtime>(
     let g_pix_err_b = apply_idct_batch_persistent(enc, &g_b_err, raw_strategy);
 
     // Step 4: per-channel masked 8th-power pixel loss (no sync).
-    let g_loss_x = enc.pixel_loss_blocks_persistent(
+    // Upload mask_row_base ONCE and reuse the handle across the 3
+    // channel pixel_loss calls — saves 2 cudaMallocs per cost grid.
+    let h_mrb = enc
+        .client_ref()
+        .create_from_slice(u32::as_bytes(mask_row_base));
+    let g_loss_x = enc.pixel_loss_blocks_with_handle_persistent(
         &g_pix_err_x,
         mask_plane,
-        mask_row_base,
+        &h_mrb,
         MASK_CHANNEL_OFFSET[0],
         block_w as u32,
         block_h as u32,
     );
-    let g_loss_y = enc.pixel_loss_blocks_persistent(
+    let g_loss_y = enc.pixel_loss_blocks_with_handle_persistent(
         &g_pix_err_y,
         mask_plane,
-        mask_row_base,
+        &h_mrb,
         MASK_CHANNEL_OFFSET[1],
         block_w as u32,
         block_h as u32,
     );
-    let g_loss_b = enc.pixel_loss_blocks_persistent(
+    let g_loss_b = enc.pixel_loss_blocks_with_handle_persistent(
         &g_pix_err_b,
         mask_plane,
-        mask_row_base,
+        &h_mrb,
         MASK_CHANNEL_OFFSET[2],
         block_w as u32,
         block_h as u32,

@@ -1095,16 +1095,43 @@ impl<R: Runtime> GpuEncoder<R> {
         block_width: u32,
         block_height: u32,
     ) -> GpuBlocks<R> {
+        let h_mrb = self
+            .client_ref()
+            .create_from_slice(u32::as_bytes(mask_row_base));
+        self.pixel_loss_blocks_with_handle_persistent(
+            pixel_error,
+            mask_plane,
+            &h_mrb,
+            mask_offset,
+            block_width,
+            block_height,
+        )
+    }
+
+    /// Variant of [`Self::pixel_loss_blocks_persistent`] that takes a
+    /// pre-uploaded `mask_row_base` GPU handle instead of a host slice.
+    /// Lets cost-grid callers upload mask_row_base ONCE per (tile size,
+    /// strategy) and reuse across the 3 channel pixel_loss calls,
+    /// skipping 2 redundant cudaMallocs per cost grid evaluation.
+    ///
+    /// Caller must ensure the handle's underlying buffer holds
+    /// `pixel_error.num_blocks` u32 values (4 bytes each).
+    #[allow(clippy::too_many_arguments)]
+    pub fn pixel_loss_blocks_with_handle_persistent(
+        &self,
+        pixel_error: &GpuBlocks<R>,
+        mask_plane: &GpuPlane<R>,
+        mask_row_base_handle: &Handle,
+        mask_offset: f32,
+        block_width: u32,
+        block_height: u32,
+    ) -> GpuBlocks<R> {
         let num_blocks = pixel_error.num_blocks;
         assert_eq!(
             pixel_error.coeffs_per_block,
             block_width * block_height,
             "pixel_error coeffs_per_block must equal block_width*block_height"
         );
-        assert_eq!(mask_row_base.len() as u32, num_blocks);
-        let h_mrb = self
-            .client_ref()
-            .create_from_slice(u32::as_bytes(mask_row_base));
         // Output: num_blocks × f64 = num_blocks × 8 bytes.
         let h_out = self.client_ref().empty((num_blocks as usize) * 8);
         let mask_len = (mask_plane.width as usize) * (mask_plane.height as usize);
@@ -1112,7 +1139,7 @@ impl<R: Runtime> GpuEncoder<R> {
             self.client_ref(),
             pixel_error.handle.clone(),
             mask_plane.handle.clone(),
-            h_mrb,
+            mask_row_base_handle.clone(),
             h_out.clone(),
             num_blocks,
             mask_len,
