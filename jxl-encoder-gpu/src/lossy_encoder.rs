@@ -962,7 +962,7 @@ impl<R: Runtime> LossyEncoder<R> {
             compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16,
             strategy_search_costs_dct32x16_or_16x32, strategy_search_costs_dct32x32,
             strategy_search_costs_dct64x32_or_32x64, strategy_search_costs_dct64x64,
-            strategy_search_costs_dct8_16x16, strategy_search_costs_subblock_8x8,
+            strategy_search_costs_dct8_16x16_persistent, strategy_search_costs_subblock_8x8,
         };
         use crate::forks::reconstruct::compute_dc_grid_per_8x8_block;
         use crate::forks::transform::{
@@ -1069,11 +1069,21 @@ impl<R: Runtime> LossyEncoder<R> {
         const K_FAVOR_2X2: f32 = -0.4;
         let mul_8x8 = 1.0 + K_FAVOR_2X2 / (distance + 1.4);
 
-        let (mut cost_dct8, mut cost_dct16) = strategy_search_costs_dct8_16x16(
+        // Pre-gather 8x8 GpuBlocks ONCE — reused by both the DCT8 cost
+        // grid (via the persistent dct8_16x16 variant below) and all 5
+        // 8x8 sub-block cost grids further down.
+        let g_8x = enc.gather_blocks_persistent(&xx_g, 8, 8);
+        let g_8y = enc.gather_blocks_persistent(&xy_g, 8, 8);
+        let g_8b = enc.gather_blocks_persistent(&xb_g, 8, 8);
+
+        let (mut cost_dct8, mut cost_dct16) = strategy_search_costs_dct8_16x16_persistent(
             enc,
-            &xyb_x,
-            &xyb_y,
-            &xyb_b,
+            &g_8x,
+            &g_8y,
+            &g_8b,
+            &xx_g,
+            &xy_g,
+            &xb_g,
             pw,
             ph,
             &g_mask,
@@ -1124,13 +1134,8 @@ impl<R: Runtime> LossyEncoder<R> {
         }
 
         // 8x8 sub-block strategies (DCT4x4, DCT4x8, DCT8x4, IDENTITY,
-        // DCT2x2). All extract 8x8 tiles → 64 coefs. We pre-gather
-        // 8x8 blocks ONCE on GPU (xx_g/xy_g/xb_g are still resident),
-        // then run all 5 cost-grid producers against the same GpuBlocks.
-        let g_8x = enc.gather_blocks_persistent(&xx_g, 8, 8);
-        let g_8y = enc.gather_blocks_persistent(&xy_g, 8, 8);
-        let g_8b = enc.gather_blocks_persistent(&xb_g, 8, 8);
-
+        // DCT2x2). Reuse the GpuBlocks gathered above for the DCT8 cost
+        // grid — all 5 strategies extract 8x8 tiles → 64 coefs.
         let (dct4x4_x, dct4x4_y, dct4x4_b) = dct4x4_weights_per_channel();
         let inv_4x4_x: Vec<f32> = dct4x4_x.iter().map(|w| 1.0 / w).collect();
         let inv_4x4_y: Vec<f32> = dct4x4_y.iter().map(|w| 1.0 / w).collect();

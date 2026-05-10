@@ -1588,6 +1588,141 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
     (cost_dct8, cost_dct16x16)
 }
 
+/// Persistent variant of [`strategy_search_costs_dct8_16x16`] that
+/// takes pre-gathered DCT8 GpuBlocks (caller already paid the 8x8
+/// gather for sub-block strategies) and XYB GpuPlanes for the 16x16
+/// gather inside this function. Same `(cost_dct8, cost_dct16x16)`
+/// return shape as the host-slice variant.
+///
+/// **Why**: lossy_encoder.rs already gathers 8x8 GpuBlocks for the
+/// sub-block strategies (DCT4x4/DCT4x8/DCT8x4/IDENTITY/DCT2X2). With
+/// this variant, the DCT8 cost-grid call reuses those same GpuBlocks
+/// instead of re-uploading the host-repacked equivalent. The DCT16x16
+/// cost grid gathers 16x16 internally on GPU, also skipping the host
+/// repack + upload roundtrip.
+///
+/// At 1024² this saves: 3× host repack (~10 ms) + 3× upload of 4 MB
+/// per channel (8x8 layout) + 3× repack-and-upload at 16x16 layout.
+/// Most of the savings come from removing the 24 MB of redundant
+/// PCIe traffic.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct8_16x16_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    g_8x: &crate::persistent::GpuBlocks<R>,
+    g_8y: &crate::persistent::GpuBlocks<R>,
+    g_8b: &crate::persistent::GpuBlocks<R>,
+    xyb_plane_x: &crate::persistent::GpuPlane<R>,
+    xyb_plane_y: &crate::persistent::GpuPlane<R>,
+    xyb_plane_b: &crate::persistent::GpuPlane<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    weights_dct8_x: &[f32],
+    weights_dct8_y: &[f32],
+    weights_dct8_b: &[f32],
+    inv_weights_dct8_x: &[f32],
+    inv_weights_dct8_y: &[f32],
+    inv_weights_dct8_b: &[f32],
+    weights_dct16x16_x: &[f32],
+    weights_dct16x16_y: &[f32],
+    weights_dct16x16_b: &[f32],
+    inv_weights_dct16x16_x: &[f32],
+    inv_weights_dct16x16_y: &[f32],
+    inv_weights_dct16x16_b: &[f32],
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+) -> (Vec<f32>, Vec<f32>) {
+    let xsize_blocks_8 = padded_width / 8;
+    let ysize_blocks_8 = padded_height / 8;
+    let n_blocks_8 = xsize_blocks_8 * ysize_blocks_8;
+    debug_assert_eq!(g_8x.num_blocks() as usize, n_blocks_8);
+    debug_assert_eq!(g_8x.coeffs_per_block(), 64);
+
+    let mask_row_base_8: Vec<u32> = (0..n_blocks_8)
+        .map(|i| {
+            let bx = i % xsize_blocks_8;
+            let by = i / xsize_blocks_8;
+            (by * 8 * padded_width + bx * 8) as u32
+        })
+        .collect();
+
+    // libjxl entropy_mul for DCT8: profile.entropy_mul_table[DCT8] = 0.8
+    let dct8_entropy_mul = 0.8_f32;
+    let cost_dct8 = estimate_entropy_full_dct8_batch_persistent(
+        enc,
+        g_8x,
+        g_8y,
+        g_8b,
+        weights_dct8_x.try_into().expect("64-float DCT8 weights X"),
+        weights_dct8_y.try_into().expect("64-float DCT8 weights Y"),
+        weights_dct8_b.try_into().expect("64-float DCT8 weights B"),
+        inv_weights_dct8_x.try_into().expect("64-float DCT8 inv_weights X"),
+        inv_weights_dct8_y.try_into().expect("64-float DCT8 inv_weights Y"),
+        inv_weights_dct8_b.try_into().expect("64-float DCT8 inv_weights B"),
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        &mask_row_base_8,
+        scaled_constants,
+        dct8_entropy_mul,
+        CostMode::Upstream {
+            quant_for_coeffs: quant_y,
+        },
+    );
+
+    // DCT16x16 cost grid: gather 16×16 blocks on GPU.
+    let xsize_blocks_16 = padded_width / 16;
+    let ysize_blocks_16 = padded_height / 16;
+    let n_blocks_16 = xsize_blocks_16 * ysize_blocks_16;
+    let g_bx16 = enc.gather_blocks_persistent(xyb_plane_x, 16, 16);
+    let g_by16 = enc.gather_blocks_persistent(xyb_plane_y, 16, 16);
+    let g_bb16 = enc.gather_blocks_persistent(xyb_plane_b, 16, 16);
+    let mask_row_base_16: Vec<u32> = (0..n_blocks_16)
+        .map(|i| {
+            let bx = i % xsize_blocks_16;
+            let by = i / xsize_blocks_16;
+            (by * 16 * padded_width + bx * 16) as u32
+        })
+        .collect();
+
+    // libjxl entropy_mul for DCT16x16: profile.entropy_mul_table[DCT16X16] = 1.34
+    let dct16x16_entropy_mul = 1.34_f32;
+    let cost_dct16x16 = estimate_entropy_full_strategy_batch_persistent(
+        enc,
+        &g_bx16,
+        &g_by16,
+        &g_bb16,
+        crate::forks::transform::RAW_STRATEGY_DCT16X16,
+        weights_dct16x16_x,
+        weights_dct16x16_y,
+        weights_dct16x16_b,
+        inv_weights_dct16x16_x,
+        inv_weights_dct16x16_y,
+        inv_weights_dct16x16_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        &mask_row_base_16,
+        scaled_constants,
+        dct16x16_entropy_mul,
+        CostMode::Upstream {
+            quant_for_coeffs: quant_y,
+        },
+    );
+
+    (cost_dct8, cost_dct16x16)
+}
+
 /// Cost grid for DCT32x32, sharing inputs with the other strategy
 /// search helpers. Needs the padded plane to have both dims multiples
 /// of 32 (returns an empty Vec otherwise — caller skips the strategy).
