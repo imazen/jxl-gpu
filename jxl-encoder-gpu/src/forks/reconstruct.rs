@@ -649,7 +649,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         let coords_u32: Vec<(u32, u32)> =
             coords.iter().map(|&(bx, by)| (bx as u32, by as u32)).collect();
         let g_pixels = enc.indexed_gather_blocks_persistent(
-            &g_plane,
+            g_plane,
             &coords_u32,
             tile_w as u32,
             tile_h as u32,
@@ -690,7 +690,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             // GPU LLF restore: writes dc_grid[by * stride + bx] into
             // position 0 of each block. AC positions untouched.
             enc.set_dc_from_grid_indexed_persistent(
-                &g_dc_grid,
+                g_dc_grid,
                 &coords_u32,
                 &g_dequant,
                 xsize_blocks_8 as u32,
@@ -705,7 +705,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
-                &g_out_plane,
+                g_out_plane,
                 tile_w as u32,
                 tile_h as u32,
             );
@@ -723,15 +723,15 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         {
             if raw_strategy == RAW_STRATEGY_DCT64X64 {
                 enc.set_llf_dct64x64_indexed_persistent(
-                    &g_dc_grid, &coords_u32, &g_dequant, xsize_blocks_8 as u32,
+                    g_dc_grid, &coords_u32, &g_dequant, xsize_blocks_8 as u32,
                 );
             } else if raw_strategy == RAW_STRATEGY_DCT64X32 {
                 enc.set_llf_dct64x32_indexed_persistent(
-                    &g_dc_grid, &coords_u32, &g_dequant, xsize_blocks_8 as u32,
+                    g_dc_grid, &coords_u32, &g_dequant, xsize_blocks_8 as u32,
                 );
             } else {
                 enc.set_llf_dct32x64_indexed_persistent(
-                    &g_dc_grid, &coords_u32, &g_dequant, xsize_blocks_8 as u32,
+                    g_dc_grid, &coords_u32, &g_dequant, xsize_blocks_8 as u32,
                 );
             }
             let g_recon = crate::forks::transform::apply_idct_batch_persistent(
@@ -742,7 +742,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
-                &g_out_plane,
+                g_out_plane,
                 tile_w as u32,
                 tile_h as u32,
             );
@@ -754,7 +754,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         use crate::forks::transform::{RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16};
         if raw_strategy == RAW_STRATEGY_DCT32X16 {
             enc.set_llf_dct32x16_indexed_persistent(
-                &g_dc_grid,
+                g_dc_grid,
                 &coords_u32,
                 &g_dequant,
                 xsize_blocks_8 as u32,
@@ -767,7 +767,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
-                &g_out_plane,
+                g_out_plane,
                 tile_w as u32,
                 tile_h as u32,
             );
@@ -776,7 +776,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         }
         if raw_strategy == RAW_STRATEGY_DCT16X32 {
             enc.set_llf_dct16x32_indexed_persistent(
-                &g_dc_grid,
+                g_dc_grid,
                 &coords_u32,
                 &g_dequant,
                 xsize_blocks_8 as u32,
@@ -789,7 +789,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
-                &g_out_plane,
+                g_out_plane,
                 tile_w as u32,
                 tile_h as u32,
             );
@@ -801,7 +801,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         use crate::forks::transform::RAW_STRATEGY_DCT32X32;
         if raw_strategy == RAW_STRATEGY_DCT32X32 {
             enc.set_llf_dct32x32_indexed_persistent(
-                &g_dc_grid,
+                g_dc_grid,
                 &coords_u32,
                 &g_dequant,
                 xsize_blocks_8 as u32,
@@ -814,7 +814,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
-                &g_out_plane,
+                g_out_plane,
                 tile_w as u32,
                 tile_h as u32,
             );
@@ -826,7 +826,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         use crate::forks::transform::RAW_STRATEGY_DCT16X16;
         if raw_strategy == RAW_STRATEGY_DCT16X16 {
             enc.set_llf_dct16x16_indexed_persistent(
-                &g_dc_grid,
+                g_dc_grid,
                 &coords_u32,
                 &g_dequant,
                 xsize_blocks_8 as u32,
@@ -839,7 +839,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
-                &g_out_plane,
+                g_out_plane,
                 tile_w as u32,
                 tile_h as u32,
             );
@@ -860,7 +860,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 1u32
             };
             enc.set_llf_dct16x8_or_8x16_indexed_persistent(
-                &g_dc_grid,
+                g_dc_grid,
                 &coords_u32,
                 &g_dequant,
                 xsize_blocks_8 as u32,
@@ -874,7 +874,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
-                &g_out_plane,
+                g_out_plane,
                 tile_w as u32,
                 tile_h as u32,
             );
