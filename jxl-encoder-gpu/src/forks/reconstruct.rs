@@ -392,7 +392,20 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     };
     use crate::pipeline::group_assignments_by_strategy;
 
-    debug_assert_eq!(xyb_channel.len(), padded_width * padded_height);
+    // `xyb_channel` is the host XYB plane and only consumed by the AFV
+    // branch (line ~568) and the upload-fallback when `xyb_channel_gpu`
+    // is None (line ~439). Production callers pass the gaborished plane
+    // via `xyb_channel_gpu` and an empty `xyb_channel` (see
+    // `prepare_strategy_search_plan_inner` — host slices are nulled out
+    // for the no-download optimization). Allow empty in that case;
+    // require padded-size when callers actually need the host slice.
+    debug_assert!(
+        xyb_channel_gpu.is_some() || xyb_channel.len() == padded_width * padded_height,
+        "xyb_channel must have padded_width*padded_height entries when \
+         xyb_channel_gpu is None (got len {}, expected {})",
+        xyb_channel.len(),
+        padded_width * padded_height,
+    );
     // `out_plane` must be supplied unless `out_plane_gpu` covers all
     // strategies (which it does when Some — both the GPU strategies'
     // scatter target and the AFV branch's GPU scatter target). When
@@ -413,7 +426,19 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     let xsize_blocks_8 = padded_width / 8;
     let ysize_blocks_8 = padded_height / 8;
     debug_assert_eq!(qac_per_8x8_block.len(), xsize_blocks_8 * ysize_blocks_8);
-    debug_assert_eq!(dc_grid_per_8x8_block.len(), xsize_blocks_8 * ysize_blocks_8);
+    // Same nullability rule as `xyb_channel`: when the caller provides
+    // `dc_grid_gpu`, the `dc_grid_per_8x8_block` host slice may be empty
+    // (production callers from `prepare_strategy_search_plan_inner`
+    // null it out for the no-download optimization). Require padded-size
+    // when the host slice is the upload source.
+    debug_assert!(
+        dc_grid_gpu.is_some()
+            || dc_grid_per_8x8_block.len() == xsize_blocks_8 * ysize_blocks_8,
+        "dc_grid_per_8x8_block must have xsize_blocks_8*ysize_blocks_8 entries when \
+         dc_grid_gpu is None (got len {}, expected {})",
+        dc_grid_per_8x8_block.len(),
+        xsize_blocks_8 * ysize_blocks_8,
+    );
 
     let groups = group_assignments_by_strategy(assignments);
 
