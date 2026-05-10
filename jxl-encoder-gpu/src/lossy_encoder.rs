@@ -1043,10 +1043,13 @@ impl<R: Runtime> LossyEncoder<R> {
         let r_pad = pad_to_alignment(r, w, h, pw, ph);
         let g_pad = pad_to_alignment(g, w, h, pw, ph);
         let b_pad = pad_to_alignment(b, w, h, pw, ph);
+        mark("pad_only");
         let g_r = enc.upload_plane(&r_pad, self.padded_width, self.padded_height);
+        mark("upload_r");
         let g_g = enc.upload_plane(&g_pad, self.padded_width, self.padded_height);
+        mark("upload_g");
         let g_b = enc.upload_plane(&b_pad, self.padded_width, self.padded_height);
-        mark("pad_upload");
+        mark("upload_b");
 
         // Stage 2: XYB + gaborish (GPU)
         let (xx, xy, xb) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
