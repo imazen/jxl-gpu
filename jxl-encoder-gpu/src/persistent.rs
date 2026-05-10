@@ -1820,11 +1820,25 @@ impl<R: Runtime> GpuEncoder<R> {
             assert_eq!(s.len() as u32, nb);
         }
         let n = (nb as usize) * 64;
-        let h_qmx = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_x));
-        let h_qmy = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_y));
-        let h_qmb = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_b));
-        let h_xf = self.client_ref().create_from_slice(f32::as_bytes(x_factor));
-        let h_bf = self.client_ref().create_from_slice(f32::as_bytes(b_factor));
+        // Batched 5-way upload: 3 per-channel qac + 2 CfL factors.
+        let qmx_b = f32::as_bytes(qac_qm_x);
+        let qmy_b = f32::as_bytes(qac_qm_y);
+        let qmb_b = f32::as_bytes(qac_qm_b);
+        let xf_b = f32::as_bytes(x_factor);
+        let bf_b = f32::as_bytes(b_factor);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([qmx_b.len()].into(), 1), qmx_b),
+            (MemoryLayoutDescriptor::contiguous([qmy_b.len()].into(), 1), qmy_b),
+            (MemoryLayoutDescriptor::contiguous([qmb_b.len()].into(), 1), qmb_b),
+            (MemoryLayoutDescriptor::contiguous([xf_b.len()].into(), 1), xf_b),
+            (MemoryLayoutDescriptor::contiguous([bf_b.len()].into(), 1), bf_b),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_bf = layouts.pop().expect("layouts[4]").memory;
+        let h_xf = layouts.pop().expect("layouts[3]").memory;
+        let h_qmb = layouts.pop().expect("layouts[2]").memory;
+        let h_qmy = layouts.pop().expect("layouts[1]").memory;
+        let h_qmx = layouts.pop().expect("layouts[0]").memory;
         let h_ox = self.client_ref().empty(n * 4);
         let h_oy = self.client_ref().empty(n * 4);
         let h_ob = self.client_ref().empty(n * 4);
@@ -1889,11 +1903,25 @@ impl<R: Runtime> GpuEncoder<R> {
             assert_eq!(s.len() as u32, nb);
         }
         let n = (nb as usize) * 64;
-        let h_qmx = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_x));
-        let h_qmy = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_y));
-        let h_qmb = self.client_ref().create_from_slice(f32::as_bytes(qac_qm_b));
-        let h_xf = self.client_ref().create_from_slice(f32::as_bytes(x_factor));
-        let h_bf = self.client_ref().create_from_slice(f32::as_bytes(b_factor));
+        // Batched 5-way upload: 3 per-channel qac + 2 CfL factors.
+        let qmx_b = f32::as_bytes(qac_qm_x);
+        let qmy_b = f32::as_bytes(qac_qm_y);
+        let qmb_b = f32::as_bytes(qac_qm_b);
+        let xf_b = f32::as_bytes(x_factor);
+        let bf_b = f32::as_bytes(b_factor);
+        let descs = alloc::vec![
+            (MemoryLayoutDescriptor::contiguous([qmx_b.len()].into(), 1), qmx_b),
+            (MemoryLayoutDescriptor::contiguous([qmy_b.len()].into(), 1), qmy_b),
+            (MemoryLayoutDescriptor::contiguous([qmb_b.len()].into(), 1), qmb_b),
+            (MemoryLayoutDescriptor::contiguous([xf_b.len()].into(), 1), xf_b),
+            (MemoryLayoutDescriptor::contiguous([bf_b.len()].into(), 1), bf_b),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_bf = layouts.pop().expect("layouts[4]").memory;
+        let h_xf = layouts.pop().expect("layouts[3]").memory;
+        let h_qmb = layouts.pop().expect("layouts[2]").memory;
+        let h_qmy = layouts.pop().expect("layouts[1]").memory;
+        let h_qmx = layouts.pop().expect("layouts[0]").memory;
         let h_ox = self.client_ref().empty(n * 4);
         let h_oy = self.client_ref().empty(n * 4);
         let h_ob = self.client_ref().empty(n * 4);
