@@ -167,6 +167,187 @@ fn dct1d_4(a: f32, b: f32, c: f32, d: f32) -> (f32, f32, f32, f32) {
     (u0, b0, u1, w1)
 }
 
+/// LLF restore for DCT32×16 (4×2 DC-grid → 8 LLF positions per block
+/// at coeffs[iy * 32 + ix] for iy in 0..2, ix in 0..4).
+///
+/// DC layout: 4 rows × 2 cols, indexed `dc_grid[(by + iy) * stride +
+/// (bx + ix)]` for iy in 0..4, ix in 0..2.
+///
+/// Math (mirrors `forks::reconstruct::restore_llf_dct32x16`):
+/// 1. dct1d_2 on each of 4 rows (in-place `[a, b] -> [a+b, a-b]`).
+/// 2. Transpose 4×2 → 2×4.
+/// 3. dct1d_4 on each of 2 rows.
+/// 4. Per-position scale by `1 / (8 * SCALE_16_TO_2[iy] * SCALE_32_TO_4[ix])`.
+/// 5. Write to `dst[i * cpb + iy * 32 + ix]` for iy in 0..2, ix in 0..4.
+///
+/// `coeffs_per_block` must be 512 (DCT32x16 standard size).
+#[cube(launch_unchecked)]
+pub fn set_llf_dct32x16_indexed_kernel(
+    dc_grid: &Array<f32>,
+    coords: &Array<u32>,
+    dst: &mut Array<f32>,
+    dc_stride: u32,
+    coeffs_per_block: u32,
+    n_blocks: u32,
+) {
+    let i = ABSOLUTE_POS;
+    let n = n_blocks as usize;
+    if i >= n {
+        terminate!();
+    }
+    let bx = coords[i * 2usize] as usize;
+    let by = coords[i * 2usize + 1usize] as usize;
+    let stride = dc_stride as usize;
+    let cpb = coeffs_per_block as usize;
+
+    // Read 4×2 DC values: dc[iy*2 + ix] for iy in 0..4, ix in 0..2.
+    let r0 = by * stride + bx;
+    let r1 = (by + 1usize) * stride + bx;
+    let r2 = (by + 2usize) * stride + bx;
+    let r3 = (by + 3usize) * stride + bx;
+    let m00 = dc_grid[r0];
+    let m01 = dc_grid[r0 + 1usize];
+    let m10 = dc_grid[r1];
+    let m11 = dc_grid[r1 + 1usize];
+    let m20 = dc_grid[r2];
+    let m21 = dc_grid[r2 + 1usize];
+    let m30 = dc_grid[r3];
+    let m31 = dc_grid[r3 + 1usize];
+
+    // dct1d_2 on each row: [a, b] -> [a+b, a-b].
+    let p00 = m00 + m01;
+    let p01 = m00 - m01;
+    let p10 = m10 + m11;
+    let p11 = m10 - m11;
+    let p20 = m20 + m21;
+    let p21 = m20 - m21;
+    let p30 = m30 + m31;
+    let p31 = m30 - m31;
+
+    // Transpose 4×2 → 2×4: t[ix*4+iy] = p[iy*2+ix].
+    // Row 0 of transposed = (p00, p10, p20, p30); row 1 = (p01, p11, p21, p31).
+    // dct1d_4 on each row of transposed.
+    let (b00, b01, b02, b03) = dct1d_4(p00, p10, p20, p30);
+    let (b10, b11, b12, b13) = dct1d_4(p01, p11, p21, p31);
+
+    // Per-position scale by 1 / (8 * s16[iy] * s32[ix]).
+    let s16_0 = 1.0f32;
+    let s16_1 = 0.9017642f32;
+    let s32_0 = 1.0f32;
+    let s32_1 = 0.9748868f32;
+    let s32_2 = 0.9017642f32;
+    let s32_3 = 0.7870549f32;
+
+    let off = i * cpb;
+    // Row 0 (iy=0, s16_0 = 1.0)
+    dst[off] = b00 * (1.0f32 / (8.0f32 * s16_0 * s32_0));
+    dst[off + 1usize] = b01 * (1.0f32 / (8.0f32 * s16_0 * s32_1));
+    dst[off + 2usize] = b02 * (1.0f32 / (8.0f32 * s16_0 * s32_2));
+    dst[off + 3usize] = b03 * (1.0f32 / (8.0f32 * s16_0 * s32_3));
+    // Row 1 (iy=1, stride 32)
+    dst[off + 32usize] = b10 * (1.0f32 / (8.0f32 * s16_1 * s32_0));
+    dst[off + 33usize] = b11 * (1.0f32 / (8.0f32 * s16_1 * s32_1));
+    dst[off + 34usize] = b12 * (1.0f32 / (8.0f32 * s16_1 * s32_2));
+    dst[off + 35usize] = b13 * (1.0f32 / (8.0f32 * s16_1 * s32_3));
+}
+
+/// LLF restore for DCT16×32 (2×4 DC-grid → 8 LLF positions per block
+/// at coeffs[iy * 32 + ix] for iy in 0..2, ix in 0..4).
+///
+/// DC layout: 2 rows × 4 cols, indexed `dc_grid[(by + iy) * stride +
+/// (bx + ix)]` for iy in 0..2, ix in 0..4.
+///
+/// Math (mirrors `forks::reconstruct::restore_llf_dct16x32`):
+/// 1. dct1d_4 on each of 2 rows.
+/// 2. Transpose 2×4 → 4×2.
+/// 3. dct1d_2 on each of 4 rows (in-place).
+/// 4. Transpose back 4×2 → 2×4.
+/// 5. Per-position scale by `1 / (8 * SCALE_16_TO_2[iy] * SCALE_32_TO_4[ix])`.
+/// 6. Write to `dst[i * cpb + iy * 32 + ix]` for iy in 0..2, ix in 0..4.
+///
+/// `coeffs_per_block` must be 512 (DCT16x32 standard size).
+#[cube(launch_unchecked)]
+pub fn set_llf_dct16x32_indexed_kernel(
+    dc_grid: &Array<f32>,
+    coords: &Array<u32>,
+    dst: &mut Array<f32>,
+    dc_stride: u32,
+    coeffs_per_block: u32,
+    n_blocks: u32,
+) {
+    let i = ABSOLUTE_POS;
+    let n = n_blocks as usize;
+    if i >= n {
+        terminate!();
+    }
+    let bx = coords[i * 2usize] as usize;
+    let by = coords[i * 2usize + 1usize] as usize;
+    let stride = dc_stride as usize;
+    let cpb = coeffs_per_block as usize;
+
+    // Read 2×4 DC values: dc[iy*4 + ix] for iy in 0..2, ix in 0..4.
+    let r0 = by * stride + bx;
+    let r1 = (by + 1usize) * stride + bx;
+    let m00 = dc_grid[r0];
+    let m01 = dc_grid[r0 + 1usize];
+    let m02 = dc_grid[r0 + 2usize];
+    let m03 = dc_grid[r0 + 3usize];
+    let m10 = dc_grid[r1];
+    let m11 = dc_grid[r1 + 1usize];
+    let m12 = dc_grid[r1 + 2usize];
+    let m13 = dc_grid[r1 + 3usize];
+
+    // dct1d_4 on each of 2 rows.
+    let (a00, a01, a02, a03) = dct1d_4(m00, m01, m02, m03);
+    let (a10, a11, a12, a13) = dct1d_4(m10, m11, m12, m13);
+
+    // Transpose 2×4 → 4×2: t[ix*2 + iy] = a[iy*4 + ix].
+    // After transpose, rows are: (a00, a10), (a01, a11), (a02, a12), (a03, a13).
+    // dct1d_2 on each row: [a, b] -> [a+b, a-b].
+    let q00 = a00 + a10;
+    let q01 = a00 - a10;
+    let q10 = a01 + a11;
+    let q11 = a01 - a11;
+    let q20 = a02 + a12;
+    let q21 = a02 - a12;
+    let q30 = a03 + a13;
+    let q31 = a03 - a13;
+    // After dct1d_2, transposed-and-dct'd buffer is:
+    //   t[0] = q00, t[1] = q01, t[2] = q10, t[3] = q11,
+    //   t[4] = q20, t[5] = q21, t[6] = q30, t[7] = q31
+    // (laid out as ix-rows of 2-elements: row ix = [q_{ix,0}, q_{ix,1}]).
+
+    // Transpose back 4×2 → 2×4: result[iy*4 + ix] = t[ix*2 + iy].
+    // result[0] = t[0] = q00, result[1] = t[2] = q10, result[2] = t[4] = q20, result[3] = t[6] = q30
+    // result[4] = t[1] = q01, result[5] = t[3] = q11, result[6] = t[5] = q21, result[7] = t[7] = q31
+    let r00 = q00;
+    let r01 = q10;
+    let r02 = q20;
+    let r03 = q30;
+    let r10 = q01;
+    let r11 = q11;
+    let r12 = q21;
+    let r13 = q31;
+
+    // Per-position scale by 1 / (8 * s16[iy] * s32[ix]).
+    let s16_0 = 1.0f32;
+    let s16_1 = 0.9017642f32;
+    let s32_0 = 1.0f32;
+    let s32_1 = 0.9748868f32;
+    let s32_2 = 0.9017642f32;
+    let s32_3 = 0.7870549f32;
+
+    let off = i * cpb;
+    dst[off] = r00 * (1.0f32 / (8.0f32 * s16_0 * s32_0));
+    dst[off + 1usize] = r01 * (1.0f32 / (8.0f32 * s16_0 * s32_1));
+    dst[off + 2usize] = r02 * (1.0f32 / (8.0f32 * s16_0 * s32_2));
+    dst[off + 3usize] = r03 * (1.0f32 / (8.0f32 * s16_0 * s32_3));
+    dst[off + 32usize] = r10 * (1.0f32 / (8.0f32 * s16_1 * s32_0));
+    dst[off + 33usize] = r11 * (1.0f32 / (8.0f32 * s16_1 * s32_1));
+    dst[off + 34usize] = r12 * (1.0f32 / (8.0f32 * s16_1 * s32_2));
+    dst[off + 35usize] = r13 * (1.0f32 / (8.0f32 * s16_1 * s32_3));
+}
+
 /// LLF restore for DCT32×32 (4×4 DC-grid → 16 LLF positions per block
 /// at coeffs[iy * 32 + ix] for iy, ix in 0..4).
 ///
