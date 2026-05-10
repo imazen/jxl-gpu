@@ -18,6 +18,14 @@
 //! AFV) use [`crate::kernels::set_dc::set_dc_from_grid_indexed_kernel`]
 //! instead — it's a strict simplification.
 
+// `f32::consts::SQRT_2` and friends aren't usable from `#[cube]` bodies
+// (cubecl 0.10 const-eval limitation per `cubecl_type_gotchas.md`), so
+// we inline the float literals — they're bit-for-bit ports of the host
+// `forks::reconstruct::dct1d_*` / `idct1d_*` math and must stay
+// numerically identical for parity tests to hold. Suppress
+// `approx_constant` for the file.
+#![allow(clippy::approx_constant)]
+
 use cubecl::prelude::*;
 
 /// LLF restore for DCT16×8 / DCT8×16 (1×2 or 2×1 DC-grid, two LLF
