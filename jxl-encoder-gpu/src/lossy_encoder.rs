@@ -966,12 +966,93 @@ impl<R: Runtime> LossyEncoder<R> {
     /// `mark` callback fires at the same stage boundaries as the
     /// monolithic `encode_one_with_strategy_search_dct8_16_adaptive_traced`
     /// up through `dc_grids`.
+    /// Pad host f32 planes to alignment, upload to GPU, then call
+    /// [`Self::prepare_strategy_search_plan_inner`].
+    ///
+    /// Most callers should use the higher-level
+    /// [`Self::prepare_strategy_search_plan`]; this _traced variant
+    /// exposes per-stage timing via `mark`.
     pub fn prepare_strategy_search_plan_traced(
         &self,
         enc: &GpuEncoder<R>,
         r: &[f32],
         g: &[f32],
         b: &[f32],
+        target_distance: f32,
+        mark: &mut dyn FnMut(&'static str),
+    ) -> StrategySearchPlan<R> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (pw, ph) = (self.padded_width as usize, self.padded_height as usize);
+        mark("start");
+        let r_pad = pad_to_alignment(r, w, h, pw, ph);
+        let g_pad = pad_to_alignment(g, w, h, pw, ph);
+        let b_pad = pad_to_alignment(b, w, h, pw, ph);
+        mark("pad_only");
+        // Batched 3-channel upload — see `upload_planes_3ch` for the
+        // amortized-allocation rationale.
+        let (g_r, g_g, g_b) = enc.upload_planes_3ch(
+            &r_pad,
+            &g_pad,
+            &b_pad,
+            self.padded_width,
+            self.padded_height,
+        );
+        mark("upload_3ch");
+        self.prepare_strategy_search_plan_inner(enc, g_r, g_g, g_b, target_distance, mark)
+    }
+
+    /// Like [`Self::prepare_strategy_search_plan_traced`], but takes
+    /// raw interleaved sRGB u8 RGB pixels (no alpha) and runs sRGB→linear
+    /// conversion + edge-replication padding on the GPU in a single
+    /// fused launch. The host-side preprocessing cost (per-pixel powf +
+    /// pad_to_alignment × 3 planes) and the larger 3× padded f32 upload
+    /// disappear; the wire transfer is just `width * height * 3` bytes.
+    ///
+    /// `pixels_u8` MUST be exactly `self.width * self.height * 3` bytes,
+    /// row-major, R G B R G B …, sRGB encoded (the standard PNG layout).
+    ///
+    /// At 16 MP this saves ~1100 ms / encode vs the f32 path on a
+    /// PCIe 4.0 x16 host (192 MB f32 upload → 48 MB u8 upload + GPU
+    /// fused conversion). See `examples/perf_u8_upload_vs_f32.rs` for
+    /// paired A/B numbers.
+    pub fn prepare_strategy_search_plan_traced_from_u8(
+        &self,
+        enc: &GpuEncoder<R>,
+        pixels_u8: &[u8],
+        target_distance: f32,
+        mark: &mut dyn FnMut(&'static str),
+    ) -> StrategySearchPlan<R> {
+        let expected = (self.width as usize) * (self.height as usize) * 3;
+        assert_eq!(
+            pixels_u8.len(),
+            expected,
+            "pixels_u8 len {} != width*height*3 = {}",
+            pixels_u8.len(),
+            expected,
+        );
+        mark("start");
+        let (g_r, g_g, g_b) = enc.upload_u8_rgb_to_linear_planar_padded(
+            pixels_u8,
+            self.width,
+            self.height,
+            self.padded_width,
+            self.padded_height,
+        );
+        mark("upload_u8_fused");
+        self.prepare_strategy_search_plan_inner(enc, g_r, g_g, g_b, target_distance, mark)
+    }
+
+    /// Inner helper used by both
+    /// [`Self::prepare_strategy_search_plan_traced`] and
+    /// [`Self::prepare_strategy_search_plan_traced_from_u8`]. Takes
+    /// the three padded linear-RGB GPU planes already on-device and
+    /// runs the full XYB → gaborish → cost-grid → strategy-pick pipeline.
+    fn prepare_strategy_search_plan_inner(
+        &self,
+        enc: &GpuEncoder<R>,
+        g_r: GpuPlane<R>,
+        g_g: GpuPlane<R>,
+        g_b: GpuPlane<R>,
         target_distance: f32,
         mark: &mut dyn FnMut(&'static str),
     ) -> StrategySearchPlan<R> {
@@ -1040,27 +1121,8 @@ impl<R: Runtime> LossyEncoder<R> {
         let nb8 = xb8 * yb8;
         let _ = (w, h, nb8); // used in cost-grid stage; nb8 only used in marks
 
-        // Stage 1: pad + upload
-        mark("start");
-        let r_pad = pad_to_alignment(r, w, h, pw, ph);
-        let g_pad = pad_to_alignment(g, w, h, pw, ph);
-        let b_pad = pad_to_alignment(b, w, h, pw, ph);
-        mark("pad_only");
-        // Batched 3-channel upload: cubecl reserves all 3 buffers in
-        // one storage allocation, amortizing the per-call sync /
-        // cudaMalloc overhead documented in perf_upload_plane.
-        // Saves ~0.6 ms / -6% on this stage on real CLIC photo
-        // (paired A/B 10 runs each, 9.40 ms vs 9.998 ms mean).
-        let (g_r, g_g, g_b) = enc.upload_planes_3ch(
-            &r_pad,
-            &g_pad,
-            &b_pad,
-            self.padded_width,
-            self.padded_height,
-        );
-        mark("upload_3ch");
-
-        // Stage 2: XYB + gaborish (GPU)
+        // Stage 2: XYB + gaborish (GPU). Stage 1 (upload) was done by
+        // the caller; planes are already on device.
         let (xx, xy, xb) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
         let xx_g = enc.gaborish_5x5_persistent(&xx, &self.weights);
         let xy_g = enc.gaborish_5x5_persistent(&xy, &self.weights);

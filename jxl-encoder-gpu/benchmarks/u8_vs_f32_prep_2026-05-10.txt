@@ -1,0 +1,28 @@
+=== git/jj head ===
+mommwpprkxwywupptqvrtuumtlskvxlr
+
+=== uname ===
+Linux lilith 6.6.114.1-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Mon Dec  1 20:46:23 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+
+=== nvidia-smi ===
+NVIDIA GeForce RTX 5070, 12227 MiB
+
+
+=== 1024² (1.05 MP) ===
+perf_strat_plan_u8_vs_f32: src 1025×1025 (1.05 MP), distance=1, runs=5
+
+  Path A: prepare(f32, 3×plane upload)  min=   29.41 ms  median=   29.92 ms  mean=   31.32 ms
+  Path B: prepare_from_u8 (fused)       min=   24.05 ms  median=   24.58 ms  mean=   24.53 ms
+
+  speedup (min):     1.22×  (Δ +5.37 ms)
+  speedup (median):  1.19×  (Δ +4.71 ms)
+
+=== 16 MP ===
+perf_strat_plan_u8_vs_f32: src 4000×4000 (16.00 MP), distance=1, runs=5
+
+  Path A: prepare(f32, 3×plane upload)  min=  702.99 ms  median=  727.15 ms  mean=  744.27 ms
+  Path B: prepare_from_u8 (fused)       min=  499.35 ms  median=  502.09 ms  mean=  501.71 ms
+
+  speedup (min):     1.41×  (Δ +203.65 ms)
+  speedup (median):  1.42×  (Δ +210.89 ms)
+
