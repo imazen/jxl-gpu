@@ -1761,8 +1761,8 @@ impl<R: Runtime> GpuEncoder<R> {
         distance: f32,
     ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
         use jxl_encoder::__pre_quantized::{
-            AcStrategyMap, CflMap, DistanceParams, EncoderPrecomputed, VarDctEncoder,
-            quantize_quant_field,
+            AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder,
+            compute_cfl_map, compute_quant_field_float_free, quantize_quant_field,
         };
 
         let (width, height) = lossy.dimensions();
@@ -1852,22 +1852,41 @@ impl<R: Runtime> GpuEncoder<R> {
             }
         }
 
-        // Step 4: CfL = zeros. TODO: extract real CfL from GPU
-        // (chroma-from-luma kernel runs during prepare; not yet exposed
-        // on StrategySearchPlan).
-        let xsize_tiles = xsize_blocks.div_ceil(8); // 64×64-pixel CfL tiles
-        let ysize_tiles = ysize_blocks.div_ceil(8);
-        let cfl_map = CflMap::zeros(xsize_tiles, ysize_tiles);
+        // Step 4: CfL — compute on host from the just-downloaded XYB.
+        // The GPU strat-search pipeline doesn't currently expose a
+        // per-tile CfL grid on StrategySearchPlan; running the CPU
+        // helper on host XYB matches what EncoderPrecomputed::compute
+        // does and gives us the size win from real chroma decorrelation
+        // (vs CfL=zeros which leaves chroma uncorrelated).
+        // use_newton=true matches libjxl effort 7+ behavior.
+        let cfl_map = compute_cfl_map(
+            &xyb_x, &xyb_y, &xyb_b,
+            cpu_pw, cpu_ph,
+            xsize_blocks, ysize_blocks,
+            true, // use_newton (effort >= 7)
+            1e-3, // newton_eps (libjxl default)
+            10,   // newton_max_iters
+        );
 
-        // Step 5: float quant field — uniform at distance_to_qac for
-        // first cut. (To use the GPU's refined aq_field from a
-        // butteraugli loop, swap in the result of
-        // refine_aq_field_gpu_with_strategy_search_persistent.)
-        let qac = crate::lossy_encoder::distance_to_qac(distance);
-        let quant_field_float = alloc::vec![qac; num_blocks];
+        // Step 5: real quant_field_float + masking computed from XYB
+        // via the encoder's own helper (mirrors what
+        // EncoderPrecomputed::compute does on the adaptive_quant
+        // path). Real adaptive quant is the biggest size win — uniform
+        // qf passes more bits than necessary in flat regions.
+        // NOTE: per the CPU caller in precomputed.rs, this fn takes
+        // PADDED width/height (not image dims) as `width`/`height`.
+        // Passing image dims trips an off-by-one in the masking loop.
+        let (quant_field_float, masking) = compute_quant_field_float_free(
+            &xyb_x, &xyb_y, &xyb_b,
+            cpu_pw, cpu_ph,
+            xsize_blocks, ysize_blocks,
+            distance,
+            crate::lossy_encoder::K_AC_QUANT,
+        )
+        .map_err(jxl_encoder::api::EncodeError::from)?;
+        let _ = num_blocks; // sanity-checked by quant_field_float.len() == num_blocks
 
-        // Step 6: stub masking + linear_rgb (rate-control-only fields).
-        let masking = alloc::vec![0.0_f32; num_blocks];
+        // Step 6: linear_rgb is only used by rate-control loop; pass empty.
         let linear_rgb = alloc::vec::Vec::new();
 
         // Step 7: assemble EncoderPrecomputed.
