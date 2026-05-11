@@ -1791,20 +1791,64 @@ impl<R: Runtime> GpuEncoder<R> {
         let xyb_b_gpu = self.download_plane(&plan.xyb_b_gpu);
 
         // Step 2b: re-pack from GPU's 16-aligned (gpu_pw × gpu_ph) to
-        // CPU's 8-aligned (cpu_pw × cpu_ph). When dims agree (multiple
-        // of 16) this is just a clone; when they differ (multiple of
-        // 8 but not 16, e.g. 1000 × 1000 → GPU 1008 / CPU 1000) we
-        // copy the upper-left cpu_pw × cpu_ph from the GPU buffer and
-        // discard the right/bottom edge that GPU edge-replicated past
-        // the image dims.
+        // CPU's 8-aligned (cpu_pw × cpu_ph). When dims agree
+        // (multiple of 16) this is just a clone; when they differ
+        // (multiple of 8 but not 16, e.g. 1025 → GPU 1040 / CPU 1032)
+        // we copy the upper-left cpu_pw × cpu_ph from the GPU buffer.
+        //
+        // Edge-replication fix-up: GPU's edge-replicated values at
+        // cols >= width / rows >= height are computed BEFORE gaborish
+        // runs. After gaborish (5×5 sharpening filter), edge pixels
+        // get convolved with their replicated neighbors → the
+        // post-gaborish edge values can subtly diverge between GPU
+        // (1040 wide → gaborish saw 1040 cols) and what CPU would
+        // produce on the same source (CPU's compute_to_xyb_padded
+        // works on 1032 cols → gaborish sees 1032). The post-gaborish
+        // mismatch at the rightmost real-image edge column has been
+        // observed to corrupt butteraugli max-norm scores at non-16-
+        // aligned dims (constant 3.27 baugli at 1025×1025 across
+        // d=0.5/1.0/2.0 — the hot pixel is at the col=width edge).
+        //
+        // Fix: after extraction, edge-replicate the CPU-correct
+        // padded region from the LAST REAL image col/row of the
+        // repacked buffer (cols `width..cpu_pw`, rows `height..cpu_ph`).
+        // This trades GPU's gaborish-edge-blended replication for
+        // pure replication of the last real pixel — matches CPU's
+        // pad-then-gaborish-on-CPU-padded-buffer behavior closer.
         let repack = |src: &[f32]| -> alloc::vec::Vec<f32> {
             if cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize {
                 src.to_vec()
             } else {
-                let mut dst = alloc::vec::Vec::with_capacity(cpu_pw * cpu_ph);
+                let mut dst = alloc::vec![0.0_f32; cpu_pw * cpu_ph];
+                let w = width as usize;
+                let h = height as usize;
+                // Copy real image rows + GPU-padded right edge into
+                // initial cpu_ph rows.
                 for row in 0..cpu_ph {
                     let off = row * (gpu_pw as usize);
-                    dst.extend_from_slice(&src[off..off + cpu_pw]);
+                    let dst_off = row * cpu_pw;
+                    dst[dst_off..dst_off + cpu_pw].copy_from_slice(&src[off..off + cpu_pw]);
+                }
+                // Re-replicate the right edge (cols width..cpu_pw)
+                // from col (width-1) for ALL rows (incl. GPU-padded).
+                if cpu_pw > w {
+                    for row in 0..cpu_ph {
+                        let dst_off = row * cpu_pw;
+                        let src_val = dst[dst_off + (w - 1)];
+                        for c in w..cpu_pw {
+                            dst[dst_off + c] = src_val;
+                        }
+                    }
+                }
+                // Re-replicate the bottom edge (rows height..cpu_ph)
+                // from row (height-1) for ALL cols (already-fixed
+                // right edge included).
+                if cpu_ph > h {
+                    let last_real_off = (h - 1) * cpu_pw;
+                    for row in h..cpu_ph {
+                        let dst_off = row * cpu_pw;
+                        dst.copy_within(last_real_off..last_real_off + cpu_pw, dst_off);
+                    }
                 }
                 dst
             }
