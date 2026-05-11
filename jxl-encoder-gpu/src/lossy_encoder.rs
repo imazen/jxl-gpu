@@ -1011,10 +1011,18 @@ impl<R: Runtime> LossyEncoder<R> {
     /// `pixels_u8` MUST be exactly `self.width * self.height * 3` bytes,
     /// row-major, R G B R G B …, sRGB encoded (the standard PNG layout).
     ///
-    /// At 16 MP this saves ~1100 ms / encode vs the f32 path on a
-    /// PCIe 4.0 x16 host (192 MB f32 upload → 48 MB u8 upload + GPU
-    /// fused conversion). See `examples/perf_u8_upload_vs_f32.rs` for
-    /// paired A/B numbers.
+    /// **Measured savings vs the f32 path** (paired A/B at distance=1.0,
+    /// `examples/perf_strat_plan_u8_vs_f32`):
+    ///
+    /// | Pixels  | f32 path | u8 path | Speedup |
+    /// |---------|---------:|--------:|--------:|
+    /// | 1.05 MP |  29.4 ms | 24.0 ms |  1.22×  |
+    /// | 16 MP   |   703 ms |  499 ms |  1.41×  |
+    ///
+    /// Bound below by cubecl 0.10's slow upload path — even the
+    /// reduced 48 MB u8 upload at 16 MP costs ~300 ms via cubecl
+    /// (vs ~4 ms via raw pinned cudarc). The full ~1100 ms theoretical
+    /// savings would require the upstream cubecl pinned-buffer fix.
     pub fn prepare_strategy_search_plan_traced_from_u8(
         &self,
         enc: &GpuEncoder<R>,
