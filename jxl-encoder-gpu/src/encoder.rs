@@ -1766,18 +1766,52 @@ impl<R: Runtime> GpuEncoder<R> {
         };
 
         let (width, height) = lossy.dimensions();
-        let (pw, ph) = lossy.padded_dimensions();
-        let xsize_blocks = pw as usize / 8;
-        let ysize_blocks = ph as usize / 8;
+        let (gpu_pw, gpu_ph) = lossy.padded_dimensions();
+        // CPU encoder pads to 8-byte alignment (NOT 16 like GPU's
+        // strat-search needs). The encoder reads xyb_x/y/b at indices
+        // computed from precomputed.padded_width — which MUST match
+        // the buffer's actual layout, AND must equal CPU's own
+        // alignment derivation (padded = align_up(width, 8)). If we
+        // pass GPU's 16-aligned padded values, the encoder's group /
+        // block math diverges and the bitstream becomes corrupt
+        // (modular stream EOF on decode). Re-pack to CPU's expected
+        // alignment before handing off.
+        let cpu_pw = (width as usize).div_ceil(8) * 8;
+        let cpu_ph = (height as usize).div_ceil(8) * 8;
+        let xsize_blocks = cpu_pw / 8;
+        let ysize_blocks = cpu_ph / 8;
         let num_blocks = xsize_blocks * ysize_blocks;
 
         // Step 1: GPU strat-search → plan with xyb GPU planes + assignments.
         let plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
 
-        // Step 2: download xyb planes (CPU encoder needs host slices).
-        let xyb_x = self.download_plane(&plan.xyb_x_gpu);
-        let xyb_y = self.download_plane(&plan.xyb_y_gpu);
-        let xyb_b = self.download_plane(&plan.xyb_b_gpu);
+        // Step 2: download xyb planes (GPU-padded layout).
+        let xyb_x_gpu = self.download_plane(&plan.xyb_x_gpu);
+        let xyb_y_gpu = self.download_plane(&plan.xyb_y_gpu);
+        let xyb_b_gpu = self.download_plane(&plan.xyb_b_gpu);
+
+        // Step 2b: re-pack from GPU's 16-aligned (gpu_pw × gpu_ph) to
+        // CPU's 8-aligned (cpu_pw × cpu_ph). When dims agree (multiple
+        // of 16) this is just a clone; when they differ (multiple of
+        // 8 but not 16, e.g. 1000 × 1000 → GPU 1008 / CPU 1000) we
+        // copy the upper-left cpu_pw × cpu_ph from the GPU buffer and
+        // discard the right/bottom edge that GPU edge-replicated past
+        // the image dims.
+        let repack = |src: &[f32]| -> alloc::vec::Vec<f32> {
+            if cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize {
+                src.to_vec()
+            } else {
+                let mut dst = alloc::vec::Vec::with_capacity(cpu_pw * cpu_ph);
+                for row in 0..cpu_ph {
+                    let off = row * (gpu_pw as usize);
+                    dst.extend_from_slice(&src[off..off + cpu_pw]);
+                }
+                dst
+            }
+        };
+        let xyb_x = repack(&xyb_x_gpu);
+        let xyb_y = repack(&xyb_y_gpu);
+        let xyb_b = repack(&xyb_b_gpu);
 
         // Step 3: AcStrategyMap. First-cut uses ALL-DCT8 to validate
         // the precomputed seam without compounding strategy-translation
@@ -1810,8 +1844,8 @@ impl<R: Runtime> GpuEncoder<R> {
             height as usize,
             xsize_blocks,
             ysize_blocks,
-            pw as usize,
-            ph as usize,
+            cpu_pw,
+            cpu_ph,
             xyb_x,
             xyb_y,
             xyb_b,
