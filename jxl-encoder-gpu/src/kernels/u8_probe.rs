@@ -24,7 +24,6 @@ pub fn u8_to_f32_kernel(input: &Array<u8>, output: &mut Array<f32>) {
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
-    use cubecl::prelude::*;
     use cubecl::server::Handle;
 
     type B = cubecl::cuda::CudaRuntime;
