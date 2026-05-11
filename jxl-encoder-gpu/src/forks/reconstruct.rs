@@ -541,6 +541,16 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         // sub-block 8x8 family) have covered_blocks_xy = (1, 1) so the
         // MAX over a single coord equals the first-block read — no
         // behaviour change. AFV is single-block too (8x8 grid).
+        //
+        // **NOT libjxl-faithful**: libjxl uses L16-norm aggregation
+        // here (`pow(mean(qac^16), 1/16)`, enc_ac_strategy.cc:412-413).
+        // We tried switching to L16-norm + strat-aware tile_dist
+        // together (~/.claude/.../memory/
+        // refine_tile_dist_strat_aware_regression.md);
+        // 22ea12c903e41583@d=0.5 regressed +6.33% butteraugli. The
+        // MAX behavior is empirically better on our pipeline despite
+        // being algorithmically further from libjxl — likely because
+        // we're missing other libjxl behaviors that compensate.
         let cov_x = (tile_w as usize / 8).max(1);
         let cov_y = (tile_h as usize / 8).max(1);
         let qac_for_strategy: Vec<f32> = coords

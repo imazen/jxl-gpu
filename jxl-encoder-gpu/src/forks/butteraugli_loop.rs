@@ -1121,11 +1121,15 @@ pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
         initial_aq_field,
         target_distance,
         iters,
-        // Strat-aware wire-up reverted: when this is `Some(&plan.assignments)`,
-        // refinement under-fires on multi-block regions because reconstruct.rs's
-        // qac_for_strategy uses MAX aggregation (not libjxl's L16 norm). Both
-        // need to land together — see ~/.claude/.../memory/
-        // refine_tile_dist_strat_aware_regression.md (root cause section).
+        // Strat-aware tile_dist NOT wired (passes None → dct8_only_storage).
+        // Tried Some(&plan.assignments) paired with L16-norm qac
+        // aggregation in reconstruct.rs (the libjxl-faithful pair);
+        // 22ea12c903e41583@d=0.5 regressed +6.33% butteraugli. The
+        // pre-fix per-(8x8) tile_dist + MAX qac aggregation is
+        // empirically better on our pipeline.
+        // Helper retained for future use when other compensating libjxl
+        // behaviors land. See ~/.claude/.../memory/
+        // refine_tile_dist_strat_aware_regression.md
         None,
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         trace,
@@ -1389,11 +1393,15 @@ pub fn refine_aq_field_gpu_with_strategy_search_smart_with_threshold<R: Runtime>
         initial_aq_field,
         target_distance,
         iters,
-        // Strat-aware wire-up reverted: when this is `Some(&plan.assignments)`,
-        // refinement under-fires on multi-block regions because reconstruct.rs's
-        // qac_for_strategy uses MAX aggregation (not libjxl's L16 norm). Both
-        // need to land together — see ~/.claude/.../memory/
-        // refine_tile_dist_strat_aware_regression.md (root cause section).
+        // Strat-aware tile_dist NOT wired (passes None → dct8_only_storage).
+        // Tried Some(&plan.assignments) paired with L16-norm qac
+        // aggregation in reconstruct.rs (the libjxl-faithful pair);
+        // 22ea12c903e41583@d=0.5 regressed +6.33% butteraugli. The
+        // pre-fix per-(8x8) tile_dist + MAX qac aggregation is
+        // empirically better on our pipeline.
+        // Helper retained for future use when other compensating libjxl
+        // behaviors land. See ~/.claude/.../memory/
+        // refine_tile_dist_strat_aware_regression.md
         None,
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         trace,
@@ -1515,11 +1523,15 @@ pub fn refine_and_encode_best_of_both<R: Runtime>(
         initial_aq_field,
         target_distance,
         iters,
-        // Strat-aware wire-up reverted: when this is `Some(&plan.assignments)`,
-        // refinement under-fires on multi-block regions because reconstruct.rs's
-        // qac_for_strategy uses MAX aggregation (not libjxl's L16 norm). Both
-        // need to land together — see ~/.claude/.../memory/
-        // refine_tile_dist_strat_aware_regression.md (root cause section).
+        // Strat-aware tile_dist NOT wired (passes None → dct8_only_storage).
+        // Tried Some(&plan.assignments) paired with L16-norm qac
+        // aggregation in reconstruct.rs (the libjxl-faithful pair);
+        // 22ea12c903e41583@d=0.5 regressed +6.33% butteraugli. The
+        // pre-fix per-(8x8) tile_dist + MAX qac aggregation is
+        // empirically better on our pipeline.
+        // Helper retained for future use when other compensating libjxl
+        // behaviors land. See ~/.claude/.../memory/
+        // refine_tile_dist_strat_aware_regression.md
         None,
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         |_| {},
