@@ -176,6 +176,24 @@ impl<R: Runtime> ButteraugliLoopGpu<R> {
         self.inner.compute_with_reference(dist_srgb)
     }
 
+    /// Pass-through to
+    /// [`butteraugli_gpu::Butteraugli::compute_with_reference_from_linear_planes`].
+    /// Takes 3 caller-supplied f32 GPU `Handle`s for the distorted
+    /// side's planar linear-RGB; skips the sRGB upload + sRGB→linear
+    /// GPU conversion that [`Self::compute_with_reference`] does
+    /// internally. See the upstream method docs (in the
+    /// `butteraugli-gpu` crate's `internals` feature) for the
+    /// in-place mutation contract on the caller's handles.
+    pub fn compute_with_reference_from_linear_planes(
+        &mut self,
+        dist_r: cubecl::server::Handle,
+        dist_g: cubecl::server::Handle,
+        dist_b: cubecl::server::Handle,
+    ) -> butteraugli_gpu::Result<GpuButteraugliResult> {
+        self.inner
+            .compute_with_reference_from_linear_planes(dist_r, dist_g, dist_b)
+    }
+
     /// One-shot compute (no caching). For non-iterative callers.
     pub fn compute(
         &mut self,
@@ -1049,6 +1067,128 @@ pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         trace,
     )
+}
+
+/// GPU-resident variant of [`refine_aq_field_gpu_with_strategy_search`]
+/// — uses the persistent encode path that returns recon planes as
+/// `GpuPlane<R>` triples (skipping the per-iter download + sRGB
+/// host-convert) and feeds them to butteraugli-gpu's
+/// `compute_with_reference_from_linear_planes` (skipping the per-iter
+/// sRGB upload).
+///
+/// Eliminates the recon-download → sRGB-host-convert → re-upload
+/// boundary the standard path pays per iter. At 16 MP this saves
+/// ~hundreds of ms per refinement iter (the boundary work is roughly
+/// proportional to image size).
+///
+/// **Padding constraint**: requires the padded dimensions to equal
+/// the original dimensions (i.e. width and height multiples of the
+/// LossyEncoder's 16 alignment). When dims are non-aligned the
+/// returned recon planes are padded but butteraugli was constructed
+/// with original dims — call the standard path instead, OR construct
+/// `ButteraugliLoopGpu` with `lossy.padded_dimensions()` so its
+/// internal buffers match.
+///
+/// Requires the `butteraugli-gpu/internals` feature (enabled by
+/// default in this crate's `butteraugli-loop` feature).
+#[allow(clippy::too_many_arguments)]
+pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    lossy: &LossyEncoder<R>,
+    bg: &mut ButteraugliLoopGpu<R>,
+    r: &[f32],
+    g: &[f32],
+    b: &[f32],
+    ref_srgb: &[u8],
+    initial_aq_field: &[f32],
+    target_distance: f32,
+    iters: usize,
+    mut trace: impl FnMut(RefineIterTrace),
+) -> butteraugli_gpu::Result<Vec<f32>> {
+    let (width, height) = lossy.dimensions();
+    let n_pixels = (width as usize) * (height as usize);
+    debug_assert_eq!(
+        ref_srgb.len(),
+        n_pixels * 3,
+        "ref_srgb must be {n_pixels} * 3 bytes"
+    );
+
+    // Prepare cost-grid output ONCE before entering the loop.
+    let plan = lossy.prepare_strategy_search_plan(enc, r, g, b, target_distance);
+
+    // Same loop shape as `refine_aq_field_gpu_with_encode`, but with
+    // (a) encode step returning GpuPlanes and (b) butteraugli call
+    // taking those planes directly.
+    let (xsize_blocks, ysize_blocks) = {
+        let (pw, ph) = lossy.padded_dimensions();
+        (pw as usize / 8, ph as usize / 8)
+    };
+    let bounds = DeviationBounds::compute(initial_aq_field);
+    let (is_first_storage, cx_storage, cy_storage) =
+        dct8_only_storage(xsize_blocks * ysize_blocks);
+    let cfg = RefineConfig {
+        width: width as usize,
+        height: height as usize,
+        xsize_blocks,
+        ysize_blocks,
+        info: dct8_only_info(&is_first_storage, &cx_storage, &cy_storage),
+        target_distance,
+        iters,
+        bounds,
+    };
+
+    bg.set_reference(ref_srgb)?;
+    let mut aq_field = initial_aq_field.to_vec();
+    let mut diffmap = alloc::vec![0.0_f32; n_pixels];
+
+    for iter in 0..=iters {
+        // Step 1: encode at current aq_field — recon stays on GPU.
+        let (rec_r, rec_g, rec_b) =
+            lossy.encode_with_strategy_plan_adaptive_persistent(enc, &plan, &aq_field);
+
+        // Step 2: butteraugli compute taking the GPU handles directly
+        // (no download / host-sRGB-convert / re-upload boundary).
+        let result = bg.compute_with_reference_from_linear_planes(
+            rec_r.handle().clone(),
+            rec_g.handle().clone(),
+            rec_b.handle().clone(),
+        )?;
+        bg.copy_diffmap_to(&mut diffmap)?;
+
+        // Step 3-4: reduce + adjust qf — mirror of the standard loop's
+        // capped-at-1.5 only-bad-blocks aq_field update.
+        let tile_dist = compute_tile_distances(
+            &diffmap,
+            cfg.width,
+            cfg.height,
+            cfg.xsize_blocks,
+            cfg.ysize_blocks,
+            &cfg.info,
+        );
+        if iter < iters {
+            for bi in 0..aq_field.len() {
+                let diff = (tile_dist[bi] / target_distance).min(1.5);
+                if diff > 1.0 {
+                    aq_field[bi] *= diff;
+                }
+                if aq_field[bi] > cfg.bounds.qf_higher {
+                    aq_field[bi] = cfg.bounds.qf_higher;
+                }
+                if aq_field[bi] < cfg.bounds.qf_lower {
+                    aq_field[bi] = cfg.bounds.qf_lower;
+                }
+            }
+        }
+        trace(RefineIterTrace {
+            iter,
+            iters,
+            score: result.score,
+            pnorm_3: result.pnorm_3,
+            tile_dist: tile_dist.clone(),
+        });
+    }
+
+    Ok(aq_field)
 }
 
 /// Smart-gated combined-mode refinement: strat-search transform picks

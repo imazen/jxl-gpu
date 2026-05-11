@@ -1826,6 +1826,41 @@ impl<R: Runtime> LossyEncoder<R> {
         self.encode_with_strategy_plan_adaptive_traced(enc, plan, aq_field, &mut |_| {})
     }
 
+    /// GPU-resident variant of [`Self::encode_with_strategy_plan_adaptive`]
+    /// — returns the post-postpass linear-RGB recon as 3 padded
+    /// [`GpuPlane<R>`]s instead of host `Vec<f32>`s. Skips the
+    /// `download_planes_3ch` + `crop_to_original × 3` final steps.
+    ///
+    /// At 16 MP the skipped boundary work is ~160 ms / iter. The
+    /// returned planes have the LossyEncoder's PADDED dimensions
+    /// (`self.padded_dimensions()`) — caller is responsible for any
+    /// crop-to-original needed downstream. For butteraugli refinement
+    /// loops at exact-multiple-of-16 image dims (no padding), no crop
+    /// is needed; pass directly to
+    /// `Butteraugli::compute_with_reference_from_linear_planes`.
+    ///
+    /// **Use case**: butteraugli refinement loop where the next step
+    /// is a butteraugli compute on GPU — feeding the recon planes
+    /// directly skips the recon-download + sRGB-host-convert +
+    /// re-upload boundary.
+    pub fn encode_with_strategy_plan_adaptive_persistent(
+        &self,
+        enc: &GpuEncoder<R>,
+        plan: &StrategySearchPlan<R>,
+        aq_field: &[f32],
+    ) -> (
+        crate::persistent::GpuPlane<R>,
+        crate::persistent::GpuPlane<R>,
+        crate::persistent::GpuPlane<R>,
+    ) {
+        self.encode_with_strategy_plan_adaptive_persistent_traced(
+            enc,
+            plan,
+            aq_field,
+            &mut |_| {},
+        )
+    }
+
     /// Encode + recon + postpass stage of strat-search using a
     /// precomputed [`StrategySearchPlan`].
     ///
@@ -1844,6 +1879,42 @@ impl<R: Runtime> LossyEncoder<R> {
         aq_field: &[f32],
         mark: &mut dyn FnMut(&'static str),
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let (rgb_r, rgb_g, rgb_b) =
+            self.encode_with_strategy_plan_adaptive_persistent_traced(enc, plan, aq_field, mark);
+        // Batched 3-channel D2H read: one read_async + sync wait
+        // instead of three serial read_one round-trips.
+        let (r_out, g_out, b_out) = enc.download_planes_3ch(&rgb_r, &rgb_g, &rgb_b);
+        mark("download_crop");
+        let (w, h) = (self.width as usize, self.height as usize);
+        let pw = self.padded_width as usize;
+        (
+            crop_to_original(&r_out, pw, w, h),
+            crop_to_original(&g_out, pw, w, h),
+            crop_to_original(&b_out, pw, w, h),
+        )
+    }
+
+    /// GPU-resident traced variant — same pipeline as
+    /// [`Self::encode_with_strategy_plan_adaptive_traced`] but returns
+    /// the post-postpass linear-RGB recon as 3 padded GPU planes
+    /// instead of host `Vec<f32>`s. Skips the final
+    /// `download_planes_3ch + crop_to_original × 3` step (~160 ms /
+    /// iter at 16 MP).
+    ///
+    /// Marks fire at the same stage boundaries as `_adaptive_traced`
+    /// from `mixed_strategy_encode_recon` through `postpass_gab_epf_xyb`;
+    /// `download_crop` is NOT emitted (no download here).
+    pub fn encode_with_strategy_plan_adaptive_persistent_traced(
+        &self,
+        enc: &GpuEncoder<R>,
+        plan: &StrategySearchPlan<R>,
+        aq_field: &[f32],
+        mark: &mut dyn FnMut(&'static str),
+    ) -> (
+        crate::persistent::GpuPlane<R>,
+        crate::persistent::GpuPlane<R>,
+        crate::persistent::GpuPlane<R>,
+    ) {
         use crate::forks::reconstruct::{
             encode_and_reconstruct_mixed_strategy_3channel, gab_weights,
         };
@@ -2159,20 +2230,10 @@ impl<R: Runtime> LossyEncoder<R> {
         let (rgb_r, rgb_g, rgb_b) =
             enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
         mark("postpass_gab_epf_xyb");
-        // Batched 3-channel D2H read: one read_async + sync wait
-        // instead of three serial read_one round-trips. Each
-        // read_one carries its own queue-drain stall, and the 3
-        // transfers are independent so cubecl can overlap them.
-        // Saves ~0.22 ms / -9% on download_crop on real CLIC photo
-        // (paired A/B 10 runs each, 2.156 ms vs 2.375 ms mean).
-        let (r_out, g_out, b_out) = enc.download_planes_3ch(&rgb_r, &rgb_g, &rgb_b);
-        mark("download_crop");
-
-        (
-            crop_to_original(&r_out, pw, w, h),
-            crop_to_original(&g_out, pw, w, h),
-            crop_to_original(&b_out, pw, w, h),
-        )
+        // GPU-resident: return the recon planes directly, no download
+        // / crop. Wrapper f32 variant downloads + crops if needed.
+        let _ = (w, h, pw); // suppress unused warning in this variant
+        (rgb_r, rgb_g, rgb_b)
     }
 
     /// Turnkey content-driven adaptive quantization.

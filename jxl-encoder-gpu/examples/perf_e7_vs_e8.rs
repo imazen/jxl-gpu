@@ -31,6 +31,7 @@ fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::butteraugli_loop::{
         ButteraugliLoopGpu, refine_aq_field_gpu_with_strategy_search,
+        refine_aq_field_gpu_with_strategy_search_persistent,
     };
     use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
@@ -179,6 +180,34 @@ fn main() {
         e8_times.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
 
+    // ── e8 (persistent): butteraugli loop with internals path ────
+    // Skips the per-iter recon-download → host-sRGB-convert →
+    // re-upload boundary by feeding GpuPlanes straight to
+    // butteraugli-gpu's `compute_with_reference_from_linear_planes`.
+    let _ = refine_aq_field_gpu_with_strategy_search_persistent(
+        &enc, &lossy, &mut bg, &r, &g, &b, &pixels_u8, &initial_aq, distance, iters_e8, |_| {},
+    )
+    .expect("refine persistent warmup");
+    let mut e8p_times: Vec<f64> = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let t0 = Instant::now();
+        let _ = refine_aq_field_gpu_with_strategy_search_persistent(
+            &enc,
+            &lossy,
+            &mut bg,
+            &r,
+            &g,
+            &b,
+            &pixels_u8,
+            &initial_aq,
+            distance,
+            iters_e8,
+            |_| {},
+        )
+        .expect("refine persistent timed");
+        e8p_times.push(t0.elapsed().as_secs_f64() * 1000.0);
+    }
+
     let summary = |name: &str, times: &[f64]| {
         let mut s: Vec<f64> = times.iter().copied().collect();
         s.sort_by(|x, y| x.partial_cmp(y).unwrap());
@@ -191,13 +220,31 @@ fn main() {
         );
     };
     println!();
-    summary("e7 (prepare + 1 encode, no buttloop)     ", &e7_times);
-    summary(&format!("e8 ({iters_e8}× butteraugli refinement) "), &e8_times);
-    let e7_med = e7_times.iter().copied().fold(f64::INFINITY, f64::min);
-    let e8_med = e8_times.iter().copied().fold(f64::INFINITY, f64::min);
+    summary("e7 (prepare + 1 encode, no buttloop)        ", &e7_times);
+    summary(
+        &format!("e8 ({iters_e8}× refine — sRGB-roundtrip)      "),
+        &e8_times,
+    );
+    summary(
+        &format!("e8 ({iters_e8}× refine — internals/persistent)"),
+        &e8p_times,
+    );
+    let e7_min = e7_times.iter().copied().fold(f64::INFINITY, f64::min);
+    let e8_min = e8_times.iter().copied().fold(f64::INFINITY, f64::min);
+    let e8p_min = e8p_times.iter().copied().fold(f64::INFINITY, f64::min);
     println!(
-        "\n  e8/e7 ratio (min):  {:.2}×  (Δ {:+.2} ms)",
-        e8_med / e7_med,
-        e8_med - e7_med,
+        "\n  e8/e7 ratio (min):              {:.2}×  (Δ {:+.2} ms)",
+        e8_min / e7_min,
+        e8_min - e7_min,
+    );
+    println!(
+        "  e8-persistent / e7 ratio:       {:.2}×  (Δ {:+.2} ms)",
+        e8p_min / e7_min,
+        e8p_min - e7_min,
+    );
+    println!(
+        "  e8-persistent vs e8 (saved):    {:.2}×  (Δ {:+.2} ms)",
+        e8_min / e8p_min,
+        e8p_min - e8_min,
     );
 }
