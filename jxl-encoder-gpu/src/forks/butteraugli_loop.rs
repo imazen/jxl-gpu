@@ -1121,7 +1121,12 @@ pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
         initial_aq_field,
         target_distance,
         iters,
-        None, // strat-search-aware wire-up reverted — see commit message
+        // Strat-aware wire-up reverted: when this is `Some(&plan.assignments)`,
+        // refinement under-fires on multi-block regions because reconstruct.rs's
+        // qac_for_strategy uses MAX aggregation (not libjxl's L16 norm). Both
+        // need to land together — see ~/.claude/.../memory/
+        // refine_tile_dist_strat_aware_regression.md (root cause section).
+        None,
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         trace,
     )
@@ -1384,7 +1389,12 @@ pub fn refine_aq_field_gpu_with_strategy_search_smart_with_threshold<R: Runtime>
         initial_aq_field,
         target_distance,
         iters,
-        None, // strat-search-aware wire-up reverted — see commit message
+        // Strat-aware wire-up reverted: when this is `Some(&plan.assignments)`,
+        // refinement under-fires on multi-block regions because reconstruct.rs's
+        // qac_for_strategy uses MAX aggregation (not libjxl's L16 norm). Both
+        // need to land together — see ~/.claude/.../memory/
+        // refine_tile_dist_strat_aware_regression.md (root cause section).
+        None,
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         trace,
     )?;
@@ -1505,7 +1515,12 @@ pub fn refine_and_encode_best_of_both<R: Runtime>(
         initial_aq_field,
         target_distance,
         iters,
-        None, // strat-search-aware wire-up reverted — see commit message
+        // Strat-aware wire-up reverted: when this is `Some(&plan.assignments)`,
+        // refinement under-fires on multi-block regions because reconstruct.rs's
+        // qac_for_strategy uses MAX aggregation (not libjxl's L16 norm). Both
+        // need to land together — see ~/.claude/.../memory/
+        // refine_tile_dist_strat_aware_regression.md (root cause section).
+        None,
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         |_| {},
     )?;
