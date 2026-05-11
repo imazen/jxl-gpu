@@ -373,28 +373,15 @@ impl<R: Runtime> GpuEncoder<R> {
         let out_n = (padded_width as usize) * (padded_height as usize);
         let out_bytes = out_n * 4;
 
-        // Upload src + alloc 3 outputs in one batched call (one
-        // underlying storage region, four sub-handles).
-        let descs = alloc::vec![
-            MemoryLayoutDescriptor::contiguous([src_n].into(), 1),
-            MemoryLayoutDescriptor::contiguous([out_bytes].into(), 1),
-            MemoryLayoutDescriptor::contiguous([out_bytes].into(), 1),
-            MemoryLayoutDescriptor::contiguous([out_bytes].into(), 1),
-        ];
-        // src is uploaded via create_tensors_from_slices; outputs
-        // are empty. Mix uploaded + empty by uploading one
-        // 3-tensor batch + 3 empties separately. Simpler: just
-        // create_from_slice for src and 3 empty() for outputs —
-        // fewer allocations isn't the dominant cost here since this
-        // function runs once per encode.
-        let h_src = self
-            .client_ref()
-            .create_from_slice(src_pixels);
+        // src is uploaded via create_from_slice; the three output
+        // planes are GPU-allocated empty buffers. The previous
+        // batched-alloc descriptor build was never wired (this
+        // function runs once per encode, so the per-call overhead
+        // wasn't worth the plumbing).
+        let h_src = self.client_ref().create_from_slice(src_pixels);
         let h_r = self.client_ref().empty(out_bytes);
         let h_g = self.client_ref().empty(out_bytes);
         let h_b = self.client_ref().empty(out_bytes);
-        // Suppress unused warning until we wire the batched alloc.
-        let _ = descs;
 
         crate::launch::u8_rgb_prepare::u8_rgb_to_linear_planar_padded::<R>(
             self.client_ref(),

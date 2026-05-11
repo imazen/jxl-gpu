@@ -1127,7 +1127,6 @@ impl<R: Runtime> LossyEncoder<R> {
         let xb8 = pw / 8;
         let yb8 = ph / 8;
         let nb8 = xb8 * yb8;
-        let _ = (w, h, nb8); // used in cost-grid stage; nb8 only used in marks
 
         // Stage 2: XYB + gaborish (GPU). Stage 1 (upload) was done by
         // the caller; planes are already on device.
@@ -1425,10 +1424,9 @@ impl<R: Runtime> LossyEncoder<R> {
         // picks would have helped (sharp-edge content) by falling
         // back to uniform-DCT8 — so users aren't losing quality from
         // this skip in production paths.
-        let cost_afv0: Vec<f32> = Vec::new();
-        let cost_afv1: Vec<f32> = Vec::new();
-        let cost_afv2: Vec<f32> = Vec::new();
-        let cost_afv3: Vec<f32> = Vec::new();
+        // AFV cost grids deferred (not produced; SubBlockCostGrids
+        // passes None for afv0..3 below). When AFV is re-enabled
+        // post #38, allocate the 4 cost grids here.
         mark("cost_afv");
 
         // Distance-scaled anti-bias for sub-blocks (same scale as DCT16).
@@ -1667,9 +1665,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // Stage 5: host-side selector + assignments. All 5 sub-block
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
         // reference) — same trick as DCT32 needed.
-        // AFV cost grids skipped (None) — see the cost-grid call site
-        // above. Plumbing kept for re-enable post #38.
-        let _ = (&cost_afv0, &cost_afv1, &cost_afv2, &cost_afv3);
+        // AFV cost grids skipped (None) — see the cost-grid stage above.
         let sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: Some(&cost_dct4x4),
             dct4x8: Some(&cost_dct4x8),
