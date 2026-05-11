@@ -262,6 +262,143 @@ pub fn per_block_upstream_cost(
     out
 }
 
+/// Per-block variant of [`per_block_upstream_cost`] — takes a
+/// **per-block** `quant_for_coeffs` slice instead of a scalar.
+///
+/// Matches libjxl's behavior exactly: in `enc_ac_strategy.cc:382-413`,
+/// `quant_norm16` is computed per multi-block strategy region as the
+/// L16 norm of per-8x8 adaptive_quant values
+/// (`pow(mean(quant^16), 1/16)` for `num_blocks >= 4`; `max(quant)`
+/// for `num_blocks == 2`; raw value for `num_blocks == 1`). The
+/// resulting `quant_norm16` is then used as the divisor in
+/// `loss_scalar = (loss/N)^(1/8) * N / quant_norm16` at
+/// `enc_ac_strategy.cc:504-507`.
+///
+/// The original [`per_block_upstream_cost`] takes a single scalar
+/// `quant_for_coeffs` and broadcasts it across all blocks — correct
+/// only for uniform-quant images. For adaptive-quant photos this
+/// scalar diverges from `quant_norm16` by ~1.4-1.5× on real images
+/// (see `examples/quant_norm16_divergence.rs`), causing the GPU
+/// strat-search cost model to be miscalibrated. This variant fixes
+/// the loss-side bias.
+///
+/// `quant_for_coeffs_per_block.len()` must equal the number of
+/// blocks (= `entropy_x.len()`).
+///
+/// Use [`compute_quant_norm16_per_region`] to produce the per-block
+/// `quant_for_coeffs` slice from a per-8x8 adaptive_quant field.
+#[allow(clippy::too_many_arguments)]
+pub fn per_block_upstream_cost_per_block(
+    entropy_x: &[f32],
+    entropy_y: &[f32],
+    entropy_b: &[f32],
+    nzeros_x: &[f32],
+    nzeros_y: &[f32],
+    nzeros_b: &[f32],
+    pixel_loss_total: &[f64],
+    entropy_mul: f32,
+    scaled_constants: (f32, f32, f32),
+    quant_for_coeffs_per_block: &[f32],
+    block_pixel_count: usize,
+) -> Vec<f32> {
+    let n_blocks = entropy_x.len();
+    debug_assert_eq!(entropy_y.len(), n_blocks);
+    debug_assert_eq!(entropy_b.len(), n_blocks);
+    debug_assert_eq!(nzeros_x.len(), n_blocks);
+    debug_assert_eq!(nzeros_y.len(), n_blocks);
+    debug_assert_eq!(nzeros_b.len(), n_blocks);
+    debug_assert_eq!(pixel_loss_total.len(), n_blocks);
+    debug_assert_eq!(quant_for_coeffs_per_block.len(), n_blocks);
+    debug_assert!(block_pixel_count > 0);
+
+    let (k_info_loss_mul, _cost_delta, k_zeros_mul) = scaled_constants;
+    let n_pix = block_pixel_count as f64;
+    let covered_blocks = block_pixel_count / 64;
+    let x_w = x_multiblock_weight(covered_blocks);
+
+    let mut out = Vec::with_capacity(n_blocks);
+    for b in 0..n_blocks {
+        let x_part = (entropy_x[b] + nzeros_bits_term(nzeros_x[b] as u32, k_zeros_mul)) * x_w;
+        let y_part = entropy_y[b] + nzeros_bits_term(nzeros_y[b] as u32, k_zeros_mul);
+        let b_part = entropy_b[b] + nzeros_bits_term(nzeros_b[b] as u32, k_zeros_mul);
+        let mut entropy = x_part + y_part + b_part;
+
+        let inv_q = 1.0 / quant_for_coeffs_per_block[b] as f64;
+        let p = pixel_loss_total[b];
+        let loss_scalar = (p / n_pix).sqrt().sqrt().sqrt() * n_pix * inv_q;
+
+        entropy *= entropy_mul;
+        entropy += k_info_loss_mul * loss_scalar as f32;
+        out.push(entropy);
+    }
+    out
+}
+
+/// Compute per-region `quant_norm16` (libjxl's L16-normed per-region
+/// quant) from a per-8x8-block adaptive_quant field.
+///
+/// Mirrors the libjxl formula at `enc_ac_strategy.cc:382-413`:
+/// - `num_blocks == 1` (cx == cy == 1): return raw `aq_field[y0,x0]`.
+/// - `num_blocks == 2` (`(cx,cy) ∈ {(1,2), (2,1)}`): max of the two
+///   per-block quant values.
+/// - `num_blocks >= 4`: `pow(mean(q^16), 1/16)` over all blocks.
+///
+/// Output: one f32 per non-overlapping `cx × cy` region in the
+/// `xs8 × ys8` per-8x8-block grid. Regions are laid out row-major
+/// (slow y, fast x). Partial regions at the right/bottom edges
+/// (where `xs8 % cx != 0` or `ys8 % cy != 0`) are skipped — output
+/// length is `(xs8 / cx) * (ys8 / cy)`.
+///
+/// `aq_field.len()` must equal `xs8 * ys8`.
+pub fn compute_quant_norm16_per_region(
+    aq_field: &[f32],
+    xs8: usize,
+    ys8: usize,
+    cx: usize,
+    cy: usize,
+) -> Vec<f32> {
+    debug_assert_eq!(aq_field.len(), xs8 * ys8);
+    debug_assert!(cx >= 1 && cy >= 1);
+    let xr = xs8 / cx;
+    let yr = ys8 / cy;
+    let mut out = Vec::with_capacity(xr * yr);
+    let num_blocks = cx * cy;
+    for ry in 0..yr {
+        for rx in 0..xr {
+            let x0 = rx * cx;
+            let y0 = ry * cy;
+            let q = match num_blocks {
+                1 => aq_field[y0 * xs8 + x0],
+                2 => {
+                    let a = aq_field[y0 * xs8 + x0];
+                    let b = if cy == 2 {
+                        aq_field[(y0 + 1) * xs8 + x0]
+                    } else {
+                        aq_field[y0 * xs8 + (x0 + 1)]
+                    };
+                    a.max(b)
+                }
+                _ => {
+                    let mut acc = 0.0f32;
+                    for iy in 0..cy {
+                        for ix in 0..cx {
+                            let q = aq_field[(y0 + iy) * xs8 + (x0 + ix)];
+                            let mut q16 = q * q;
+                            q16 *= q16;
+                            q16 *= q16;
+                            q16 *= q16;
+                            acc += q16;
+                        }
+                    }
+                    (acc / num_blocks as f32).powf(1.0 / 16.0)
+                }
+            };
+            out.push(q);
+        }
+    }
+    out
+}
+
 /// Per-block total cost combiner — the final per-block scalar that
 /// upstream's `estimate_entropy_full` returns. Mirrors the formula
 /// `entropy_mul * total_entropy + total_pixel_loss` per block.
@@ -3296,6 +3433,114 @@ mod tests {
         assert!((x_multiblock_weight(32) - 4.0).abs() < 1e-6);
         // num_blocks=64 → 64/8 = 8, min(8, 3) = 3, w = 4
         assert!((x_multiblock_weight(64) - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_per_block_upstream_cost_per_block_matches_scalar_when_uniform() {
+        // When the per-block quant slice is uniform, the per-block
+        // variant must produce IDENTICAL output to the scalar variant.
+        let entropy = vec![5.0_f32, 5.0, 5.0];
+        let nzeros = vec![3.0_f32, 5.0, 7.0];
+        let loss = vec![1.0_f64, 4.0, 9.0];
+        let scaled = (10.0_f32, 5.0, 1.0);
+        let qs = vec![0.7_f32, 0.7, 0.7];
+        let scalar = per_block_upstream_cost(
+            &entropy, &entropy, &entropy,
+            &nzeros, &nzeros, &nzeros,
+            &loss, 1.5, scaled, 0.7, 64,
+        );
+        let perblock = per_block_upstream_cost_per_block(
+            &entropy, &entropy, &entropy,
+            &nzeros, &nzeros, &nzeros,
+            &loss, 1.5, scaled, &qs, 64,
+        );
+        for i in 0..scalar.len() {
+            assert!(
+                (scalar[i] - perblock[i]).abs() < 1e-3,
+                "i={i} scalar={} perblock={}",
+                scalar[i],
+                perblock[i],
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_block_upstream_cost_per_block_inv_q_varies_per_block() {
+        // With non-uniform per-block quant, inv_q (= 1/q) should
+        // multiply loss_scalar per block. Smaller q → larger inv_q
+        // → larger loss_scalar → larger cost.
+        let entropy = vec![0.0_f32, 0.0];
+        let nzeros = vec![0.0_f32, 0.0];
+        let loss = vec![1.0_f64, 1.0];
+        let scaled = (1.0_f32, 1.0, 0.0);
+        let qs = vec![1.0_f32, 0.5];
+        let costs = per_block_upstream_cost_per_block(
+            &entropy, &entropy, &entropy,
+            &nzeros, &nzeros, &nzeros,
+            &loss, 1.0, scaled, &qs, 64,
+        );
+        // With q=1.0 vs q=0.5: cost1 / cost0 should be 2.0 (since
+        // inv_q = 1/q = 1 vs 2, and loss_scalar scales with inv_q).
+        assert!(
+            (costs[1] / costs[0] - 2.0).abs() < 1e-4,
+            "ratio = {}",
+            costs[1] / costs[0],
+        );
+    }
+
+    #[test]
+    fn test_compute_quant_norm16_per_region_singleton() {
+        // 1×1 regions: should equal the input directly.
+        let aq = vec![0.5_f32, 0.7, 1.0, 1.5];
+        let q = compute_quant_norm16_per_region(&aq, 2, 2, 1, 1);
+        assert_eq!(q, aq);
+    }
+
+    #[test]
+    fn test_compute_quant_norm16_per_region_two_block_max() {
+        // 1×2 region: max of the two values.
+        let aq = vec![0.5_f32, 1.5, 0.7, 1.0]; // 2x2 grid: row0=[0.5, 1.5], row1=[0.7, 1.0]
+        let q = compute_quant_norm16_per_region(&aq, 2, 2, 1, 2);
+        // Region (0,0): col 0 across rows 0..2 → max(0.5, 0.7) = 0.7
+        // Region (1,0): col 1 across rows 0..2 → max(1.5, 1.0) = 1.5
+        assert_eq!(q, vec![0.7, 1.5]);
+    }
+
+    #[test]
+    fn test_compute_quant_norm16_per_region_l16_norm_uniform() {
+        // 4-block region with all-equal quant → quant_norm16 = quant.
+        let aq = vec![0.7_f32; 16]; // 4×4 grid
+        let q = compute_quant_norm16_per_region(&aq, 4, 4, 4, 4);
+        assert_eq!(q.len(), 1);
+        assert!((q[0] - 0.7).abs() < 1e-5, "got {}", q[0]);
+    }
+
+    #[test]
+    fn test_compute_quant_norm16_per_region_l16_norm_biases_to_max() {
+        // L16 norm of {1.0, 1.0, 1.0, 2.0}: pow((1+1+1+2^16)/4, 1/16).
+        // 2^16 = 65536, sum = 65539, /4 = 16384.75, pow(., 1/16).
+        // 16384^(1/16) = (2^14)^(1/16) = 2^(14/16) ≈ 1.7411.
+        // So even one outlier of 2.0 dominates: result is ~1.74.
+        let mut aq = vec![1.0_f32; 16]; // 4×4 grid
+        aq[0] = 2.0;
+        let q = compute_quant_norm16_per_region(&aq, 4, 4, 4, 4);
+        assert_eq!(q.len(), 1);
+        // Computed value: pow(16384.75/16 + tiny, 1/16) — actually
+        // let me recompute: (15*1 + 65536)/16 = 4096.94. pow(4096.94, 1/16).
+        // 4096 = 2^12 → 2^(12/16) = 2^0.75 ≈ 1.6818.
+        let expected = (4096.9375_f32).powf(1.0 / 16.0);
+        assert!((q[0] - expected).abs() < 1e-3, "got {}, expected {}", q[0], expected);
+    }
+
+    #[test]
+    fn test_compute_quant_norm16_per_region_partial_edge_skipped() {
+        // 5×3 grid (xs8=5, ys8=3) with 4×4 strategy → 1×0 = 0 regions.
+        // But with 4×2: 1×1 = 1 region.
+        let aq = vec![0.5_f32; 15];
+        let q44 = compute_quant_norm16_per_region(&aq, 5, 3, 4, 4);
+        assert_eq!(q44.len(), 0);
+        let q42 = compute_quant_norm16_per_region(&aq, 5, 3, 4, 2);
+        assert_eq!(q42.len(), 1);
     }
 
     #[test]

@@ -94,32 +94,7 @@ fn main() {
     let ys8 = (ph as usize) / 8;
     assert_eq!(aq_field.len(), xs8 * ys8);
 
-    // L16 norm over a region of N 8x8 blocks: pow(sum(q^16)/N, 1/16).
-    // Implementing via pow chain `q*q`, `*=`, etc. — same as libjxl.
-    let quant_norm16 = |aq: &[f32], x0: usize, y0: usize, cx: usize, cy: usize| -> f32 {
-        if cx == 1 && cy == 1 {
-            aq[y0 * xs8 + x0]
-        } else if cx + cy == 3 {
-            // num_blocks=2: libjxl uses max of the two
-            let a = aq[y0 * xs8 + x0];
-            let b = if cy == 2 { aq[(y0 + 1) * xs8 + x0] } else { aq[y0 * xs8 + (x0 + 1)] };
-            a.max(b)
-        } else {
-            let mut acc = 0.0f32;
-            let n = (cx * cy) as f32;
-            for iy in 0..cy {
-                for ix in 0..cx {
-                    let q = aq[(y0 + iy) * xs8 + (x0 + ix)];
-                    let mut q16 = q * q;
-                    q16 *= q16;
-                    q16 *= q16;
-                    q16 *= q16; // q^16
-                    acc += q16;
-                }
-            }
-            (acc / n).powf(1.0 / 16.0)
-        }
-    };
+    use jxl_encoder_gpu::forks::cost::compute_quant_norm16_per_region;
 
     let strategies = [
         ("DCT16x16", 2usize, 2usize),
@@ -142,17 +117,8 @@ fn main() {
 
     for (name, cx, cy) in &strategies {
         if xs8 < *cx || ys8 < *cy { continue; }
-        let mut ratios = Vec::new();
-        let yb_steps = ys8.saturating_sub(*cy - 1);
-        let xb_steps = xs8.saturating_sub(*cx - 1);
-        // Step by region size (non-overlapping, as the strategy
-        // assignments would actually use).
-        for y0 in (0..yb_steps).step_by(*cy) {
-            for x0 in (0..xb_steps).step_by(*cx) {
-                let qn16 = quant_norm16(&aq_field, x0, y0, *cx, *cy);
-                ratios.push(qn16 / scalar_qac);
-            }
-        }
+        let qn16 = compute_quant_norm16_per_region(&aq_field, xs8, ys8, *cx, *cy);
+        let ratios: Vec<f32> = qn16.iter().map(|q| q / scalar_qac).collect();
         if ratios.is_empty() { continue; }
         let mut sorted = ratios.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
