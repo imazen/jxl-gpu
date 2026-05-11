@@ -1964,34 +1964,21 @@ impl<R: Runtime> GpuEncoder<R> {
         let xsize_blocks = cpu_pw / 8;
         let ysize_blocks = cpu_ph / 8;
 
-        // Run the butteraugli refinement loop using the persistent
-        // (no-roundtrip) variant — produces a refined per-block aq
-        // field at GPU's padded-block grid.
         let gpu_xsize_blocks = (gpu_pw as usize) / 8;
         let gpu_ysize_blocks = (gpu_ph as usize) / 8;
-        let initial_aq = alloc::vec![
-            crate::lossy_encoder::distance_to_qac(distance);
-            gpu_xsize_blocks * gpu_ysize_blocks
-        ];
-        let refined_aq_gpu_grid =
-            crate::forks::butteraugli_loop::refine_aq_field_gpu_with_strategy_search_persistent(
-                self, lossy, bg, r, g, b, ref_srgb, &initial_aq, distance, iters, |_| {},
-            )
-            .map_err(|e| {
-                jxl_encoder::api::EncodeError::InvalidInput {
-                    message: alloc::format!("butteraugli refinement failed: {e:?}"),
-                }
-            })?;
 
-        // Run prepare to get xyb planes + assignments (separate from
-        // the refinement above, which builds its own internal plan).
+        // Compute an adaptive initial_aq via compute_quant_field_float_free
+        // (matches what the bitstream emit path will see), then upsample
+        // to GPU's padded-block grid. Seeding with adaptive (vs uniform
+        // distance_to_qac) gives the refinement loop a much better
+        // starting point — uniform initial wastes most of the iter
+        // budget converging on the per-block masking the encoder
+        // already knows about.
         let plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
-        let xyb_x_gpu = self.download_plane(&plan.xyb_x_gpu);
-        let xyb_y_gpu = self.download_plane(&plan.xyb_y_gpu);
-        let xyb_b_gpu = self.download_plane(&plan.xyb_b_gpu);
-
-        // Repack xyb from GPU's gpu_pw×gpu_ph layout to CPU's cpu_pw×cpu_ph.
-        let repack = |src: &[f32]| -> alloc::vec::Vec<f32> {
+        let xyb_x_dl = self.download_plane(&plan.xyb_x_gpu);
+        let xyb_y_dl = self.download_plane(&plan.xyb_y_gpu);
+        let xyb_b_dl = self.download_plane(&plan.xyb_b_gpu);
+        let repack_first = |src: &[f32]| -> alloc::vec::Vec<f32> {
             if cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize {
                 src.to_vec()
             } else {
@@ -2003,9 +1990,50 @@ impl<R: Runtime> GpuEncoder<R> {
                 dst
             }
         };
-        let xyb_x = repack(&xyb_x_gpu);
-        let xyb_y = repack(&xyb_y_gpu);
-        let xyb_b = repack(&xyb_b_gpu);
+        let xyb_x_cpu = repack_first(&xyb_x_dl);
+        let xyb_y_cpu = repack_first(&xyb_y_dl);
+        let xyb_b_cpu = repack_first(&xyb_b_dl);
+        let (adaptive_initial_cpu, _) = compute_quant_field_float_free(
+            &xyb_x_cpu, &xyb_y_cpu, &xyb_b_cpu,
+            cpu_pw, cpu_ph,
+            xsize_blocks, ysize_blocks,
+            distance,
+            crate::lossy_encoder::K_AC_QUANT,
+        )
+        .map_err(jxl_encoder::api::EncodeError::from)?;
+
+        // Upsample CPU-grid (xsize_blocks × ysize_blocks) → GPU-grid
+        // (gpu_xsize_blocks × gpu_ysize_blocks): copy row by row,
+        // edge-replicate the right column / bottom row.
+        let initial_aq: alloc::vec::Vec<f32> =
+            if xsize_blocks == gpu_xsize_blocks && ysize_blocks == gpu_ysize_blocks {
+                adaptive_initial_cpu.clone()
+            } else {
+                let qac = crate::lossy_encoder::distance_to_qac(distance);
+                let mut dst = alloc::vec![qac; gpu_xsize_blocks * gpu_ysize_blocks];
+                for by in 0..ysize_blocks {
+                    for bx in 0..xsize_blocks {
+                        dst[by * gpu_xsize_blocks + bx] =
+                            adaptive_initial_cpu[by * xsize_blocks + bx];
+                    }
+                }
+                dst
+            };
+        let refined_aq_gpu_grid =
+            crate::forks::butteraugli_loop::refine_aq_field_gpu_with_strategy_search_persistent(
+                self, lossy, bg, r, g, b, ref_srgb, &initial_aq, distance, iters, |_| {},
+            )
+            .map_err(|e| {
+                jxl_encoder::api::EncodeError::InvalidInput {
+                    message: alloc::format!("butteraugli refinement failed: {e:?}"),
+                }
+            })?;
+
+        // Reuse the xyb we already downloaded + repacked for the
+        // adaptive_initial seed above.
+        let xyb_x = xyb_x_cpu;
+        let xyb_y = xyb_y_cpu;
+        let xyb_b = xyb_b_cpu;
 
         // Repack refined aq_field from GPU block grid to CPU block grid.
         let refined_aq: alloc::vec::Vec<f32> =
