@@ -2013,14 +2013,15 @@ impl<R: Runtime> LossyEncoder<R> {
         // (probed 2026-05-10 with mark("alloc_recon_planes")), 51% of
         // encode iter wall-clock — by far the largest single bottleneck.
         //
-        // Two fixes attempted, both regressed:
+        // THREE fixes attempted, all regressed or no-op:
         // 1. `client.empty() + GPU zero_fill` per call: regressed 5×
         //    (605→2947 ms). Cubecl's empty() doesn't pool-reuse 64 MB.
         // 2. Cached `empty()` handles on LossyEncoder + GPU zero_fill
-        //    per iter: regressed 2× (605→1168 ms). 500 ms of
-        //    unattributed CPU/sync overhead appeared, source unknown
-        //    (suspected: cubecl handle-clone refcount cost or pool
-        //    confusion from holding 192 MB pinned).
+        //    per iter: regressed 2× (605→1168 ms). 500 ms unattributed.
+        // 3. Batched single-call alloc via `create_tensors_from_slices`
+        //    (mirroring `upload_planes_3ch`): zero-delta (605.96 →
+        //    605.95 ms). cubecl's pool already amortizes the 3
+        //    sequential calls; no win from batching.
         //
         // Real fix needs the cubecl pinned-buffer PR or the raw-cudarc
         // bypass — until then this 308 ms is the production baseline.
