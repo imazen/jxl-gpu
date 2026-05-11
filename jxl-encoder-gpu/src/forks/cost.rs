@@ -706,7 +706,7 @@ pub fn compute_scaled_constants(distance: f32, bases: (f32, f32, f32)) -> (f32, 
 }
 
 /// Cost-formula selector for [`estimate_entropy_full_dct8_batch_gpu`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CostMode {
     /// Simpler formula `entropy_mul * sum(channel_entropies) +
     /// total_pixel_loss` — fast and sufficient for ranking
@@ -721,6 +721,23 @@ pub enum CostMode {
     /// Pass the per-block `quant_for_coeffs` value via the
     /// orchestrator's argument.
     Upstream { quant_for_coeffs: f32 },
+    /// Upstream-faithful formula with **per-block** `quant_for_coeffs`.
+    /// Mirrors libjxl's `quant_norm16` use in
+    /// `enc_ac_strategy.cc:412-415` where the L16-normed per-region
+    /// quant is fed into the loss_scalar denominator. Wraps
+    /// [`per_block_upstream_cost_per_block`].
+    ///
+    /// Caller computes `quant_for_coeffs` via
+    /// [`compute_quant_norm16_per_region`] from a per-8x8-block
+    /// adaptive_quant field. Length must equal the cost grid's
+    /// `n_blocks` (one entry per output cell).
+    ///
+    /// Use [`CostMode::Upstream`] (scalar) for uniform-quant images
+    /// or when the aq_field isn't available; this variant is the
+    /// libjxl-faithful path for adaptive-quant strat-search.
+    UpstreamPerBlock {
+        quant_for_coeffs: alloc::vec::Vec<f32>,
+    },
 }
 
 /// Batched per-block cost evaluator for DCT8 — the inner loop of
@@ -921,6 +938,19 @@ pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
                 64, // DCT8: block_pixel_count = 64
             )
         }
+        CostMode::UpstreamPerBlock { quant_for_coeffs } => {
+            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            per_block_upstream_cost_per_block(
+                &entropy_x, &entropy_y, &entropy_b,
+                &nzeros_x, &nzeros_y, &nzeros_b,
+                &pixel_loss_total,
+                entropy_mul, scaled_constants,
+                &quant_for_coeffs,
+                64,
+            )
+        }
     }
 }
 
@@ -1079,6 +1109,19 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
                 entropy_mul,
                 scaled_constants,
                 quant_for_coeffs,
+                64,
+            )
+        }
+        CostMode::UpstreamPerBlock { quant_for_coeffs } => {
+            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            per_block_upstream_cost_per_block(
+                &entropy_x, &entropy_y, &entropy_b,
+                &nzeros_x, &nzeros_y, &nzeros_b,
+                &pixel_loss_total,
+                entropy_mul, scaled_constants,
+                &quant_for_coeffs,
                 64,
             )
         }
@@ -1263,7 +1306,10 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
     // inside per_block_upstream_cost (it needs to multiply the sum
     // of entropy_x + nzeros_bits_term per block).
     let entropy_x = entropy_x_raw;
-    if matches!(mode, CostMode::Upstream { .. }) {
+    if matches!(
+        mode,
+        CostMode::Upstream { .. } | CostMode::UpstreamPerBlock { .. }
+    ) {
         let covered_blocks = block_pixels / 64;
         apply_x_multiblock_weight_to_loss(&mut loss_x, covered_blocks);
     }
@@ -1298,6 +1344,19 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
                 entropy_mul,
                 scaled_constants,
                 quant_for_coeffs,
+                block_pixels,
+            )
+        }
+        CostMode::UpstreamPerBlock { quant_for_coeffs } => {
+            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            per_block_upstream_cost_per_block(
+                &entropy_x, &entropy_y, &entropy_b,
+                &nzeros_x, &nzeros_y, &nzeros_b,
+                &pixel_loss_total,
+                entropy_mul, scaled_constants,
+                &quant_for_coeffs,
                 block_pixels,
             )
         }
@@ -1506,7 +1565,10 @@ pub fn estimate_entropy_full_strategy_batch_persistent_with_handle<R: Runtime>(
     let entropy_x = extract_per_block_entropy(&x_stats, n_blocks);
     let entropy_y = extract_per_block_entropy(&y_stats, n_blocks);
     let entropy_b = extract_per_block_entropy(&b_stats, n_blocks);
-    if matches!(mode, CostMode::Upstream { .. }) {
+    if matches!(
+        mode,
+        CostMode::Upstream { .. } | CostMode::UpstreamPerBlock { .. }
+    ) {
         let covered_blocks = block_pixels / 64;
         apply_x_multiblock_weight_to_loss(&mut loss_x, covered_blocks);
     }
@@ -1533,6 +1595,19 @@ pub fn estimate_entropy_full_strategy_batch_persistent_with_handle<R: Runtime>(
                 entropy_mul,
                 scaled_constants,
                 quant_for_coeffs,
+                block_pixels,
+            )
+        }
+        CostMode::UpstreamPerBlock { quant_for_coeffs } => {
+            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            per_block_upstream_cost_per_block(
+                &entropy_x, &entropy_y, &entropy_b,
+                &nzeros_x, &nzeros_y, &nzeros_b,
+                &pixel_loss_total,
+                entropy_mul, scaled_constants,
+                &quant_for_coeffs,
                 block_pixels,
             )
         }
@@ -2743,6 +2818,113 @@ pub fn strategy_search_costs_dct32x32_persistent<R: Runtime>(
     )
 }
 
+/// libjxl-faithful variant of [`strategy_search_costs_dct32x32_persistent`]
+/// — accepts a per-8x8-block adaptive_quant field
+/// (`aq_field.len() == (padded_width/8) * (padded_height/8)`) and
+/// uses libjxl's L16-normed `quant_norm16` per 32×32 region (the
+/// strat-search's natural cell granularity) as `quant_for_coeffs`,
+/// instead of broadcasting the scalar `quant_y`.
+///
+/// Mirrors libjxl `enc_ac_strategy.cc:412-413` exactly, plumbed
+/// through [`CostMode::UpstreamPerBlock`] and
+/// [`per_block_upstream_cost_per_block`].
+///
+/// **Why this matters**: on adaptive-quant photos, the per-region
+/// L16 norm diverges from the scalar by 1.41-1.52× on the median
+/// region (88-94% of regions deviate >10%), which biases the cost
+/// ranking against multi-block strategies. Using the L16 norm
+/// removes that bias on the loss-side. See
+/// `examples/quant_norm16_divergence.rs` for the diagnostic that
+/// motivated this fix.
+///
+/// `entropy_mul` defaults to 3.0 (same band-aid as the scalar
+/// variant) — caller can re-tune this toward libjxl's reference 1.48
+/// once they verify the fix moves the ranking in the expected
+/// direction.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_dct32x32_persistent_with_aq_field<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xyb_plane_x: &crate::persistent::GpuPlane<R>,
+    xyb_plane_y: &crate::persistent::GpuPlane<R>,
+    xyb_plane_b: &crate::persistent::GpuPlane<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    weights_x: &[f32],
+    weights_y: &[f32],
+    weights_b: &[f32],
+    inv_weights_x: &[f32],
+    inv_weights_y: &[f32],
+    inv_weights_b: &[f32],
+    aq_field: &[f32],
+    quant_x: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+    entropy_mul: f32,
+) -> Vec<f32> {
+    use crate::forks::transform::{RAW_STRATEGY_DCT32X32, tile_dims_pixels};
+    let (tile_w, tile_h) = tile_dims_pixels(RAW_STRATEGY_DCT32X32);
+    if !padded_width.is_multiple_of(tile_w) || !padded_height.is_multiple_of(tile_h) {
+        return Vec::new();
+    }
+    let xs8 = padded_width / 8;
+    let ys8 = padded_height / 8;
+    debug_assert_eq!(aq_field.len(), xs8 * ys8);
+    let bx = padded_width / tile_w;
+    let by = padded_height / tile_h;
+    let n_blocks = bx * by;
+
+    let g_bx = enc.gather_blocks_persistent(xyb_plane_x, tile_w as u32, tile_h as u32);
+    let g_by = enc.gather_blocks_persistent(xyb_plane_y, tile_w as u32, tile_h as u32);
+    let g_bb = enc.gather_blocks_persistent(xyb_plane_b, tile_w as u32, tile_h as u32);
+    let mask_row_base: Vec<u32> = (0..n_blocks)
+        .map(|i| {
+            let bx_i = i % bx;
+            let by_i = i / bx;
+            (by_i * tile_h * padded_width + bx_i * tile_w) as u32
+        })
+        .collect();
+
+    // L16-norm per 32×32 region (= 4×4 8x8 blocks).
+    let quant_norm16 = compute_quant_norm16_per_region(aq_field, xs8, ys8, 4, 4);
+    debug_assert_eq!(quant_norm16.len(), n_blocks);
+
+    estimate_entropy_full_strategy_batch_persistent(
+        enc,
+        &g_bx,
+        &g_by,
+        &g_bb,
+        RAW_STRATEGY_DCT32X32,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        // For the strat-search's GPU kernel-side quantization we still
+        // pass the median quant_norm16 as the scalar quant_y — the
+        // kernel-side fix (per-block quant in coefficient quantization)
+        // is the harder, GPU-buffer-required follow-up.
+        quant_norm16
+            .iter()
+            .copied()
+            .sum::<f32>() / n_blocks as f32,
+        quant_b,
+        ytox,
+        ytob,
+        mask1x1,
+        &mask_row_base,
+        scaled_constants,
+        entropy_mul,
+        CostMode::UpstreamPerBlock {
+            quant_for_coeffs: quant_norm16,
+        },
+    )
+}
+
 /// Persistent variant of [`strategy_search_costs_dct32x16_or_16x32`].
 /// Takes XYB GpuPlanes, gathers tile blocks internally. Returns
 /// Vec::new() when dims aren't aligned for the chosen strategy.
@@ -3090,7 +3272,7 @@ mod tests {
             &inv_x, &inv_y, &inv_b,
             0.7, 0.7, 0.7, 0, 0,
             &mask, &mask_row_base, pw,
-            scaled, entropy_mul, mode,
+            scaled, entropy_mul, mode.clone(),
         );
 
         // Persistent path: pre-upload pixel blocks and mask to GPU.
