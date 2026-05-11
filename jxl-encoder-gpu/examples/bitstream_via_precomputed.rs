@@ -34,6 +34,7 @@ fn main() {
     let mut image_path: Option<String> = None;
     let mut target_mp: Option<f32> = None;
     let mut distance: f32 = 1.0;
+    let mut out_path: Option<String> = None;
     let mut i = 1;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -47,6 +48,10 @@ fn main() {
             }
             "--distance" => {
                 distance = raw[i + 1].parse().expect("--distance D");
+                i += 2;
+            }
+            "--out" => {
+                out_path = Some(raw[i + 1].clone());
                 i += 2;
             }
             other => panic!("unknown arg: {other}"),
@@ -138,4 +143,9 @@ fn main() {
         "  [sig] valid {} signature",
         if is_container { "container" } else { "codestream" }
     );
+
+    if let Some(path) = out_path {
+        std::fs::write(&path, &bitstream).expect("write bitstream");
+        println!("  [out] wrote {}", path);
+    }
 }

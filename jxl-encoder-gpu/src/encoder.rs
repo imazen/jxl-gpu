@@ -1723,10 +1723,25 @@ impl<R: Runtime> GpuEncoder<R> {
     /// quantization decisions).
     ///
     /// **First-cut implementation** — uses CfL=zeros, masking=zeros,
-    /// chromacity=0, noise_params=None. Scoped to validate the
-    /// architectural seam end-to-end; quality refinement (real CfL
-    /// from the GPU pipeline, real masking, etc.) is bounded follow-up
-    /// once the bitstream output is verified valid.
+    /// chromacity=0, noise_params=None, AcStrategyMap=all-DCT8.
+    /// Scoped to validate the architectural seam end-to-end.
+    ///
+    /// **STATUS (2026-05-11)**: produces a valid JXL codestream
+    /// signature (0xFF 0x0A) and 386 KB output at 1 MP / d=1, but
+    /// the body fails decode in both djxl and jxl-oxide with
+    /// "modular stream error: unexpected EOF" during frame render.
+    /// The bitstream is structurally valid (headers parse, dims
+    /// echo correctly: 1000×1000) but the encoded data is malformed
+    /// or oversized (~3.09 bpp vs typical ~1 bpp at d=1). Suspected
+    /// causes:
+    ///   - GPU XYB scale mismatch (libjxl's specific opsin matrix
+    ///     scaling vs ours)
+    ///   - chromacity_*_pixelized=0 corrupts a
+    ///     `params.apply_chromacity_adjustment` step
+    ///   - some required precomputed field needs a non-stub value
+    /// Debug requires diffing against a known-good
+    /// `EncoderPrecomputed` from the rate-control path. Tracked as
+    /// follow-up; the architectural seam is in place and reachable.
     ///
     /// `linear_rgb_padded` MUST be planar linear RGB padded to
     /// `lossy.padded_dimensions()` (each channel is
@@ -1764,13 +1779,12 @@ impl<R: Runtime> GpuEncoder<R> {
         let xyb_y = self.download_plane(&plan.xyb_y_gpu);
         let xyb_b = self.download_plane(&plan.xyb_b_gpu);
 
-        // Step 3: AcStrategyMap from plan.assignments.
-        let mut ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
-        for a in &plan.assignments {
-            if a.raw_strategy != 0 {
-                ac_strategy.set(a.bx as usize, a.by as usize, a.raw_strategy);
-            }
-        }
+        // Step 3: AcStrategyMap. First-cut uses ALL-DCT8 to validate
+        // the precomputed seam without compounding strategy-translation
+        // bugs. TODO: convert plan.assignments → AcStrategyMap once
+        // DCT8-only path is decode-validated.
+        let _ = &plan.assignments;
+        let ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
 
         // Step 4: CfL = zeros. TODO: extract real CfL from GPU
         // (chroma-from-luma kernel runs during prepare; not yet exposed
