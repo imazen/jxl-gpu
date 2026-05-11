@@ -1854,33 +1854,38 @@ pub fn strategy_search_costs_dct32x32<R: Runtime>(
         .collect();
 
     // libjxl entropy_mul: profile.entropy_mul_table[DCT32X32] = 1.48.
-    // We use 2.5 here pending implementation of the rest of libjxl's
-    // cost-model adjustments (X-channel multi-block weight,
-    // kAvoidEntropyOfTransforms, AdjustQuantBlockAC). Without those
-    // counterweights, 1.48 over-selects DCT32 (butteraugli 8.36 on
-    // CLIC test image vs 1.35 with 2.5). Bumped 2.5 → 4.0 (May 9 2026)
-    // after corpus-sweep diagnostics found 2.5 still over-selects DCT32
-    // on detailed content (image 2684452d: 40 DCT32 picks → +31%
-    // butteraugli regression vs uniform). Same root cause as DCT64x64
-    // band-aid — missing libjxl pixel-loss penalty for large transforms.
+    // We use 3.0 here pending root-cause diagnosis. Mul tuning is
+    // FULLY WEDGED against corpus regression — every bisection toward
+    // libjxl 1.48 regresses photo corpus images with strat-wins flip.
     //
-    // 4.0 → 3.0 (May 9 2026): once the corpus regression test landed,
-    // bisected DCT32 mul on the 11-image corpus. 4 ✓ baseline, 3 ✓,
-    // 2 ✗ (07b9f93f -1.5%, 22ea12c9 +2.4%, 2684452d +2.0%; strat-wins
-    // photos shift to RefineDct8 at 2.0).
+    // History (do NOT re-bisect without first fixing root cause):
+    //   1.48 → 2.5: kept butteraugli usable (1.35 vs 8.36).
+    //   2.5  → 4.0 (May 9): 2684452d +31% baugli at 2.5.
+    //   4.0  → 3.0 (May 9): 2684452d ✓ at 3.0; 2.0 ✗ (-1.5%/+2.4%/+2.0%).
+    //   3.0  → 2.85/2.7 (May 11): both regressed 2684452d d=1 path-flip.
     //
-    // 3.0 → 2.85 / 2.7 (May 11 2026): re-attempted bisection now
-    // that diag confirmed GPU strat-search picks ~99.6% DCT8 on a
-    // real CLIC photo at d=0.5/1.0/2.0 (vs cjxl ~70%, baugli 2.2×
-    // worse). Both 2.85 and 2.7 regressed 2684452d at d=1 (1.95%
-    // outside 0.5% tol; path flip RefineStratSearch → RefineDct8).
-    // Reverted to 3.0. Same for DCT64 4.8 → 4.5 (22ea12c9 regressed
-    // 6.3% at d=0.5, path flip). Mul tuning is FULLY WEDGED against
-    // corpus regression without the missing libjxl heuristics
-    // (kAvoidEntropyOfTransforms, X-channel multi-block weight,
-    // mul8x8 vs mul16x16 vs mul32x32 ratio adjustments).
+    // ROOT CAUSE STATUS (2026-05-11): NOT what the prior comment said.
+    // The prior comment blamed missing libjxl heuristics — that's wrong:
+    //   - X-channel multi-block weight IS implemented
+    //     (see apply_x_multiblock_weight_to_loss at cost.rs:1131/1374
+    //     and the *x_w in per_block_upstream_cost at cost.rs:249).
+    //   - kAvoidEntropyOfTransforms only fires at butteraugli_target
+    //     > 4.0 (libjxl enc_ac_strategy.cc:594) — irrelevant at our
+    //     bench distances of 0.5..3.0.
     //
-    // Re-tune toward libjxl 1.48 when the missing pixel-loss term lands.
+    // ACTUAL likely causes (next-tick investigation entry points,
+    // see ~/.claude/.../memory/cost_model_wedge_analysis.md):
+    //   1. We pass `quant_y` (scalar global qac) as `quant_for_coeffs`
+    //      instead of `quant_norm16` (libjxl's L16 norm of per-block
+    //      adaptive_quant values across the strategy region). For
+    //      adaptive quant on real photos these diverge.
+    //   2. compute_scaled_constants_free's (info_loss_mul, cost_delta,
+    //      zeros_mul) at d=0.5..3.0 may not match libjxl's distance
+    //      scaling.
+    //   3. 8x8-vs-multiblock comparison bias from differing quant inputs
+    //      between the DCT8 cost path and the DCT32 cost path.
+    //
+    // Fix one of these first; THEN tune toward libjxl 1.48.
     let entropy_mul = 3.0_f32;
 
     estimate_entropy_full_strategy_batch_persistent(
