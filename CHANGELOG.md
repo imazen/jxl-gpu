@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed (May 10, 2026)
+
+- **debug-mode test failures in `forks/reconstruct.rs`**: 5 LossyEncoder
+  tests silently failed under debug builds (`cargo test`) but passed in
+  release because `debug_assert_eq!` was checking that the host
+  `xyb_channel` and `dc_grid_per_8x8_block` slices matched padded
+  dimensions — but commit 78ca825c (no-download optimization) nullified
+  those slices to empty `Vec`s. Production was unaffected; tests now
+  pass in both modes. Commit 6ae2d34c.
+- **CI `build-cpu` matrix compile error**: `tests/partition_selector.rs`
+  imported `jxl_encoder_gpu::pipeline::*` (gated behind `encoder`
+  feature), so the `cargo test --no-default-features --features cpu
+  --tests` step in the CI workflow's build-cpu job (ubuntu-latest,
+  windows-latest, windows-11-arm, macos-15-intel, macos-latest) failed
+  with `RUSTFLAGS="-D warnings"`. Test now `#![cfg(feature = "encoder")]`-
+  gated. Commit 94805ae8.
+
 ### u8 RGB upload fast-path for prepare_strategy_search_plan (May 10, 2026)
 
 `LossyEncoder::prepare_strategy_search_plan_traced_from_u8` accepts raw
