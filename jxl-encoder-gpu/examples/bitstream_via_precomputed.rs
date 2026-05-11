@@ -27,6 +27,8 @@ fn main() {
 
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
+    #[cfg(feature = "butteraugli-loop")]
+    use jxl_encoder_gpu::forks::butteraugli_loop::ButteraugliLoopGpu;
 
     type B = cubecl::cuda::CudaRuntime;
 
@@ -35,6 +37,7 @@ fn main() {
     let mut target_mp: Option<f32> = None;
     let mut distance: f32 = 1.0;
     let mut out_path: Option<String> = None;
+    let mut e8_iters: usize = 0; // 0 = no butteraugli refinement (e7 path)
     let mut i = 1;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -52,6 +55,10 @@ fn main() {
             }
             "--out" => {
                 out_path = Some(raw[i + 1].clone());
+                i += 2;
+            }
+            "--e8-iters" => {
+                e8_iters = raw[i + 1].parse().expect("--e8-iters N");
                 i += 2;
             }
             other => panic!("unknown arg: {other}"),
@@ -108,11 +115,27 @@ fn main() {
     let enc: GpuEncoder<B> = GpuEncoder::new();
     let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, w, h);
 
-    println!("[run] encode_lossy_to_bitstream_via_precomputed …");
     let t0 = Instant::now();
-    let bitstream = enc
-        .encode_lossy_to_bitstream_via_precomputed(&lossy, &r, &g, &b, distance)
-        .unwrap_or_else(|e| panic!("encode failed: {e:?}"));
+    let bitstream = if e8_iters > 0 {
+        #[cfg(feature = "butteraugli-loop")]
+        {
+            println!("[run] encode_lossy_to_bitstream_via_precomputed_with_butteraugli (iters={}) …", e8_iters);
+            let mut bg: ButteraugliLoopGpu<B> = ButteraugliLoopGpu::new_multires(&enc, w, h);
+            bg.set_reference(&pixels_u8).expect("set_reference");
+            enc.encode_lossy_to_bitstream_via_precomputed_with_butteraugli(
+                &lossy, &mut bg, &r, &g, &b, &pixels_u8, distance, e8_iters,
+            )
+            .unwrap_or_else(|e| panic!("e8 encode failed: {e:?}"))
+        }
+        #[cfg(not(feature = "butteraugli-loop"))]
+        {
+            panic!("--e8-iters requires --features butteraugli-loop");
+        }
+    } else {
+        println!("[run] encode_lossy_to_bitstream_via_precomputed …");
+        enc.encode_lossy_to_bitstream_via_precomputed(&lossy, &r, &g, &b, distance)
+            .unwrap_or_else(|e| panic!("encode failed: {e:?}"))
+    };
     let dt_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     println!(

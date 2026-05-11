@@ -1925,6 +1925,182 @@ impl<R: Runtime> GpuEncoder<R> {
             .encode_from_precomputed(&precomputed, &quant_field_u8)
             .map_err(jxl_encoder::api::EncodeError::from)
     }
+
+    /// e8+ variant of [`Self::encode_lossy_to_bitstream_via_precomputed`]
+    /// — runs `refine_aq_field_gpu_with_strategy_search_persistent`
+    /// first to get a butteraugli-refined per-block quant field, then
+    /// hands it to the encoder. Closes the quality gap to cjxl at
+    /// low distances at the cost of `iters * encode_iter_cost` extra
+    /// GPU work (e.g. ~1.0 sec / iter at 12 MP — see perf_e7_vs_e8).
+    ///
+    /// `ref_srgb` is the original image as interleaved sRGB u8 (used
+    /// by butteraugli as the reference). MUST be exactly
+    /// `width * height * 3` bytes.
+    ///
+    /// `iters` mirrors libjxl effort gating: 2 for Kitten (e8), 4 for
+    /// Cheetah (e9+).
+    #[cfg(all(feature = "encoder", feature = "butteraugli-loop"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_lossy_to_bitstream_via_precomputed_with_butteraugli(
+        &self,
+        lossy: &crate::lossy_encoder::LossyEncoder<R>,
+        bg: &mut crate::forks::butteraugli_loop::ButteraugliLoopGpu<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        ref_srgb: &[u8],
+        distance: f32,
+        iters: usize,
+    ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
+        use jxl_encoder::__pre_quantized::{
+            AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder,
+            compute_cfl_map, compute_quant_field_float_free, quantize_quant_field,
+        };
+
+        let (width, height) = lossy.dimensions();
+        let (gpu_pw, gpu_ph) = lossy.padded_dimensions();
+        let cpu_pw = (width as usize).div_ceil(8) * 8;
+        let cpu_ph = (height as usize).div_ceil(8) * 8;
+        let xsize_blocks = cpu_pw / 8;
+        let ysize_blocks = cpu_ph / 8;
+
+        // Run the butteraugli refinement loop using the persistent
+        // (no-roundtrip) variant — produces a refined per-block aq
+        // field at GPU's padded-block grid.
+        let gpu_xsize_blocks = (gpu_pw as usize) / 8;
+        let gpu_ysize_blocks = (gpu_ph as usize) / 8;
+        let initial_aq = alloc::vec![
+            crate::lossy_encoder::distance_to_qac(distance);
+            gpu_xsize_blocks * gpu_ysize_blocks
+        ];
+        let refined_aq_gpu_grid =
+            crate::forks::butteraugli_loop::refine_aq_field_gpu_with_strategy_search_persistent(
+                self, lossy, bg, r, g, b, ref_srgb, &initial_aq, distance, iters, |_| {},
+            )
+            .map_err(|e| {
+                jxl_encoder::api::EncodeError::InvalidInput {
+                    message: alloc::format!("butteraugli refinement failed: {e:?}"),
+                }
+            })?;
+
+        // Run prepare to get xyb planes + assignments (separate from
+        // the refinement above, which builds its own internal plan).
+        let plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
+        let xyb_x_gpu = self.download_plane(&plan.xyb_x_gpu);
+        let xyb_y_gpu = self.download_plane(&plan.xyb_y_gpu);
+        let xyb_b_gpu = self.download_plane(&plan.xyb_b_gpu);
+
+        // Repack xyb from GPU's gpu_pw×gpu_ph layout to CPU's cpu_pw×cpu_ph.
+        let repack = |src: &[f32]| -> alloc::vec::Vec<f32> {
+            if cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize {
+                src.to_vec()
+            } else {
+                let mut dst = alloc::vec::Vec::with_capacity(cpu_pw * cpu_ph);
+                for row in 0..cpu_ph {
+                    let off = row * (gpu_pw as usize);
+                    dst.extend_from_slice(&src[off..off + cpu_pw]);
+                }
+                dst
+            }
+        };
+        let xyb_x = repack(&xyb_x_gpu);
+        let xyb_y = repack(&xyb_y_gpu);
+        let xyb_b = repack(&xyb_b_gpu);
+
+        // Repack refined aq_field from GPU block grid to CPU block grid.
+        let refined_aq: alloc::vec::Vec<f32> =
+            if xsize_blocks == gpu_xsize_blocks && ysize_blocks == gpu_ysize_blocks {
+                refined_aq_gpu_grid
+            } else {
+                let mut dst = alloc::vec::Vec::with_capacity(xsize_blocks * ysize_blocks);
+                for by in 0..ysize_blocks {
+                    let off = by * gpu_xsize_blocks;
+                    dst.extend_from_slice(&refined_aq_gpu_grid[off..off + xsize_blocks]);
+                }
+                dst
+            };
+
+        // AcStrategyMap from plan.assignments (clipped to CPU grid).
+        let mut ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
+        for a in &plan.assignments {
+            let bx = a.bx as usize;
+            let by = a.by as usize;
+            if bx >= xsize_blocks || by >= ysize_blocks {
+                continue;
+            }
+            use crate::forks::transform::*;
+            let (cx, cy): (usize, usize) = match a.raw_strategy {
+                RAW_STRATEGY_DCT16X8 => (1, 2),
+                RAW_STRATEGY_DCT8X16 => (2, 1),
+                RAW_STRATEGY_DCT16X16 => (2, 2),
+                RAW_STRATEGY_DCT32X16 => (2, 4),
+                RAW_STRATEGY_DCT16X32 => (4, 2),
+                RAW_STRATEGY_DCT32X32 => (4, 4),
+                RAW_STRATEGY_DCT64X32 => (4, 8),
+                RAW_STRATEGY_DCT32X64 => (8, 4),
+                RAW_STRATEGY_DCT64X64 => (8, 8),
+                _ => (1, 1),
+            };
+            if bx + cx > xsize_blocks || by + cy > ysize_blocks {
+                continue;
+            }
+            if a.raw_strategy != 0 {
+                ac_strategy.set(bx, by, a.raw_strategy);
+            }
+        }
+
+        // CfL on host from XYB.
+        let cfl_map = compute_cfl_map(
+            &xyb_x, &xyb_y, &xyb_b,
+            cpu_pw, cpu_ph,
+            xsize_blocks, ysize_blocks,
+            true, 1e-3, 10,
+        );
+
+        // We still need masking from compute_quant_field_float_free,
+        // but use the BUTTERAUGLI-REFINED aq_field as quant_field_float
+        // (overrides the initial from compute_quant_field_float_free).
+        let (_initial_qff, masking) = compute_quant_field_float_free(
+            &xyb_x, &xyb_y, &xyb_b,
+            cpu_pw, cpu_ph,
+            xsize_blocks, ysize_blocks,
+            distance,
+            crate::lossy_encoder::K_AC_QUANT,
+        )
+        .map_err(jxl_encoder::api::EncodeError::from)?;
+        let quant_field_float = refined_aq;
+
+        let precomputed = EncoderPrecomputed::from_parts(
+            width as usize,
+            height as usize,
+            xsize_blocks,
+            ysize_blocks,
+            cpu_pw,
+            cpu_ph,
+            xyb_x,
+            xyb_y,
+            xyb_b,
+            alloc::vec::Vec::new(),
+            cfl_map,
+            None,
+            quant_field_float.clone(),
+            masking,
+            None,
+            ac_strategy,
+            true,
+            distance,
+            0,
+            0,
+        );
+
+        let vardct = VarDctEncoder::new(distance);
+        let params = DistanceParams::compute_for_profile(distance, &vardct.profile);
+        let quant_field_u8 = quantize_quant_field(&quant_field_float, params.inv_scale);
+
+        vardct
+            .encode_from_precomputed(&precomputed, &quant_field_u8)
+            .map_err(jxl_encoder::api::EncodeError::from)
+    }
 }
 
 impl<R: Runtime> Default for GpuEncoder<R> {
