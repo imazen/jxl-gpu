@@ -1530,13 +1530,30 @@ impl<R: Runtime> LossyEncoder<R> {
                 0,
                 0,
                 scaled_constants,
-                // entropy_mul = 3.0 — same as the scalar-quant variant
-                // pre-fix. The aq_field-aware loss-side fix ALONE
-                // didn't change strat-search rankings noticeably on
-                // the 02809272 CLIC photo (still ~99.6% DCT8) — the
-                // entropy side bias dominates. Re-bisect this in the
-                // corpus regression test next tick now that loss-side
-                // is correct.
+                // entropy_mul = 3.0 — band-aid kept after the
+                // libjxl-faithful loss-side per-block quant_norm16
+                // fix landed.
+                //
+                // 2026-05-11 bisection (post-loss-fix): tried 2.5 to
+                // see if the loss-side fix would unwedge the
+                // entropy_mul tuning. Result: TRADEOFF.
+                //   - 07b9f93f@d=1.0: 1.2133 → 1.2089 (improved,
+                //     strat-search wins again — back to pre-fix score)
+                //   - 2684452d@d=1.0: 1.1868 → 1.1991 (+1.03%,
+                //     OUTSIDE 0.5% tolerance — DCT32 over-selected)
+                //
+                // Conclusion: entropy_mul tuning is per-image-variant,
+                // NOT one-sided cost-model-biased. Loss-side fix
+                // didn't move the wedge — it's a real per-image quality
+                // tradeoff. Some images want more DCT32, some want
+                // less; one global mul can't satisfy both.
+                //
+                // To actually shift this wedge, we need either:
+                //   - kernel-side per-block quant in coefficient
+                //     quantization (matches libjxl entirely)
+                //   - per-image cost-model gating (e.g., screenshot
+                //     discriminator pattern)
+                //   - per-region adaptive entropy_mul
                 3.0_f32,
             )
         } else {
