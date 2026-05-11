@@ -2022,14 +2022,42 @@ impl<R: Runtime> GpuEncoder<R> {
         let xyb_x_dl = self.download_plane(&plan.xyb_x_gpu);
         let xyb_y_dl = self.download_plane(&plan.xyb_y_gpu);
         let xyb_b_dl = self.download_plane(&plan.xyb_b_gpu);
+        // Same edge-replication fix as the e7 variant's `repack`:
+        // GPU's gaborish ran on a gpu_pw-padded buffer; the cols
+        // [width, cpu_pw) inside that come from gaborish-blended
+        // edge replication on the GPU's wider grid, NOT what CPU
+        // would produce. After extracting the upper-left
+        // cpu_pw × cpu_ph, re-replicate cols [width, cpu_pw) from
+        // col (width-1) and rows [height, cpu_ph) from row (height-1).
+        // See encode_lossy_to_bitstream_via_precomputed for the full
+        // diagnosis.
         let repack_first = |src: &[f32]| -> alloc::vec::Vec<f32> {
             if cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize {
                 src.to_vec()
             } else {
-                let mut dst = alloc::vec::Vec::with_capacity(cpu_pw * cpu_ph);
+                let mut dst = alloc::vec![0.0_f32; cpu_pw * cpu_ph];
+                let w = width as usize;
+                let h = height as usize;
                 for row in 0..cpu_ph {
                     let off = row * (gpu_pw as usize);
-                    dst.extend_from_slice(&src[off..off + cpu_pw]);
+                    let dst_off = row * cpu_pw;
+                    dst[dst_off..dst_off + cpu_pw].copy_from_slice(&src[off..off + cpu_pw]);
+                }
+                if cpu_pw > w {
+                    for row in 0..cpu_ph {
+                        let dst_off = row * cpu_pw;
+                        let src_val = dst[dst_off + (w - 1)];
+                        for c in w..cpu_pw {
+                            dst[dst_off + c] = src_val;
+                        }
+                    }
+                }
+                if cpu_ph > h {
+                    let last_real_off = (h - 1) * cpu_pw;
+                    for row in h..cpu_ph {
+                        let dst_off = row * cpu_pw;
+                        dst.copy_within(last_real_off..last_real_off + cpu_pw, dst_off);
+                    }
                 }
                 dst
             }
