@@ -1982,10 +1982,12 @@ pub fn strategy_search_costs_subblock_8x8<R: Runtime>(
 
 /// Variant of [`strategy_search_costs_subblock_8x8`] that takes a
 /// pre-uploaded `mask_row_base` GPU handle. Lets the caller hoist the
-/// upload out of a multi-strategy loop — at 16 MP cubecl 0.10's
-/// HtoD takes ~6 ms for the 1 MB mask_row_base buffer, so 5 sub-block
-/// strategies × 6 ms = 30 ms wasted on duplicate uploads. Hoisting
-/// recovers 24 ms.
+/// upload out of a multi-strategy loop. Theory predicted ~24 ms
+/// savings at 16 MP (5× 1 MB uploads at cubecl's HtoD rate), but
+/// MEASURED savings on a real 16 MP photo were ~2 ms within run-to-
+/// run noise — cubecl's pool amortizes the small repeated uploads
+/// more effectively than the per-call overhead model predicted. Kept
+/// as a refactor for clarity + future multi-strategy fused launches.
 ///
 /// `mask_row_base_len` must equal `(padded_width / 8) * (padded_height / 8)`.
 #[allow(clippy::too_many_arguments)]

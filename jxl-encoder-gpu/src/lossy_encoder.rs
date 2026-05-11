@@ -1255,10 +1255,14 @@ impl<R: Runtime> LossyEncoder<R> {
         //
         // Hoist the mask_row_base upload out of the per-strategy loop.
         // All 5 strategies operate on the same 8×8 grid, so the row-base
-        // table is identical. cubecl 0.10's HtoD takes ~6 ms for the 1 MB
-        // mask_row_base buffer at 16 MP (see cubecl upload bandwidth ceiling
-        // memo, 2026-05-10), so 5 duplicate uploads cost ~30 ms; one upload
-        // saves ~24 ms.
+        // table is identical. Theory predicted ~24 ms savings at 16 MP
+        // (5× duplicate 1 MB uploads at cubecl's slow HtoD); MEASURED
+        // savings are ~2 ms within run-to-run noise — cubecl's pool
+        // amortizes the small repeated uploads more effectively than
+        // the per-call overhead model suggests. Kept as a refactor for
+        // clarity (single explicit upload point) and as setup for
+        // future fused-multi-strategy launches; not a production perf
+        // win in itself.
         use crate::forks::cost::strategy_search_costs_subblock_8x8_with_handle;
         use cubecl::prelude::*;
         let mask_row_base_subblock: Vec<u32> = (0..nb8)
