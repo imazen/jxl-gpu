@@ -1864,13 +1864,21 @@ pub fn strategy_search_costs_dct32x32<R: Runtime>(
     // butteraugli regression vs uniform). Same root cause as DCT64x64
     // band-aid — missing libjxl pixel-loss penalty for large transforms.
     //
-    // 4.0 → 3.0 (May 9 2026, this commit): once the corpus regression
-    // test landed, bisected DCT32 mul on the 11-image corpus.
-    //   4 ✓ baseline, 3 ✓, 2 ✗ (07b9f93f -1.5% — gain that drifts
-    //   outside the 0.5% tolerance band, AND 22ea12c9 / 2684452d both
-    //   regress +2.4% / +2.0%; the strat-wins photos shift to
-    //   RefineDct8 because DCT32 picks on those images aren't quite
-    //   right yet at 2.0). Settled on 3.0 — strict score parity.
+    // 4.0 → 3.0 (May 9 2026): once the corpus regression test landed,
+    // bisected DCT32 mul on the 11-image corpus. 4 ✓ baseline, 3 ✓,
+    // 2 ✗ (07b9f93f -1.5%, 22ea12c9 +2.4%, 2684452d +2.0%; strat-wins
+    // photos shift to RefineDct8 at 2.0).
+    //
+    // 3.0 → 2.85 / 2.7 (May 11 2026): re-attempted bisection now
+    // that diag confirmed GPU strat-search picks ~99.6% DCT8 on a
+    // real CLIC photo at d=0.5/1.0/2.0 (vs cjxl ~70%, baugli 2.2×
+    // worse). Both 2.85 and 2.7 regressed 2684452d at d=1 (1.95%
+    // outside 0.5% tol; path flip RefineStratSearch → RefineDct8).
+    // Reverted to 3.0. Same for DCT64 4.8 → 4.5 (22ea12c9 regressed
+    // 6.3% at d=0.5, path flip). Mul tuning is FULLY WEDGED against
+    // corpus regression without the missing libjxl heuristics
+    // (kAvoidEntropyOfTransforms, X-channel multi-block weight,
+    // mul8x8 vs mul16x16 vs mul32x32 ratio adjustments).
     //
     // Re-tune toward libjxl 1.48 when the missing pixel-loss term lands.
     let entropy_mul = 3.0_f32;
