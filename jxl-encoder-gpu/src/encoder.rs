@@ -1711,6 +1711,121 @@ impl<R: Runtime> GpuEncoder<R> {
             .encode(pixels)
             .map_err(|e| e.decompose().0)
     }
+
+    /// Encode to JXL bitstream via the `__pre_quantized` seam — runs
+    /// the GPU strat-search pipeline (XYB / gaborish / CfL / strategy
+    /// selection / DC grid) AND optionally the butteraugli refinement
+    /// loop, then hands the prepared state to
+    /// [`jxl_encoder::__pre_quantized::VarDctEncoder::encode_from_precomputed`]
+    /// for bitstream emit. The CPU encoder skips its own XYB / CfL /
+    /// masking / strat-search work; it still does DCT / quantize /
+    /// entropy coding (CPU is fast enough for those steps post-
+    /// quantization decisions).
+    ///
+    /// **First-cut implementation** — uses CfL=zeros, masking=zeros,
+    /// chromacity=0, noise_params=None. Scoped to validate the
+    /// architectural seam end-to-end; quality refinement (real CfL
+    /// from the GPU pipeline, real masking, etc.) is bounded follow-up
+    /// once the bitstream output is verified valid.
+    ///
+    /// `linear_rgb_padded` MUST be planar linear RGB padded to
+    /// `lossy.padded_dimensions()` (each channel is
+    /// `padded_w × padded_h` f32 entries, edge-replicated to the
+    /// padded boundary). The caller's image-source upload code in
+    /// `prepare_strategy_search_plan` already does this padding —
+    /// callers can pass the same `r/g/b` they would pass to
+    /// `prepare_strategy_search_plan` and we'll pad internally.
+    #[cfg(feature = "encoder")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_lossy_to_bitstream_via_precomputed(
+        &self,
+        lossy: &crate::lossy_encoder::LossyEncoder<R>,
+        r: &[f32],
+        g: &[f32],
+        b: &[f32],
+        distance: f32,
+    ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
+        use jxl_encoder::__pre_quantized::{
+            AcStrategyMap, CflMap, DistanceParams, EncoderPrecomputed, VarDctEncoder,
+            quantize_quant_field,
+        };
+
+        let (width, height) = lossy.dimensions();
+        let (pw, ph) = lossy.padded_dimensions();
+        let xsize_blocks = pw as usize / 8;
+        let ysize_blocks = ph as usize / 8;
+        let num_blocks = xsize_blocks * ysize_blocks;
+
+        // Step 1: GPU strat-search → plan with xyb GPU planes + assignments.
+        let plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
+
+        // Step 2: download xyb planes (CPU encoder needs host slices).
+        let xyb_x = self.download_plane(&plan.xyb_x_gpu);
+        let xyb_y = self.download_plane(&plan.xyb_y_gpu);
+        let xyb_b = self.download_plane(&plan.xyb_b_gpu);
+
+        // Step 3: AcStrategyMap from plan.assignments.
+        let mut ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
+        for a in &plan.assignments {
+            if a.raw_strategy != 0 {
+                ac_strategy.set(a.bx as usize, a.by as usize, a.raw_strategy);
+            }
+        }
+
+        // Step 4: CfL = zeros. TODO: extract real CfL from GPU
+        // (chroma-from-luma kernel runs during prepare; not yet exposed
+        // on StrategySearchPlan).
+        let xsize_tiles = xsize_blocks.div_ceil(8); // 64×64-pixel CfL tiles
+        let ysize_tiles = ysize_blocks.div_ceil(8);
+        let cfl_map = CflMap::zeros(xsize_tiles, ysize_tiles);
+
+        // Step 5: float quant field — uniform at distance_to_qac for
+        // first cut. (To use the GPU's refined aq_field from a
+        // butteraugli loop, swap in the result of
+        // refine_aq_field_gpu_with_strategy_search_persistent.)
+        let qac = crate::lossy_encoder::distance_to_qac(distance);
+        let quant_field_float = alloc::vec![qac; num_blocks];
+
+        // Step 6: stub masking + linear_rgb (rate-control-only fields).
+        let masking = alloc::vec![0.0_f32; num_blocks];
+        let linear_rgb = alloc::vec::Vec::new();
+
+        // Step 7: assemble EncoderPrecomputed.
+        let precomputed = EncoderPrecomputed::from_parts(
+            width as usize,
+            height as usize,
+            xsize_blocks,
+            ysize_blocks,
+            pw as usize,
+            ph as usize,
+            xyb_x,
+            xyb_y,
+            xyb_b,
+            linear_rgb,
+            cfl_map,
+            None,
+            quant_field_float.clone(),
+            masking,
+            None,
+            ac_strategy,
+            true, // gaborish_enabled (matches GPU's xyb_*_gpu output)
+            distance,
+            0,
+            0,
+        );
+
+        // Step 8: build the CPU VarDctEncoder + convert quant field.
+        let vardct = VarDctEncoder::new(distance);
+        let params = DistanceParams::compute_for_profile(distance, &vardct.profile);
+        let quant_field_u8 = quantize_quant_field(&quant_field_float, params.inv_scale);
+
+        // Step 9: encode → bitstream. Map jxl-encoder's internal Error
+        // type to the public EncodeError surface (api.rs:80 has the
+        // From impl).
+        vardct
+            .encode_from_precomputed(&precomputed, &quant_field_u8)
+            .map_err(jxl_encoder::api::EncodeError::from)
+    }
 }
 
 impl<R: Runtime> Default for GpuEncoder<R> {

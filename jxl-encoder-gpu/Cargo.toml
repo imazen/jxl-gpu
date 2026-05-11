@@ -33,7 +33,10 @@ corpus = ["cuda", "encoder", "butteraugli-loop"]
 
 [dependencies]
 cubecl = { workspace = true }
-jxl-encoder = { workspace = true, optional = true, features = ["std"] }
+# `__pre_quantized` exposes EncoderPrecomputed::from_parts +
+# encode_from_precomputed for the GPU bitstream-emit path
+# (see encode_lossy_to_bitstream_via_precomputed in encoder.rs).
+jxl-encoder = { workspace = true, optional = true, features = ["std", "__pre_quantized"] }
 butteraugli-gpu = { workspace = true, optional = true }
 
 [dev-dependencies]
