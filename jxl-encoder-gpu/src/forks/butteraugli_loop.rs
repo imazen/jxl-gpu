@@ -273,6 +273,62 @@ pub fn dct8_only_storage(num_blocks: usize) -> (Vec<bool>, Vec<u8>, Vec<u8>) {
     )
 }
 
+/// Build the (is_first, covered_x, covered_y) backing vecs for an
+/// [`AcStrategyInfo`] that mirrors a real per-region strat-search
+/// assignment list.
+///
+/// Each [`StrategyAssignment`] anchors at `(bx, by)` (in 8x8-block
+/// coordinates) with footprint
+/// `tile_dims_pixels(raw_strategy) / 8` blocks. The anchor cell gets
+/// `is_first=true` + the strategy's `(cx, cy)` in 8x8 units; all
+/// other cells in the footprint stay `is_first=false` (their tile
+/// distance is splatted from the anchor by [`compute_tile_distances`]).
+///
+/// Cells NOT covered by any assignment default to DCT8
+/// (`is_first=true, covered_x=1, covered_y=1`), matching the prior
+/// dct8_only_storage default. This keeps tile distances well-defined
+/// even when a partition selector leaves gaps.
+pub fn ac_strategy_info_storage_from_assignments(
+    assignments: &[crate::pipeline::StrategyAssignment],
+    xsize_blocks: usize,
+    ysize_blocks: usize,
+) -> (Vec<bool>, Vec<u8>, Vec<u8>) {
+    use crate::forks::transform::tile_dims_pixels;
+    let n = xsize_blocks * ysize_blocks;
+    let mut is_first = alloc::vec![true; n];
+    let mut covered_x = alloc::vec![1u8; n];
+    let mut covered_y = alloc::vec![1u8; n];
+    for a in assignments {
+        let (cx_pix, cy_pix) = tile_dims_pixels(a.raw_strategy);
+        let cx_b = (cx_pix / 8).max(1) as u8;
+        let cy_b = (cy_pix / 8).max(1) as u8;
+        if a.bx >= xsize_blocks || a.by >= ysize_blocks {
+            continue;
+        }
+        let anchor = a.by * xsize_blocks + a.bx;
+        is_first[anchor] = true;
+        covered_x[anchor] = cx_b;
+        covered_y[anchor] = cy_b;
+        // Mark all non-anchor cells inside the footprint as
+        // not-first so compute_tile_distances doesn't double-count.
+        for iy in 0..(cy_b as usize) {
+            for ix in 0..(cx_b as usize) {
+                if ix == 0 && iy == 0 {
+                    continue;
+                }
+                let gx = a.bx + ix;
+                let gy = a.by + iy;
+                if gx >= xsize_blocks || gy >= ysize_blocks {
+                    continue;
+                }
+                let bi = gy * xsize_blocks + gx;
+                is_first[bi] = false;
+            }
+        }
+    }
+    (is_first, covered_x, covered_y)
+}
+
 /// Per-block tile-distance constant. Matches upstream
 /// `K_TILE_NORM = 1.2` in `vardct::butteraugli_loop` line 231.
 pub const K_TILE_NORM: f32 = 1.2;
@@ -1005,6 +1061,7 @@ pub fn refine_aq_field_gpu<R: Runtime>(
         initial_aq_field,
         target_distance,
         iters,
+        None, // DCT8-only encode_step → use dct8_only_storage default
         |aq| lossy.encode_one_adaptive(enc, r, g, b, aq),
         trace,
     )
@@ -1064,6 +1121,7 @@ pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
         initial_aq_field,
         target_distance,
         iters,
+        None, // strat-search-aware wire-up reverted — see commit message
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         trace,
     )
@@ -1326,6 +1384,7 @@ pub fn refine_aq_field_gpu_with_strategy_search_smart_with_threshold<R: Runtime>
         initial_aq_field,
         target_distance,
         iters,
+        None, // strat-search-aware wire-up reverted — see commit message
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         trace,
     )?;
@@ -1446,6 +1505,7 @@ pub fn refine_and_encode_best_of_both<R: Runtime>(
         initial_aq_field,
         target_distance,
         iters,
+        None, // strat-search-aware wire-up reverted — see commit message
         |aq| lossy.encode_with_strategy_plan_adaptive(enc, &plan, aq),
         |_| {},
     )?;
@@ -1676,6 +1736,11 @@ fn refine_aq_field_gpu_with_encode<R: Runtime, E>(
     initial_aq_field: &[f32],
     target_distance: f32,
     iters: usize,
+    // `Some(assignments)` for strat-search callers — tile distances
+    // need each strategy's footprint to compute the L16 norm over the
+    // right pixel rect. `None` for DCT8-only callers (every block is
+    // its own DCT8 strategy → dct8_only_storage default).
+    assignments: Option<&[crate::pipeline::StrategyAssignment]>,
     mut encode_step: E,
     mut trace: impl FnMut(RefineIterTrace),
 ) -> butteraugli_gpu::Result<Vec<f32>>
@@ -1701,8 +1766,10 @@ where
 
     // Per-encode invariants: deviation bounds + AC strategy info.
     let bounds = DeviationBounds::compute(initial_aq_field);
-    let (is_first_storage, cx_storage, cy_storage) =
-        dct8_only_storage(xsize_blocks * ysize_blocks);
+    let (is_first_storage, cx_storage, cy_storage) = match assignments {
+        Some(asg) => ac_strategy_info_storage_from_assignments(asg, xsize_blocks, ysize_blocks),
+        None => dct8_only_storage(xsize_blocks * ysize_blocks),
+    };
     let cfg = RefineConfig {
         width: width as usize,
         height: height as usize,
@@ -1797,6 +1864,68 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== ac_strategy_info_storage_from_assignments =====
+
+    #[test]
+    fn test_ac_strategy_info_storage_default_is_dct8_for_empty_assignments() {
+        let (is_first, cx, cy) = ac_strategy_info_storage_from_assignments(&[], 4, 4);
+        assert_eq!(is_first.len(), 16);
+        assert!(is_first.iter().all(|&b| b));
+        assert!(cx.iter().all(|&v| v == 1));
+        assert!(cy.iter().all(|&v| v == 1));
+    }
+
+    #[test]
+    fn test_ac_strategy_info_storage_dct16x16_marks_anchor_only() {
+        use crate::forks::transform::RAW_STRATEGY_DCT16X16;
+        use crate::pipeline::StrategyAssignment;
+        // 4×4 8x8-grid; one DCT16x16 anchored at (0, 0) covers a 2×2
+        // region of 8x8 blocks. Anchor (0,0) → is_first, cx=cy=2.
+        // Cells (1,0), (0,1), (1,1) → is_first=false. The remaining
+        // 12 cells stay at the DCT8 default.
+        let asg = vec![StrategyAssignment {
+            bx: 0,
+            by: 0,
+            raw_strategy: RAW_STRATEGY_DCT16X16,
+        }];
+        let (is_first, cx, cy) = ac_strategy_info_storage_from_assignments(&asg, 4, 4);
+        assert!(is_first[0]);
+        assert_eq!(cx[0], 2);
+        assert_eq!(cy[0], 2);
+        assert!(!is_first[1]); // (1, 0) inside footprint
+        assert!(!is_first[4]); // (0, 1) inside footprint
+        assert!(!is_first[5]); // (1, 1) inside footprint
+        // Cells outside the footprint stay at the DCT8 default.
+        assert!(is_first[2]);
+        assert!(is_first[6]);
+        assert_eq!(cx[2], 1);
+        assert_eq!(cy[2], 1);
+    }
+
+    #[test]
+    fn test_ac_strategy_info_storage_dct32x32_marks_4x4_footprint() {
+        use crate::forks::transform::RAW_STRATEGY_DCT32X32;
+        use crate::pipeline::StrategyAssignment;
+        let asg = vec![StrategyAssignment {
+            bx: 0,
+            by: 0,
+            raw_strategy: RAW_STRATEGY_DCT32X32,
+        }];
+        let (is_first, cx, cy) = ac_strategy_info_storage_from_assignments(&asg, 8, 8);
+        assert!(is_first[0]);
+        assert_eq!(cx[0], 4);
+        assert_eq!(cy[0], 4);
+        for iy in 0..4 {
+            for ix in 0..4 {
+                if ix == 0 && iy == 0 {
+                    continue;
+                }
+                let bi = iy * 8 + ix;
+                assert!(!is_first[bi], "footprint cell ({ix},{iy}) should be is_first=false");
+            }
+        }
+    }
 
     // ===== compute_tile_distances =====
 
