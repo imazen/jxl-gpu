@@ -1813,12 +1813,44 @@ impl<R: Runtime> GpuEncoder<R> {
         let xyb_y = repack(&xyb_y_gpu);
         let xyb_b = repack(&xyb_b_gpu);
 
-        // Step 3: AcStrategyMap. First-cut uses ALL-DCT8 to validate
-        // the precomputed seam without compounding strategy-translation
-        // bugs. TODO: convert plan.assignments → AcStrategyMap once
-        // DCT8-only path is decode-validated.
-        let _ = &plan.assignments;
-        let ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
+        // Step 3: AcStrategyMap from plan.assignments. The padding
+        // mismatch fix above (cpu_pw vs gpu_pw) means xsize_blocks /
+        // ysize_blocks are also CPU-aligned — we MUST drop assignments
+        // whose blocks fall in the GPU-but-not-CPU padding region
+        // (e.g. blocks at bx >= cpu_xsize_blocks for a 1000-wide image
+        // where GPU saw 1008/8=126 blocks but CPU sees 1000/8=125).
+        let mut ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
+        for a in &plan.assignments {
+            let bx = a.bx as usize;
+            let by = a.by as usize;
+            if bx >= xsize_blocks || by >= ysize_blocks {
+                continue;
+            }
+            // Skip strategies whose coverage would extend past the
+            // CPU-aligned grid (assignment was valid in GPU's larger
+            // grid but spills out of CPU's smaller one). Coverage
+            // table mirrors `groups::strategy_coverage_blocks` (kept
+            // private under cfg(debug_assertions) there).
+            use crate::forks::transform::*;
+            let (cx, cy): (usize, usize) = match a.raw_strategy {
+                RAW_STRATEGY_DCT16X8 => (1, 2),
+                RAW_STRATEGY_DCT8X16 => (2, 1),
+                RAW_STRATEGY_DCT16X16 => (2, 2),
+                RAW_STRATEGY_DCT32X16 => (2, 4),
+                RAW_STRATEGY_DCT16X32 => (4, 2),
+                RAW_STRATEGY_DCT32X32 => (4, 4),
+                RAW_STRATEGY_DCT64X32 => (4, 8),
+                RAW_STRATEGY_DCT32X64 => (8, 4),
+                RAW_STRATEGY_DCT64X64 => (8, 8),
+                _ => (1, 1), // DCT8 / DCT4* / DCT2x2 / IDENTITY / AFV
+            };
+            if bx + cx > xsize_blocks || by + cy > ysize_blocks {
+                continue;
+            }
+            if a.raw_strategy != 0 {
+                ac_strategy.set(bx, by, a.raw_strategy);
+            }
+        }
 
         // Step 4: CfL = zeros. TODO: extract real CfL from GPU
         // (chroma-from-luma kernel runs during prepare; not yet exposed
