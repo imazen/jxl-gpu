@@ -74,8 +74,15 @@ const EXPECTED_SCORES: &[(&str, f32, f32, BestOfBothPath)] = &[
     // ===== d=1.0 (the original 11-image set) =====
     ("clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
         1.0, 1.1475, BestOfBothPath::Tie),
+    // 07b9f93f @ d=1.0: post libjxl-faithful loss-side per-block
+    // quant_norm16 fix (commit 2026-05-11), score 1.2089 → 1.2133
+    // (+0.36%, within tolerance) and best-of-both path RefineStratSearch
+    // → RefineDct8. The loss-side fix slightly worsened strat-search's
+    // score on this image; with entropy_mul still at the 3.0 band-aid
+    // it's expected to need re-bisection. Accepted parity tradeoff:
+    // tiny score regression in exchange for libjxl-faithful cost model.
     ("clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
-        1.0, 1.2089, BestOfBothPath::RefineStratSearch),
+        1.0, 1.2133, BestOfBothPath::RefineDct8),
     ("clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
         1.0, 1.0999, BestOfBothPath::RefineDct8), // uniform won
     ("clic2025-1024/1e2f9d41529197f1.png",

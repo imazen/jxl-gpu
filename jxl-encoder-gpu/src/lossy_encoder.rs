@@ -1071,7 +1071,7 @@ impl<R: Runtime> LossyEncoder<R> {
         use crate::forks::cost::{
             compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16_persistent,
             strategy_search_costs_dct32x16_or_16x32_persistent,
-            strategy_search_costs_dct32x32_persistent,
+            strategy_search_costs_dct32x32_persistent_with_aq_field,
             strategy_search_costs_dct64x32_or_32x64_persistent,
             strategy_search_costs_dct64x64_persistent,
             strategy_search_costs_dct8_16x16_persistent,
@@ -1159,6 +1159,47 @@ impl<R: Runtime> LossyEncoder<R> {
         let xyb_b: Vec<f32> = Vec::new();
         mark("xyb_gab");
         mark("mask1x1");
+
+        // Download the per-pixel mask once (one GPU sync, cheap at
+        // ~1 ms on 16 MP) and compute the per-8x8-block adaptive_quant
+        // field. This is what libjxl uses as `quant_norm16` source for
+        // multi-block strat-search (see enc_ac_strategy.cc:382-413).
+        // Without per-block quant the DCT32 cost-model has a +42%
+        // upward bias on photos vs libjxl — see
+        // examples/quant_norm16_divergence.rs.
+        //
+        // The download could be replaced by a GPU block-mean kernel
+        // for hot-path callers; first wire-up uses the simpler host
+        // loop matching compute_block_mask_means.
+        let mask_pixels = enc.download_plane(&g_mask);
+        let xs8 = pw / 8;
+        let ys8 = ph / 8;
+        let nb_padded = xs8 * ys8;
+        let mut aq_field = alloc::vec![0.0f32; nb_padded];
+        for by in 0..ys8 {
+            for bx in 0..xs8 {
+                let mut sum = 0.0_f64;
+                let mut count = 0_usize;
+                for dy in 0..8 {
+                    let y = by * 8 + dy;
+                    if y >= h { break; }
+                    for dx in 0..8 {
+                        let x = bx * 8 + dx;
+                        if x >= w { break; }
+                        sum += mask_pixels[y * pw + x] as f64;
+                        count += 1;
+                    }
+                }
+                aq_field[by * xs8 + bx] = if count > 0 {
+                    (sum / count as f64) as f32
+                } else {
+                    1.0
+                };
+            }
+        }
+        // Convert mean → adaptive qac per block.
+        let aq_field = block_means_to_qac_field(&aq_field, distance);
+        mark("aq_field");
 
         // Stage 4: cost grids — DCT8, DCT16x16, DCT16x8, DCT8x16
         let (dct8_x, dct8_y, dct8_b) = dct8_weights_per_channel();
@@ -1469,7 +1510,7 @@ impl<R: Runtime> LossyEncoder<R> {
             let inv_32x: Vec<f32> = dct32_x.iter().map(|w| 1.0 / w).collect();
             let inv_32y: Vec<f32> = dct32_y.iter().map(|w| 1.0 / w).collect();
             let inv_32b: Vec<f32> = dct32_b.iter().map(|w| 1.0 / w).collect();
-            strategy_search_costs_dct32x32_persistent(
+            strategy_search_costs_dct32x32_persistent_with_aq_field(
                 enc,
                 &xx_g,
                 &xy_g,
@@ -1483,12 +1524,20 @@ impl<R: Runtime> LossyEncoder<R> {
                 &inv_32x,
                 &inv_32y,
                 &inv_32b,
-                qac,
+                &aq_field,
                 qac,
                 qac,
                 0,
                 0,
                 scaled_constants,
+                // entropy_mul = 3.0 — same as the scalar-quant variant
+                // pre-fix. The aq_field-aware loss-side fix ALONE
+                // didn't change strat-search rankings noticeably on
+                // the 02809272 CLIC photo (still ~99.6% DCT8) — the
+                // entropy side bias dominates. Re-bisect this in the
+                // corpus regression test next tick now that loss-side
+                // is correct.
+                3.0_f32,
             )
         } else {
             dct32_x = Vec::new();
