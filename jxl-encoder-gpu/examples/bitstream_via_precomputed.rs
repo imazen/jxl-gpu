@@ -115,6 +115,38 @@ fn main() {
     let enc: GpuEncoder<B> = GpuEncoder::new();
     let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, w, h);
 
+    // Diagnostic: dump strategy distribution from prepare_strategy_search_plan.
+    let plan = lossy.prepare_strategy_search_plan(&enc, &r, &g, &b, distance);
+    let mut histo: std::collections::BTreeMap<u8, usize> = std::collections::BTreeMap::new();
+    for a in &plan.assignments {
+        *histo.entry(a.raw_strategy).or_insert(0) += 1;
+    }
+    let total: usize = histo.values().sum();
+    println!("plan: {} assignments at d={}", total, distance);
+    let names: std::collections::BTreeMap<u8, &str> = [
+        (0, "DCT8"),
+        (1, "DCT16x8"),
+        (2, "DCT8x16"),
+        (3, "DCT16x16"),
+        (4, "DCT32x32"),
+        (5, "DCT4x4"),
+        (6, "DCT4x8"),
+        (7, "DCT8x4"),
+        (8, "DCT2x2"),
+        (9, "IDENTITY"),
+        (10, "DCT32x16"),
+        (11, "DCT16x32"),
+        (12, "DCT64x64"),
+        (13, "DCT64x32"),
+        (14, "DCT32x64"),
+    ].into_iter().collect();
+    for (s, c) in &histo {
+        let pct = *c as f32 / total as f32 * 100.0;
+        let name = names.get(s).copied().unwrap_or("?");
+        println!("  raw_strategy={:2} ({:9}) = {:6} ({:5.2}%)", s, name, c, pct);
+    }
+    drop(plan);
+
     let t0 = Instant::now();
     let bitstream = if e8_iters > 0 {
         #[cfg(feature = "butteraugli-loop")]
