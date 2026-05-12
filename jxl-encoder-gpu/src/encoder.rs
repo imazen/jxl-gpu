@@ -926,8 +926,12 @@ impl<R: Runtime> GpuEncoder<R> {
 
         let h_c = self.client.create_from_slice(f32::as_bytes(block_c));
         let h_y = self.client.create_from_slice(f32::as_bytes(block_y));
-        let h_w = self.client.create_from_slice(f32::as_bytes(weights_template));
-        let h_iw = self.client.create_from_slice(f32::as_bytes(inv_weights_template));
+        let h_w = self
+            .client
+            .create_from_slice(f32::as_bytes(weights_template));
+        let h_iw = self
+            .client
+            .create_from_slice(f32::as_bytes(inv_weights_template));
         let h_err = self
             .client
             .create_from_slice(f32::as_bytes(&vec![0.0_f32; total]));
@@ -1246,16 +1250,27 @@ impl<R: Runtime> GpuEncoder<R> {
             ("weights_y_template", weights_y_template),
             ("weights_b_template", weights_b_template),
         ] {
-            assert_eq!(w.len(), 64, "{label} must be exactly 64 f32 (got {})", w.len());
+            assert_eq!(
+                w.len(),
+                64,
+                "{label} must be exactly 64 f32 (got {})",
+                w.len()
+            );
         }
         let nb = n_coef / 64;
         let num_blocks = nb as u32;
         let h_qx = self.client.create_from_slice(i32::as_bytes(quant_x));
         let h_qy = self.client.create_from_slice(i32::as_bytes(quant_y));
         let h_qb = self.client.create_from_slice(i32::as_bytes(quant_b));
-        let h_wx = self.client.create_from_slice(f32::as_bytes(weights_x_template));
-        let h_wy = self.client.create_from_slice(f32::as_bytes(weights_y_template));
-        let h_wb = self.client.create_from_slice(f32::as_bytes(weights_b_template));
+        let h_wx = self
+            .client
+            .create_from_slice(f32::as_bytes(weights_x_template));
+        let h_wy = self
+            .client
+            .create_from_slice(f32::as_bytes(weights_y_template));
+        let h_wb = self
+            .client
+            .create_from_slice(f32::as_bytes(weights_b_template));
         let h_qmx = self.client.create_from_slice(f32::as_bytes(qac_qm_x));
         let h_qmy = self.client.create_from_slice(f32::as_bytes(qac_qm_y));
         let h_qmb = self.client.create_from_slice(f32::as_bytes(qac_qm_b));
@@ -1761,8 +1776,8 @@ impl<R: Runtime> GpuEncoder<R> {
         distance: f32,
     ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
         use jxl_encoder::__pre_quantized::{
-            AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder,
-            compute_cfl_map, compute_quant_field_float_free, quantize_quant_field,
+            AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, compute_cfl_map,
+            compute_quant_field_float_free, quantize_quant_field,
         };
 
         let (width, height) = lossy.dimensions();
@@ -1783,6 +1798,10 @@ impl<R: Runtime> GpuEncoder<R> {
         let num_blocks = xsize_blocks * ysize_blocks;
 
         // Step 1: GPU strat-search → plan with xyb GPU planes + assignments.
+        // f32 path: caller did u8→f32 host-side; we upload 3× padded
+        // f32 planes. The u8 fast path
+        // (`encode_lossy_to_bitstream_via_precomputed_from_u8`) avoids
+        // both the host conversion and the 4× upload bandwidth.
         let plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
 
         // Step 2: download xyb planes (GPU-padded layout).
@@ -1904,9 +1923,13 @@ impl<R: Runtime> GpuEncoder<R> {
         // (vs CfL=zeros which leaves chroma uncorrelated).
         // use_newton=true matches libjxl effort 7+ behavior.
         let cfl_map = compute_cfl_map(
-            &xyb_x, &xyb_y, &xyb_b,
-            cpu_pw, cpu_ph,
-            xsize_blocks, ysize_blocks,
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            cpu_pw,
+            cpu_ph,
+            xsize_blocks,
+            ysize_blocks,
             true, // use_newton (effort >= 7)
             1e-3, // newton_eps (libjxl default)
             10,   // newton_max_iters
@@ -1921,9 +1944,13 @@ impl<R: Runtime> GpuEncoder<R> {
         // PADDED width/height (not image dims) as `width`/`height`.
         // Passing image dims trips an off-by-one in the masking loop.
         let (quant_field_float, masking) = compute_quant_field_float_free(
-            &xyb_x, &xyb_y, &xyb_b,
-            cpu_pw, cpu_ph,
-            xsize_blocks, ysize_blocks,
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            cpu_pw,
+            cpu_ph,
+            xsize_blocks,
+            ysize_blocks,
             distance,
             crate::lossy_encoder::K_AC_QUANT,
         )
@@ -1970,6 +1997,199 @@ impl<R: Runtime> GpuEncoder<R> {
             .map_err(jxl_encoder::api::EncodeError::from)
     }
 
+    /// u8 fast-path variant of
+    /// [`Self::encode_lossy_to_bitstream_via_precomputed`]. Takes raw
+    /// interleaved sRGB u8 RGB (no alpha; `width * height * 3` bytes)
+    /// and runs sRGB→linear + edge-replication padding + XYB on the
+    /// GPU in one fused kernel — bypasses the host-side `powf`
+    /// per-pixel and shrinks the upload by 4× (e.g. 48 MB raw u8
+    /// instead of 192 MB converted f32 at 16 MP). Apart from the
+    /// upload entry point this matches the f32 variant byte-for-byte;
+    /// downstream re-pack / quant / encode steps are identical.
+    ///
+    /// Production callers holding sRGB u8 input should prefer this
+    /// over the f32 variant — the host-side conversion and the
+    /// larger upload are pure waste. Callers that hold f32 linear
+    /// input (e.g. HDR pipelines, post-processed buffers) keep
+    /// using the f32 variant.
+    ///
+    /// Math: full sRGB EOTF (the proper IEC 61966-2-1 piecewise:
+    /// linear segment for `c <= 0.04045`, `((c + 0.055) / 1.055)^2.4`
+    /// otherwise). Matches the reference math in
+    /// `examples/perf_strat_plan_u8_vs_f32.rs`. Differs from the
+    /// `_srgb_u8` convenience wrappers on `LossyEncoder`, which use
+    /// the simpler pure-`powf(2.4)` model.
+    pub fn encode_lossy_to_bitstream_via_precomputed_from_u8(
+        &self,
+        lossy: &crate::lossy_encoder::LossyEncoder<R>,
+        pixels_u8: &[u8],
+        distance: f32,
+    ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
+        use jxl_encoder::__pre_quantized::{
+            AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, compute_cfl_map,
+            compute_quant_field_float_free, quantize_quant_field,
+        };
+
+        let (width, height) = lossy.dimensions();
+        let (gpu_pw, gpu_ph) = lossy.padded_dimensions();
+        let cpu_pw = (width as usize).div_ceil(8) * 8;
+        let cpu_ph = (height as usize).div_ceil(8) * 8;
+        let xsize_blocks = cpu_pw / 8;
+        let ysize_blocks = cpu_ph / 8;
+        let num_blocks = xsize_blocks * ysize_blocks;
+
+        let expected = (width as usize) * (height as usize) * 3;
+        if pixels_u8.len() != expected {
+            return Err(jxl_encoder::api::EncodeError::InvalidInput {
+                message: alloc::format!(
+                    "pixels_u8 len {} != width*height*3 = {}",
+                    pixels_u8.len(),
+                    expected,
+                ),
+            });
+        }
+
+        // Step 1: GPU strat-search → plan, with the u8 fused upload.
+        // sRGB→linear + pad happens inside `upload_u8_rgb_to_linear_planar_padded`
+        // — host never sees the f32 planes, and the wire transfer is
+        // `width * height * 3` bytes (no padding, no per-pixel powf).
+        let plan = lossy.prepare_strategy_search_plan_from_u8(self, pixels_u8, distance);
+
+        // Step 2: download xyb planes (GPU-padded layout). Same as f32 path.
+        let xyb_x_gpu = self.download_plane(&plan.xyb_x_gpu);
+        let xyb_y_gpu = self.download_plane(&plan.xyb_y_gpu);
+        let xyb_b_gpu = self.download_plane(&plan.xyb_b_gpu);
+
+        // Step 2b: re-pack from GPU's 16-aligned to CPU's 8-aligned —
+        // identical fix-up to the f32 variant (see that fn for the
+        // gaborish-edge-replication rationale).
+        let repack = |src: &[f32]| -> alloc::vec::Vec<f32> {
+            if cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize {
+                src.to_vec()
+            } else {
+                let mut dst = alloc::vec![0.0_f32; cpu_pw * cpu_ph];
+                let w = width as usize;
+                let h = height as usize;
+                for row in 0..cpu_ph {
+                    let off = row * (gpu_pw as usize);
+                    let dst_off = row * cpu_pw;
+                    dst[dst_off..dst_off + cpu_pw].copy_from_slice(&src[off..off + cpu_pw]);
+                }
+                if cpu_pw > w {
+                    for row in 0..cpu_ph {
+                        let dst_off = row * cpu_pw;
+                        let last_real = dst[dst_off + w - 1];
+                        for col in w..cpu_pw {
+                            dst[dst_off + col] = last_real;
+                        }
+                    }
+                }
+                if cpu_ph > h {
+                    let last_real_off = (h - 1) * cpu_pw;
+                    for row in h..cpu_ph {
+                        let dst_off = row * cpu_pw;
+                        dst.copy_within(last_real_off..last_real_off + cpu_pw, dst_off);
+                    }
+                }
+                dst
+            }
+        };
+        let xyb_x = repack(&xyb_x_gpu);
+        let xyb_y = repack(&xyb_y_gpu);
+        let xyb_b = repack(&xyb_b_gpu);
+
+        // Step 3: AcStrategyMap from plan.assignments (clip to CPU grid).
+        let mut ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
+        for a in &plan.assignments {
+            let bx = a.bx as usize;
+            let by = a.by as usize;
+            if bx >= xsize_blocks || by >= ysize_blocks {
+                continue;
+            }
+            use crate::forks::transform::*;
+            let (cx, cy): (usize, usize) = match a.raw_strategy {
+                RAW_STRATEGY_DCT16X8 => (1, 2),
+                RAW_STRATEGY_DCT8X16 => (2, 1),
+                RAW_STRATEGY_DCT16X16 => (2, 2),
+                RAW_STRATEGY_DCT32X16 => (2, 4),
+                RAW_STRATEGY_DCT16X32 => (4, 2),
+                RAW_STRATEGY_DCT32X32 => (4, 4),
+                RAW_STRATEGY_DCT64X32 => (4, 8),
+                RAW_STRATEGY_DCT32X64 => (8, 4),
+                RAW_STRATEGY_DCT64X64 => (8, 8),
+                _ => (1, 1),
+            };
+            if bx + cx > xsize_blocks || by + cy > ysize_blocks {
+                continue;
+            }
+            if a.raw_strategy != 0 {
+                ac_strategy.set(bx, by, a.raw_strategy);
+            }
+        }
+
+        // Step 4: CfL on host from downloaded XYB.
+        let cfl_map = compute_cfl_map(
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            cpu_pw,
+            cpu_ph,
+            xsize_blocks,
+            ysize_blocks,
+            true, // use_newton (effort >= 7)
+            1e-3, // newton_eps
+            10,   // newton_max_iters
+        );
+
+        // Step 5: real quant_field_float + masking from XYB.
+        let (quant_field_float, masking) = compute_quant_field_float_free(
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            cpu_pw,
+            cpu_ph,
+            xsize_blocks,
+            ysize_blocks,
+            distance,
+            crate::lossy_encoder::K_AC_QUANT,
+        )
+        .map_err(jxl_encoder::api::EncodeError::from)?;
+        let _ = num_blocks;
+
+        // Step 6: linear_rgb only used by rate-control loop; pass empty.
+        let linear_rgb = alloc::vec::Vec::new();
+
+        // Step 7: assemble + Step 8: encode (identical to f32 variant).
+        let precomputed = EncoderPrecomputed::from_parts(
+            width as usize,
+            height as usize,
+            xsize_blocks,
+            ysize_blocks,
+            cpu_pw,
+            cpu_ph,
+            xyb_x,
+            xyb_y,
+            xyb_b,
+            linear_rgb,
+            cfl_map,
+            None,
+            quant_field_float.clone(),
+            masking,
+            None,
+            ac_strategy,
+            true, // gaborish_enabled
+            distance,
+            0,
+            0,
+        );
+        let vardct = VarDctEncoder::new(distance);
+        let params = DistanceParams::compute_for_profile(distance, &vardct.profile);
+        let quant_field_u8 = quantize_quant_field(&quant_field_float, params.inv_scale);
+        vardct
+            .encode_from_precomputed(&precomputed, &quant_field_u8)
+            .map_err(jxl_encoder::api::EncodeError::from)
+    }
+
     /// e8+ variant of [`Self::encode_lossy_to_bitstream_via_precomputed`]
     /// — runs `refine_aq_field_gpu_with_strategy_search_persistent`
     /// first to get a butteraugli-refined per-block quant field, then
@@ -1997,8 +2217,8 @@ impl<R: Runtime> GpuEncoder<R> {
         iters: usize,
     ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
         use jxl_encoder::__pre_quantized::{
-            AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder,
-            compute_cfl_map, compute_quant_field_float_free, quantize_quant_field,
+            AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, compute_cfl_map,
+            compute_quant_field_float_free, quantize_quant_field,
         };
 
         let (width, height) = lossy.dimensions();
@@ -2066,9 +2286,13 @@ impl<R: Runtime> GpuEncoder<R> {
         let xyb_y_cpu = repack_first(&xyb_y_dl);
         let xyb_b_cpu = repack_first(&xyb_b_dl);
         let (adaptive_initial_cpu, _) = compute_quant_field_float_free(
-            &xyb_x_cpu, &xyb_y_cpu, &xyb_b_cpu,
-            cpu_pw, cpu_ph,
-            xsize_blocks, ysize_blocks,
+            &xyb_x_cpu,
+            &xyb_y_cpu,
+            &xyb_b_cpu,
+            cpu_pw,
+            cpu_ph,
+            xsize_blocks,
+            ysize_blocks,
             distance,
             crate::lossy_encoder::K_AC_QUANT,
         )
@@ -2077,28 +2301,36 @@ impl<R: Runtime> GpuEncoder<R> {
         // Upsample CPU-grid (xsize_blocks × ysize_blocks) → GPU-grid
         // (gpu_xsize_blocks × gpu_ysize_blocks): copy row by row,
         // edge-replicate the right column / bottom row.
-        let initial_aq: alloc::vec::Vec<f32> =
-            if xsize_blocks == gpu_xsize_blocks && ysize_blocks == gpu_ysize_blocks {
-                adaptive_initial_cpu.clone()
-            } else {
-                let qac = crate::lossy_encoder::distance_to_qac(distance);
-                let mut dst = alloc::vec![qac; gpu_xsize_blocks * gpu_ysize_blocks];
-                for by in 0..ysize_blocks {
-                    for bx in 0..xsize_blocks {
-                        dst[by * gpu_xsize_blocks + bx] =
-                            adaptive_initial_cpu[by * xsize_blocks + bx];
-                    }
+        let initial_aq: alloc::vec::Vec<f32> = if xsize_blocks == gpu_xsize_blocks
+            && ysize_blocks == gpu_ysize_blocks
+        {
+            adaptive_initial_cpu.clone()
+        } else {
+            let qac = crate::lossy_encoder::distance_to_qac(distance);
+            let mut dst = alloc::vec![qac; gpu_xsize_blocks * gpu_ysize_blocks];
+            for by in 0..ysize_blocks {
+                for bx in 0..xsize_blocks {
+                    dst[by * gpu_xsize_blocks + bx] = adaptive_initial_cpu[by * xsize_blocks + bx];
                 }
-                dst
-            };
+            }
+            dst
+        };
         let refined_aq_gpu_grid =
             crate::forks::butteraugli_loop::refine_aq_field_gpu_with_strategy_search_persistent(
-                self, lossy, bg, r, g, b, ref_srgb, &initial_aq, distance, iters, |_| {},
+                self,
+                lossy,
+                bg,
+                r,
+                g,
+                b,
+                ref_srgb,
+                &initial_aq,
+                distance,
+                iters,
+                |_| {},
             )
-            .map_err(|e| {
-                jxl_encoder::api::EncodeError::InvalidInput {
-                    message: alloc::format!("butteraugli refinement failed: {e:?}"),
-                }
+            .map_err(|e| jxl_encoder::api::EncodeError::InvalidInput {
+                message: alloc::format!("butteraugli refinement failed: {e:?}"),
             })?;
 
         // Reuse the xyb we already downloaded + repacked for the
@@ -2151,19 +2383,29 @@ impl<R: Runtime> GpuEncoder<R> {
 
         // CfL on host from XYB.
         let cfl_map = compute_cfl_map(
-            &xyb_x, &xyb_y, &xyb_b,
-            cpu_pw, cpu_ph,
-            xsize_blocks, ysize_blocks,
-            true, 1e-3, 10,
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            cpu_pw,
+            cpu_ph,
+            xsize_blocks,
+            ysize_blocks,
+            true,
+            1e-3,
+            10,
         );
 
         // We still need masking from compute_quant_field_float_free,
         // but use the BUTTERAUGLI-REFINED aq_field as quant_field_float
         // (overrides the initial from compute_quant_field_float_free).
         let (_initial_qff, masking) = compute_quant_field_float_free(
-            &xyb_x, &xyb_y, &xyb_b,
-            cpu_pw, cpu_ph,
-            xsize_blocks, ysize_blocks,
+            &xyb_x,
+            &xyb_y,
+            &xyb_b,
+            cpu_pw,
+            cpu_ph,
+            xsize_blocks,
+            ysize_blocks,
             distance,
             crate::lossy_encoder::K_AC_QUANT,
         )
@@ -2440,8 +2682,8 @@ mod tests {
     fn test_quantize_large_broadcast_matches_perblock() {
         let enc: GpuEncoder<B> = GpuEncoder::new();
         let cases = [
-            (8u32, 8u32, 1u32, 1u32),    // DCT8 layout
-            (16u32, 16u32, 2u32, 2u32),  // DCT16x16 layout
+            (8u32, 8u32, 1u32, 1u32),   // DCT8 layout
+            (16u32, 16u32, 2u32, 2u32), // DCT16x16 layout
         ];
         let qac_qm = alloc::vec![0.7_f32; 16];
         let thresholds = [0.56_f32, 0.62, 0.62, 0.62];
@@ -2486,10 +2728,7 @@ mod tests {
 
             assert_eq!(perblock.len(), broadcast.len());
             for (i, (&a, &b)) in perblock.iter().zip(broadcast.iter()).enumerate() {
-                assert_eq!(
-                    a, b,
-                    "grid={gw}×{gh}, i={i}: perblock={a} vs broadcast={b}"
-                );
+                assert_eq!(a, b, "grid={gw}×{gh}, i={i}: perblock={a} vs broadcast={b}");
             }
         }
     }
@@ -2517,8 +2756,7 @@ mod tests {
                 weights_replicated[b * bs..(b + 1) * bs].copy_from_slice(&weights_template);
             }
 
-            let perblock =
-                enc.dequant_simple_blocks(&quant, &weights_replicated, block_size);
+            let perblock = enc.dequant_simple_blocks(&quant, &weights_replicated, block_size);
             let broadcast =
                 enc.dequant_simple_blocks_broadcast_w(&quant, &weights_template, block_size);
 

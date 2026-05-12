@@ -56,15 +56,14 @@ use cubecl::server::{Handle, MemoryLayoutDescriptor};
 
 use crate::encoder::GpuEncoder;
 use crate::launch::dc_restore::restore_dc;
+use crate::launch::dct2x2::{dct2x2_forward, dct2x2_inverse};
 use crate::launch::dct4::{
     dct_4x4_full, dct_4x8_full, dct_8x4_full, idct_4x4_full, idct_4x8_full, idct_8x4_full,
 };
-use crate::launch::dct2x2::{dct2x2_forward, dct2x2_inverse};
 use crate::launch::dct8::{
     dct_8x8, dct_8x8_wide, dequant_idct_dc_scatter_dct8, dequant_idct_dc_scatter_dct8_wide,
     idct_8x8, idct_8x8_set_dc_scatter, idct_8x8_wide,
 };
-use crate::launch::identity::{identity_forward, identity_inverse};
 use crate::launch::dct16::{dct_8x16, dct_16x8, dct_16x16, idct_8x16, idct_16x8, idct_16x16};
 use crate::launch::dct32::{dct_16x32, dct_32x16, dct_32x32, idct_16x32, idct_32x16, idct_32x32};
 use crate::launch::dct64::{dct_32x64, dct_64x32, dct_64x64, idct_32x64, idct_64x32, idct_64x64};
@@ -80,6 +79,7 @@ use crate::launch::fused_dct_quant::{
 use crate::launch::gab::gab_smooth;
 use crate::launch::gaborish::{gaborish_5x5, gaborish_5x5_3ch};
 use crate::launch::gather::{gather_blocks, scatter_blocks};
+use crate::launch::identity::{identity_forward, identity_inverse};
 use crate::launch::mask1x1::mask1x1;
 use crate::launch::pixel_loss::pixel_loss;
 use crate::launch::quantize::{
@@ -323,9 +323,18 @@ impl<R: Runtime> GpuEncoder<R> {
         // Same shape as create_from_slice's internal layout: bytes-shaped
         // contiguous descriptor with elem_size=1.
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1), r_bytes),
-            (MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1), g_bytes),
-            (MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1), b_bytes),
+            (
+                MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+                r_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+                g_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([n_bytes].into(), 1),
+                b_bytes
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         // Drain in order: r, g, b.
@@ -1013,9 +1022,18 @@ impl<R: Runtime> GpuEncoder<R> {
         let w_bytes = f32::as_bytes(weights_template);
         let qac_b = f32::as_bytes(qac_qm);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([coords_b.len()].into(), 1), coords_b),
-            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
-            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
+            (
+                MemoryLayoutDescriptor::contiguous([coords_b.len()].into(), 1),
+                coords_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1),
+                w_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1),
+                qac_b
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_qac = layouts.pop().expect("layouts[2]").memory;
@@ -1082,9 +1100,18 @@ impl<R: Runtime> GpuEncoder<R> {
         let w_bytes = f32::as_bytes(weights_template);
         let qac_b = f32::as_bytes(qac_qm);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([coords_b.len()].into(), 1), coords_b),
-            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
-            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
+            (
+                MemoryLayoutDescriptor::contiguous([coords_b.len()].into(), 1),
+                coords_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1),
+                w_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1),
+                qac_b
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_qac = layouts.pop().expect("layouts[2]").memory;
@@ -1240,8 +1267,14 @@ impl<R: Runtime> GpuEncoder<R> {
         let w_bytes = f32::as_bytes(weights_template);
         let iw_bytes = f32::as_bytes(inv_weights_template);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
-            (MemoryLayoutDescriptor::contiguous([iw_bytes.len()].into(), 1), iw_bytes),
+            (
+                MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1),
+                w_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([iw_bytes.len()].into(), 1),
+                iw_bytes
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_iw = layouts.pop().expect("layouts[1]").memory;
@@ -1396,7 +1429,10 @@ impl<R: Runtime> GpuEncoder<R> {
         x_loss: &GpuBlocks<R>,
         y_loss: &GpuBlocks<R>,
         b_loss: &GpuBlocks<R>,
-    ) -> ((Vec<f32>, Vec<f32>, Vec<f32>), (Vec<f64>, Vec<f64>, Vec<f64>)) {
+    ) -> (
+        (Vec<f32>, Vec<f32>, Vec<f32>),
+        (Vec<f64>, Vec<f64>, Vec<f64>),
+    ) {
         let mut bytes = self.client_ref().read(alloc::vec![
             x_stats.handle.clone(),
             y_stats.handle.clone(),
@@ -1456,8 +1492,14 @@ impl<R: Runtime> GpuEncoder<R> {
         let qac_b = f32::as_bytes(qac_qm);
         let thr_b = f32::as_bytes(thresholds);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
-            (MemoryLayoutDescriptor::contiguous([thr_b.len()].into(), 1), thr_b),
+            (
+                MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1),
+                qac_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([thr_b.len()].into(), 1),
+                thr_b
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_thr = layouts.pop().expect("layouts[1]").memory;
@@ -1521,9 +1563,18 @@ impl<R: Runtime> GpuEncoder<R> {
         let qac_bytes = f32::as_bytes(qac_qm);
         let thr_bytes = f32::as_bytes(&thresholds[..]);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
-            (MemoryLayoutDescriptor::contiguous([qac_bytes.len()].into(), 1), qac_bytes),
-            (MemoryLayoutDescriptor::contiguous([thr_bytes.len()].into(), 1), thr_bytes),
+            (
+                MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1),
+                w_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([qac_bytes.len()].into(), 1),
+                qac_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([thr_bytes.len()].into(), 1),
+                thr_bytes
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_thr = layouts.pop().expect("layouts[2]").memory;
@@ -1857,8 +1908,14 @@ impl<R: Runtime> GpuEncoder<R> {
         let qac_b = f32::as_bytes(qac_qm);
         let thr_b = f32::as_bytes(thresholds);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
-            (MemoryLayoutDescriptor::contiguous([thr_b.len()].into(), 1), thr_b),
+            (
+                MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1),
+                qac_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([thr_b.len()].into(), 1),
+                thr_b
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_thr = layouts.pop().expect("layouts[1]").memory;
@@ -1906,8 +1963,14 @@ impl<R: Runtime> GpuEncoder<R> {
         let qac_b = f32::as_bytes(qac_qm);
         let thr_b = f32::as_bytes(thresholds);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1), qac_b),
-            (MemoryLayoutDescriptor::contiguous([thr_b.len()].into(), 1), thr_b),
+            (
+                MemoryLayoutDescriptor::contiguous([qac_b.len()].into(), 1),
+                qac_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([thr_b.len()].into(), 1),
+                thr_b
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_thr = layouts.pop().expect("layouts[1]").memory;
@@ -1965,9 +2028,18 @@ impl<R: Runtime> GpuEncoder<R> {
         let q_bytes = f32::as_bytes(qac_qm);
         let t_bytes = f32::as_bytes(&thresholds[..]);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
-            (MemoryLayoutDescriptor::contiguous([q_bytes.len()].into(), 1), q_bytes),
-            (MemoryLayoutDescriptor::contiguous([t_bytes.len()].into(), 1), t_bytes),
+            (
+                MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1),
+                w_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([q_bytes.len()].into(), 1),
+                q_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([t_bytes.len()].into(), 1),
+                t_bytes
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_t = layouts.pop().expect("layouts[2]").memory;
@@ -2018,8 +2090,14 @@ impl<R: Runtime> GpuEncoder<R> {
         let w_bytes = f32::as_bytes(weights_template);
         let q_bytes = f32::as_bytes(qac_per_block);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
-            (MemoryLayoutDescriptor::contiguous([q_bytes.len()].into(), 1), q_bytes),
+            (
+                MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1),
+                w_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([q_bytes.len()].into(), 1),
+                q_bytes
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_q = layouts.pop().expect("layouts[1]").memory;
@@ -2059,7 +2137,9 @@ impl<R: Runtime> GpuEncoder<R> {
             0 => BIAS_X,
             1 => BIAS_Y,
             2 => BIAS_B,
-            _ => panic!("dequant_strategy_dct8_persistent: channel must be 0, 1, or 2; got {channel}"),
+            _ => panic!(
+                "dequant_strategy_dct8_persistent: channel must be 0, 1, or 2; got {channel}"
+            ),
         };
         let bs = quant.coeffs_per_block as usize;
         assert_eq!(weights_template.len(), bs);
@@ -2069,8 +2149,14 @@ impl<R: Runtime> GpuEncoder<R> {
         let w_bytes = f32::as_bytes(weights_template);
         let q_bytes = f32::as_bytes(qac_per_block);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1), w_bytes),
-            (MemoryLayoutDescriptor::contiguous([q_bytes.len()].into(), 1), q_bytes),
+            (
+                MemoryLayoutDescriptor::contiguous([w_bytes.len()].into(), 1),
+                w_bytes
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([q_bytes.len()].into(), 1),
+                q_bytes
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_q = layouts.pop().expect("layouts[1]").memory;
@@ -2138,11 +2224,26 @@ impl<R: Runtime> GpuEncoder<R> {
         let xf_b = f32::as_bytes(x_factor);
         let bf_b = f32::as_bytes(b_factor);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([qmx_b.len()].into(), 1), qmx_b),
-            (MemoryLayoutDescriptor::contiguous([qmy_b.len()].into(), 1), qmy_b),
-            (MemoryLayoutDescriptor::contiguous([qmb_b.len()].into(), 1), qmb_b),
-            (MemoryLayoutDescriptor::contiguous([xf_b.len()].into(), 1), xf_b),
-            (MemoryLayoutDescriptor::contiguous([bf_b.len()].into(), 1), bf_b),
+            (
+                MemoryLayoutDescriptor::contiguous([qmx_b.len()].into(), 1),
+                qmx_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([qmy_b.len()].into(), 1),
+                qmy_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([qmb_b.len()].into(), 1),
+                qmb_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([xf_b.len()].into(), 1),
+                xf_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([bf_b.len()].into(), 1),
+                bf_b
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_bf = layouts.pop().expect("layouts[4]").memory;
@@ -2221,11 +2322,26 @@ impl<R: Runtime> GpuEncoder<R> {
         let xf_b = f32::as_bytes(x_factor);
         let bf_b = f32::as_bytes(b_factor);
         let descs = alloc::vec![
-            (MemoryLayoutDescriptor::contiguous([qmx_b.len()].into(), 1), qmx_b),
-            (MemoryLayoutDescriptor::contiguous([qmy_b.len()].into(), 1), qmy_b),
-            (MemoryLayoutDescriptor::contiguous([qmb_b.len()].into(), 1), qmb_b),
-            (MemoryLayoutDescriptor::contiguous([xf_b.len()].into(), 1), xf_b),
-            (MemoryLayoutDescriptor::contiguous([bf_b.len()].into(), 1), bf_b),
+            (
+                MemoryLayoutDescriptor::contiguous([qmx_b.len()].into(), 1),
+                qmx_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([qmy_b.len()].into(), 1),
+                qmy_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([qmb_b.len()].into(), 1),
+                qmb_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([xf_b.len()].into(), 1),
+                xf_b
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([bf_b.len()].into(), 1),
+                bf_b
+            ),
         ];
         let mut layouts = self.client_ref().create_tensors_from_slices(descs);
         let h_bf = layouts.pop().expect("layouts[4]").memory;
@@ -2948,11 +3064,7 @@ mod tests {
                     let raw = (i as u32).wrapping_mul(2654435761).wrapping_add(13);
                     // Sometimes pass an in-range value, sometimes OOB
                     // to exercise the mask.
-                    if i % 3 == 0 {
-                        raw % bucket_count
-                    } else {
-                        raw
-                    }
+                    if i % 3 == 0 { raw % bucket_count } else { raw }
                 })
                 .collect();
 
@@ -3016,13 +3128,33 @@ mod tests {
         let n_blocks = 23_usize; // odd, exercises tail thread
         let n = n_blocks * 64;
         // Synthesize per-pixel data with non-trivial pattern.
-        let orig_x: Vec<f32> = (0..n).map(|i| ((i * 7) as f32).sin() * 16.0 + 64.0).collect();
-        let orig_y: Vec<f32> = (0..n).map(|i| ((i * 11) as f32).sin() * 24.0 + 80.0).collect();
-        let orig_b: Vec<f32> = (0..n).map(|i| ((i * 13) as f32).sin() * 12.0 + 48.0).collect();
-        let recon_x: Vec<f32> = orig_x.iter().enumerate().map(|(i, &v)| v + ((i * 3) as f32 * 0.1).sin()).collect();
-        let recon_y: Vec<f32> = orig_y.iter().enumerate().map(|(i, &v)| v + ((i * 5) as f32 * 0.1).sin()).collect();
-        let recon_b: Vec<f32> = orig_b.iter().enumerate().map(|(i, &v)| v + ((i * 17) as f32 * 0.1).sin()).collect();
-        let mask: Vec<f32> = (0..n).map(|i| 0.5 + 0.4 * ((i as f32 * 0.07).cos())).collect();
+        let orig_x: Vec<f32> = (0..n)
+            .map(|i| ((i * 7) as f32).sin() * 16.0 + 64.0)
+            .collect();
+        let orig_y: Vec<f32> = (0..n)
+            .map(|i| ((i * 11) as f32).sin() * 24.0 + 80.0)
+            .collect();
+        let orig_b: Vec<f32> = (0..n)
+            .map(|i| ((i * 13) as f32).sin() * 12.0 + 48.0)
+            .collect();
+        let recon_x: Vec<f32> = orig_x
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| v + ((i * 3) as f32 * 0.1).sin())
+            .collect();
+        let recon_y: Vec<f32> = orig_y
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| v + ((i * 5) as f32 * 0.1).sin())
+            .collect();
+        let recon_b: Vec<f32> = orig_b
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| v + ((i * 17) as f32 * 0.1).sin())
+            .collect();
+        let mask: Vec<f32> = (0..n)
+            .map(|i| 0.5 + 0.4 * ((i as f32 * 0.07).cos()))
+            .collect();
 
         // Host reference.
         let mut host_costs = vec![0.0_f32; n_blocks];
@@ -3050,7 +3182,16 @@ mod tests {
         let h_m = client.create_from_slice(f32::as_bytes(&mask));
         let h_out = client.empty(n_blocks * 4);
         crate::launch::sse_reduce::sse_reduce_3channel::<B>(
-            client, h_ox, h_oy, h_ob, h_rx, h_ry, h_rb, h_m, h_out.clone(), n_blocks as u32,
+            client,
+            h_ox,
+            h_oy,
+            h_ob,
+            h_rx,
+            h_ry,
+            h_rb,
+            h_m,
+            h_out.clone(),
+            n_blocks as u32,
         );
         let bytes = client.read_one(h_out).expect("sse download");
         let gpu_costs: &[f32] = f32::from_bytes(&bytes);
@@ -3075,7 +3216,9 @@ mod tests {
             let nb = 8u32;
             let total = (nb * block_size) as usize;
             let quant: Vec<i32> = (0..total).map(|i| (i as i32 % 13) - 6).collect();
-            let weights: Vec<f32> = (0..block_size as usize).map(|i| 0.5 + 0.07 * i as f32).collect();
+            let weights: Vec<f32> = (0..block_size as usize)
+                .map(|i| 0.5 + 0.07 * i as f32)
+                .collect();
             let qac: Vec<f32> = (0..nb).map(|i| 0.5 + 0.1 * i as f32).collect();
 
             let g_q = GpuI32Blocks {
@@ -3113,7 +3256,9 @@ mod tests {
         let nb = 4u32;
         let total = (nb * block_size) as usize;
         let quant: Vec<i32> = (0..total).map(|i| (i as i32 % 11) - 5).collect();
-        let weights: Vec<f32> = (0..block_size as usize).map(|i| 0.7 + 0.05 * i as f32).collect();
+        let weights: Vec<f32> = (0..block_size as usize)
+            .map(|i| 0.7 + 0.05 * i as f32)
+            .collect();
         let qac: Vec<f32> = (0..nb).map(|i| 0.6 + 0.15 * i as f32).collect();
 
         for channel in 0..3 {
@@ -3156,18 +3301,34 @@ mod tests {
             let bs = (gw * gh) as usize;
             let nb = 8u32;
             let total = (nb as usize) * bs;
-            let coeffs: Vec<f32> = (0..total).map(|i| 0.05 + 0.13 * (i as f32 * 0.07).sin()).collect();
+            let coeffs: Vec<f32> = (0..total)
+                .map(|i| 0.05 + 0.13 * (i as f32 * 0.07).sin())
+                .collect();
             let weights: Vec<f32> = (0..bs).map(|i| 0.5 + 0.1 * i as f32).collect();
             let qac: Vec<f32> = (0..nb).map(|i| 0.7 + 0.1 * i as f32).collect();
             let thresholds = [0.62_f32, 0.62, 0.62, 0.62];
 
             let q_a = enc.quantize_large_blocks_broadcast_w(
-                &coeffs, &weights, &qac, &thresholds, gw, gh, lx, ly,
+                &coeffs,
+                &weights,
+                &qac,
+                &thresholds,
+                gw,
+                gh,
+                lx,
+                ly,
             );
 
             let g_c = enc.upload_blocks(&coeffs, nb, (gw * gh) as u32);
             let g_q = enc.quantize_large_blocks_broadcast_w_persistent(
-                &g_c, &weights, &qac, &thresholds, gw, gh, lx, ly,
+                &g_c,
+                &weights,
+                &qac,
+                &thresholds,
+                gw,
+                gh,
+                lx,
+                ly,
             );
             // Download GpuI32Blocks; reuse client.
             let bytes = enc
@@ -3205,13 +3366,26 @@ mod tests {
         let k_cost = 10.0;
 
         let (stats_a, err_a) = enc.entropy_coeffs_pixel_blocks_broadcast_w(
-            &block_c, &block_y, &weights, &inv_w, n, cmap_factor, quant, k_cost,
+            &block_c,
+            &block_y,
+            &weights,
+            &inv_w,
+            n,
+            cmap_factor,
+            quant,
+            k_cost,
         );
 
         let gc = enc.upload_blocks(&block_c, nb, n);
         let gy = enc.upload_blocks(&block_y, nb, n);
         let (gstats, gerr) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-            &gc, &gy, &weights, &inv_w, cmap_factor, quant, k_cost,
+            &gc,
+            &gy,
+            &weights,
+            &inv_w,
+            cmap_factor,
+            quant,
+            k_cost,
         );
         let stats_b = enc.download_blocks(&gstats);
         let err_b = enc.download_blocks(&gerr);
@@ -3267,14 +3441,8 @@ mod tests {
 
         let gerr = enc.upload_blocks(&pixel_err, nb, bw * bh);
         let gplane = enc.upload_plane(&mask, mask_w, mask_h);
-        let gloss = enc.pixel_loss_blocks_persistent(
-            &gerr,
-            &gplane,
-            &mask_row_base,
-            mask_offset,
-            bw,
-            bh,
-        );
+        let gloss =
+            enc.pixel_loss_blocks_persistent(&gerr, &gplane, &mask_row_base, mask_offset, bw, bh);
         let loss_b = enc.download_blocks_f64(&gloss);
 
         assert_eq!(loss_a.len(), loss_b.len());
@@ -3411,8 +3579,16 @@ mod tests {
         let mut host_b = alloc::vec![0.0_f32; n_out];
         for oy in 0..ph as usize {
             for ox in 0..pw as usize {
-                let sx = if ox < sw as usize { ox } else { sw as usize - 1 };
-                let sy = if oy < sh as usize { oy } else { sh as usize - 1 };
+                let sx = if ox < sw as usize {
+                    ox
+                } else {
+                    sw as usize - 1
+                };
+                let sy = if oy < sh as usize {
+                    oy
+                } else {
+                    sh as usize - 1
+                };
                 let src_off = (sy * sw as usize + sx) * 3;
                 let idx = oy * pw as usize + ox;
                 host_r[idx] = to_linear(pixels[src_off]);
@@ -3422,8 +3598,7 @@ mod tests {
         }
 
         // GPU.
-        let (g_r, g_g, g_b) =
-            enc.upload_u8_rgb_to_linear_planar_padded(&pixels, sw, sh, pw, ph);
+        let (g_r, g_g, g_b) = enc.upload_u8_rgb_to_linear_planar_padded(&pixels, sw, sh, pw, ph);
         let gpu_r = enc.download_plane(&g_r);
         let gpu_g = enc.download_plane(&g_g);
         let gpu_b = enc.download_plane(&g_b);
@@ -3432,7 +3607,10 @@ mod tests {
         // and CUDA, so allow a tiny relative tolerance instead of
         // bit-exact (the math is approximation either way).
         let max_abs_diff = |a: &[f32], b: &[f32]| -> f32 {
-            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
         };
         let dr = max_abs_diff(&host_r, &gpu_r);
         let dg = max_abs_diff(&host_g, &gpu_g);
@@ -3484,8 +3662,9 @@ mod tests {
         let n = (nb as usize) * 64;
 
         // Non-uniform pixels so the DCT outputs vary per block.
-        let pixels: Vec<f32> =
-            (0..n).map(|i| ((i.wrapping_mul(31) % 251) as f32 / 251.0 - 0.5) * 0.6).collect();
+        let pixels: Vec<f32> = (0..n)
+            .map(|i| ((i.wrapping_mul(31) % 251) as f32 / 251.0 - 0.5) * 0.6)
+            .collect();
         // Non-uniform per-coef weights template so the broadcast index
         // path differs from a constant.
         let weights_template: Vec<f32> = (0..64_usize)
@@ -3502,8 +3681,7 @@ mod tests {
         let p_blocks = enc.upload_blocks(&pixels, nb, 64);
         let w_blocks = enc.upload_blocks(&weights_replicated, nb, 64);
 
-        let q_perblock =
-            enc.dct8_quantize_fused_persistent(&p_blocks, &w_blocks, &qac, &thr);
+        let q_perblock = enc.dct8_quantize_fused_persistent(&p_blocks, &w_blocks, &qac, &thr);
         let q_broadcast = enc.dct8_quantize_fused_broadcast_w_persistent(
             &p_blocks,
             &weights_template,
@@ -3547,9 +3725,12 @@ mod tests {
                 if i % 7 == 0 { 0 } else { v }
             })
             .collect();
-        let weights_template: Vec<f32> =
-            (0..64usize).map(|i| 0.5 + 0.7 * ((i * 17 % 251) as f32 / 251.0)).collect();
-        let qac: Vec<f32> = (0..n_blocks as usize).map(|b| 3.5 + 0.1 * b as f32).collect();
+        let weights_template: Vec<f32> = (0..64usize)
+            .map(|i| 0.5 + 0.7 * ((i * 17 % 251) as f32 / 251.0))
+            .collect();
+        let qac: Vec<f32> = (0..n_blocks as usize)
+            .map(|b| 3.5 + 0.1 * b as f32)
+            .collect();
         let dc_host: Vec<f32> = (0..n_blocks).map(|i| 0.4 + 0.05 * i as f32).collect();
         let mut coords: Vec<(u32, u32)> = Vec::with_capacity(n_blocks as usize);
         for by in 0..yb {
@@ -3625,9 +3806,12 @@ mod tests {
                 if i % 7 == 0 { 0 } else { v }
             })
             .collect();
-        let weights_template: Vec<f32> =
-            (0..64usize).map(|i| 0.5 + 0.7 * ((i * 17 % 251) as f32 / 251.0)).collect();
-        let qac: Vec<f32> = (0..n_blocks as usize).map(|b| 3.5 + 0.1 * b as f32).collect();
+        let weights_template: Vec<f32> = (0..64usize)
+            .map(|i| 0.5 + 0.7 * ((i * 17 % 251) as f32 / 251.0))
+            .collect();
+        let qac: Vec<f32> = (0..n_blocks as usize)
+            .map(|b| 3.5 + 0.1 * b as f32)
+            .collect();
         let dc_host: Vec<f32> = (0..n_blocks).map(|i| 0.4 + 0.05 * i as f32).collect();
         let mut coords: Vec<(u32, u32)> = Vec::with_capacity(n_blocks as usize);
         for by in 0..yb {
@@ -3644,8 +3828,12 @@ mod tests {
             let g_dc = enc.upload_blocks(&dc_host, n_blocks, 1);
 
             // ── Split chain: dequant → set_dc → idct → scatter ───
-            let g_dequant =
-                enc.dequant_strategy_dct8_persistent(&g_quant_split, &weights_template, &qac, channel);
+            let g_dequant = enc.dequant_strategy_dct8_persistent(
+                &g_quant_split,
+                &weights_template,
+                &qac,
+                channel,
+            );
             let g_plane_split = enc.alloc_plane(pw, ph);
             enc.set_dc_from_grid_indexed_persistent(&g_dc, &coords, &g_dequant, xb);
             let g_recon = enc.idct_8x8_persistent(&g_dequant);
@@ -3710,29 +3898,16 @@ mod tests {
         }
         // Per-block DC values stored in raster order, as the dc_grid
         // produced by `dc_grid_8x8_persistent`.
-        let dc_host: Vec<f32> = (0..n_blocks)
-            .map(|i| 0.4 + 0.05 * i as f32)
-            .collect();
+        let dc_host: Vec<f32> = (0..n_blocks).map(|i| 0.4 + 0.05 * i as f32).collect();
         let g_dequant_split = enc.upload_blocks(&dequant, n_blocks, 64);
         let g_dequant_fused = enc.upload_blocks(&dequant, n_blocks, 64);
         let g_dc = enc.upload_blocks(&dc_host, n_blocks, 1);
 
         // ── Split chain: set_dc → idct → indexed_scatter ──────────
         let g_plane_split = enc.alloc_plane(pw, ph);
-        enc.set_dc_from_grid_indexed_persistent(
-            &g_dc,
-            &coords,
-            &g_dequant_split,
-            xb,
-        );
+        enc.set_dc_from_grid_indexed_persistent(&g_dc, &coords, &g_dequant_split, xb);
         let g_recon = enc.idct_8x8_persistent(&g_dequant_split);
-        enc.indexed_scatter_blocks_persistent(
-            &g_recon,
-            &coords,
-            &g_plane_split,
-            8u32,
-            8u32,
-        );
+        enc.indexed_scatter_blocks_persistent(&g_recon, &coords, &g_plane_split, 8u32, 8u32);
         let plane_split = enc.download_plane(&g_plane_split);
 
         // ── Fused chain: single launch ────────────────────────────
@@ -4092,8 +4267,7 @@ mod tests {
                     coords.push((bx, by));
                 }
             }
-            let g_blocks =
-                enc.indexed_gather_blocks_persistent(&g_plane, &coords, tile_w, tile_h);
+            let g_blocks = enc.indexed_gather_blocks_persistent(&g_plane, &coords, tile_w, tile_h);
             // alloc_plane is now actually zero-filled (see
             // test_alloc_plane_and_alloc_blocks_are_zero_filled).
             let g_dst = enc.alloc_plane(pw, ph);
@@ -4329,7 +4503,11 @@ mod tests {
                 coords_16x32.push((bx, by));
             }
         }
-        let g_dst_16x32 = enc.upload_blocks(&init[..coords_16x32.len() * cpb as usize], coords_16x32.len() as u32, cpb);
+        let g_dst_16x32 = enc.upload_blocks(
+            &init[..coords_16x32.len() * cpb as usize],
+            coords_16x32.len() as u32,
+            cpb,
+        );
         enc.set_llf_dct16x32_indexed_persistent(&g_dc, &coords_16x32, &g_dst_16x32, xsize_blocks_8);
         let got_16x32 = enc.download_blocks(&g_dst_16x32);
         for (i, &(bx, by)) in coords_16x32.iter().enumerate() {
@@ -4462,7 +4640,12 @@ mod tests {
             let host_llf = crate::forks::reconstruct::restore_llf_dct16x16(dc_subgrid);
             let off = i * cpb as usize;
             // 4 LLF positions: 0, 1, 16, 17.
-            let positions = [(0, host_llf[0]), (1, host_llf[1]), (16, host_llf[2]), (17, host_llf[3])];
+            let positions = [
+                (0, host_llf[0]),
+                (1, host_llf[1]),
+                (16, host_llf[2]),
+                (17, host_llf[3]),
+            ];
             for (pos, expected) in positions {
                 assert!(
                     (got[off + pos] - expected).abs() < 1e-5,
@@ -4493,7 +4676,9 @@ mod tests {
         let xsize_blocks_8 = 16u32;
         let ysize_blocks_8 = 8u32;
         let n_total = (xsize_blocks_8 * ysize_blocks_8) as usize;
-        let dc_host: Vec<f32> = (0..n_total).map(|i| (i as f32 * 0.31).sin() * 0.7).collect();
+        let dc_host: Vec<f32> = (0..n_total)
+            .map(|i| (i as f32 * 0.31).sin() * 0.7)
+            .collect();
         let g_dc = enc.upload_blocks(&dc_host, n_total as u32, 1);
         // Test both DCT16x8 (vertical pair, dc_step = stride)
         // and DCT8x16 (horizontal pair, dc_step = 1).
@@ -4512,7 +4697,11 @@ mod tests {
                 .collect();
             let g_dst = enc.upload_blocks(&init, coords.len() as u32, cpb);
             enc.set_llf_dct16x8_or_8x16_indexed_persistent(
-                &g_dc, &coords, &g_dst, xsize_blocks_8, dc_step,
+                &g_dc,
+                &coords,
+                &g_dst,
+                xsize_blocks_8,
+                dc_step,
             );
             let got = enc.download_blocks(&g_dst);
             for (i, &(bx, by)) in coords.iter().enumerate() {
@@ -4561,13 +4750,7 @@ mod tests {
         let n_total = (xsize_blocks_8 * ysize_blocks_8) as usize;
         let dc_host: Vec<f32> = (0..n_total).map(|i| i as f32 * 1.5 + 0.7).collect();
         let g_dc = enc.upload_blocks(&dc_host, n_total as u32, 1);
-        let coords: Vec<(u32, u32)> = vec![
-            (0, 0),
-            (3, 1),
-            (7, 2),
-            (5, 3),
-            (1, 0),
-        ];
+        let coords: Vec<(u32, u32)> = vec![(0, 0), (3, 1), (7, 2), (5, 3), (1, 0)];
         let cpb = 64u32;
         let n_strat_blocks = coords.len();
         // Initialize dst with sentinel values to verify only DC is written.
@@ -4608,9 +4791,9 @@ mod tests {
         let enc: GpuEncoder<B> = GpuEncoder::new();
         for &(pw, ph, tile_w, tile_h) in &[
             (32u32, 32u32, 8u32, 8u32),
-            (64, 32, 16, 8),  // DCT8x16 tile
-            (32, 64, 8, 16),  // DCT16x8 tile
-            (64, 64, 16, 16), // DCT16x16
+            (64, 32, 16, 8),    // DCT8x16 tile
+            (32, 64, 8, 16),    // DCT16x8 tile
+            (64, 64, 16, 16),   // DCT16x16
             (128, 128, 32, 32), // DCT32x32
         ] {
             let n = (pw * ph) as usize;
@@ -4633,8 +4816,7 @@ mod tests {
                 let y0 = (by * 8) as usize;
                 for dy in 0..tile_h as usize {
                     let src_off = (y0 + dy) * (pw as usize) + x0;
-                    host_batch
-                        .extend_from_slice(&plane[src_off..src_off + tile_w as usize]);
+                    host_batch.extend_from_slice(&plane[src_off..src_off + tile_w as usize]);
                 }
             }
             let g_blocks = enc.indexed_gather_blocks_persistent(&g_plane, &coords, tile_w, tile_h);
@@ -4662,7 +4844,9 @@ mod tests {
         let enc: GpuEncoder<B> = GpuEncoder::new();
         for &(w, h) in &[(16u32, 16u32), (32, 32), (64, 48), (128, 256)] {
             let n = (w * h) as usize;
-            let plane: Vec<f32> = (0..n).map(|i| 0.05 * ((i as f32 * 0.013).sin() + 0.5)).collect();
+            let plane: Vec<f32> = (0..n)
+                .map(|i| 0.05 * ((i as f32 * 0.013).sin() + 0.5))
+                .collect();
             let g_plane = enc.upload_plane(&plane, w, h);
             let g_dc = enc.dc_grid_8x8_persistent(&g_plane);
             let gpu_dc = enc.download_blocks(&g_dc);

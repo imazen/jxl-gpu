@@ -191,14 +191,11 @@ pub fn gaborish_5x5_3ch_kernel(
     let l6 = row_tp2 + xm1;
     let l7 = row_tp2 + xp1;
     vx += wl
-        * (in_x[l0] + in_x[l1] + in_x[l2] + in_x[l3]
-            + in_x[l4] + in_x[l5] + in_x[l6] + in_x[l7]);
+        * (in_x[l0] + in_x[l1] + in_x[l2] + in_x[l3] + in_x[l4] + in_x[l5] + in_x[l6] + in_x[l7]);
     vy += wl
-        * (in_y[l0] + in_y[l1] + in_y[l2] + in_y[l3]
-            + in_y[l4] + in_y[l5] + in_y[l6] + in_y[l7]);
+        * (in_y[l0] + in_y[l1] + in_y[l2] + in_y[l3] + in_y[l4] + in_y[l5] + in_y[l6] + in_y[l7]);
     vb += wl
-        * (in_b[l0] + in_b[l1] + in_b[l2] + in_b[l3]
-            + in_b[l4] + in_b[l5] + in_b[l6] + in_b[l7]);
+        * (in_b[l0] + in_b[l1] + in_b[l2] + in_b[l3] + in_b[l4] + in_b[l5] + in_b[l6] + in_b[l7]);
 
     // D: corners distance 2*sqrt(2)
     let bd0 = row_tm2 + xm2;

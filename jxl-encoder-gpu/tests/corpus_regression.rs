@@ -41,7 +41,7 @@
 
 use jxl_encoder_gpu::encoder::GpuEncoder;
 use jxl_encoder_gpu::forks::butteraugli_loop::{
-    refine_and_encode_smart, ButteraugliLoopGpu, BestOfBothPath,
+    BestOfBothPath, ButteraugliLoopGpu, refine_and_encode_smart,
 };
 use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 
@@ -72,8 +72,12 @@ const CORPUS_ROOT: &str = "/home/lilith/work/codec-corpus";
 /// regresses uniform even at d=2.0.
 const EXPECTED_SCORES: &[(&str, f32, f32, BestOfBothPath)] = &[
     // ===== d=1.0 (the original 11-image set) =====
-    ("clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
-        1.0, 1.1475, BestOfBothPath::Tie),
+    (
+        "clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
+        1.0,
+        1.1475,
+        BestOfBothPath::Tie,
+    ),
     // 07b9f93f @ d=1.0: post libjxl-faithful loss-side per-block
     // quant_norm16 fix (commit 2026-05-11), score 1.2089 → 1.2133
     // (+0.36%, within tolerance) and best-of-both path RefineStratSearch
@@ -81,77 +85,209 @@ const EXPECTED_SCORES: &[(&str, f32, f32, BestOfBothPath)] = &[
     // score on this image; with entropy_mul still at the 3.0 band-aid
     // it's expected to need re-bisection. Accepted parity tradeoff:
     // tiny score regression in exchange for libjxl-faithful cost model.
-    ("clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
-        1.0, 1.2133, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
-        1.0, 1.0999, BestOfBothPath::RefineDct8), // uniform won
-    ("clic2025-1024/1e2f9d41529197f1.png",
-        1.0, 0.8190, BestOfBothPath::RefineDct8), // uniform won
+    (
+        "clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
+        1.0,
+        1.2133,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
+        1.0,
+        1.0999,
+        BestOfBothPath::RefineDct8,
+    ), // uniform won
+    (
+        "clic2025-1024/1e2f9d41529197f1.png",
+        1.0,
+        0.8190,
+        BestOfBothPath::RefineDct8,
+    ), // uniform won
     // DCT64-sensitive photos (52/9/79 picks at mul=8 pre-fix)
-    ("clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
-        1.0, 1.1587, BestOfBothPath::RefineDct8), // FP-tied; epsilon flipped at DCT64=5
-    ("clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
-        1.0, 1.1548, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
-        1.0, 1.1556, BestOfBothPath::RefineDct8),
+    (
+        "clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
+        1.0,
+        1.1587,
+        BestOfBothPath::RefineDct8,
+    ), // FP-tied; epsilon flipped at DCT64=5
+    (
+        "clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
+        1.0,
+        1.1548,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
+        1.0,
+        1.1556,
+        BestOfBothPath::RefineDct8,
+    ),
     // Strat-search-winning photos
-    ("clic2025-1024/22ea12c903e41583.png",
-        1.0, 1.1716, BestOfBothPath::RefineStratSearch),
-    ("clic2025-1024/2684452db505ddbb.png",
-        1.0, 1.1868, BestOfBothPath::RefineStratSearch),
+    (
+        "clic2025-1024/22ea12c903e41583.png",
+        1.0,
+        1.1716,
+        BestOfBothPath::RefineStratSearch,
+    ),
+    (
+        "clic2025-1024/2684452db505ddbb.png",
+        1.0,
+        1.1868,
+        BestOfBothPath::RefineStratSearch,
+    ),
     // Screenshots — discriminator fires
-    ("gb82-sc/graph.png", 1.0, 1.0528, BestOfBothPath::SkippedStratSearchAsScreenshot),
-    ("gb82-sc/gmessages.png", 1.0, 0.9266, BestOfBothPath::SkippedStratSearchAsScreenshot),
-
+    (
+        "gb82-sc/graph.png",
+        1.0,
+        1.0528,
+        BestOfBothPath::SkippedStratSearchAsScreenshot,
+    ),
+    (
+        "gb82-sc/gmessages.png",
+        1.0,
+        0.9266,
+        BestOfBothPath::SkippedStratSearchAsScreenshot,
+    ),
     // ===== d=0.5 (high-quality web) =====
-    ("clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
-        0.5, 0.6641, BestOfBothPath::RefineStratSearch),
-    ("clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
-        0.5, 0.6705, BestOfBothPath::Tie),
-    ("clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
-        0.5, 0.5272, BestOfBothPath::Tie),
-    ("clic2025-1024/1e2f9d41529197f1.png",
-        0.5, 0.5071, BestOfBothPath::Tie),
-    ("clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
-        0.5, 0.6554, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
-        0.5, 0.6380, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
-        0.5, 0.7292, BestOfBothPath::RefineDct8),
+    (
+        "clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
+        0.5,
+        0.6641,
+        BestOfBothPath::RefineStratSearch,
+    ),
+    (
+        "clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
+        0.5,
+        0.6705,
+        BestOfBothPath::Tie,
+    ),
+    (
+        "clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
+        0.5,
+        0.5272,
+        BestOfBothPath::Tie,
+    ),
+    (
+        "clic2025-1024/1e2f9d41529197f1.png",
+        0.5,
+        0.5071,
+        BestOfBothPath::Tie,
+    ),
+    (
+        "clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
+        0.5,
+        0.6554,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
+        0.5,
+        0.6380,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
+        0.5,
+        0.7292,
+        BestOfBothPath::RefineDct8,
+    ),
     // d=0.5 score improved 0.7397 → 0.7109 (DCT64 6→5) → 0.6957
     // (DCT64 5→4.8) — total 5.9% improvement from the original 6.0
     // baseline. Strat-search picks DCT64 here for real gain.
-    ("clic2025-1024/22ea12c903e41583.png",
-        0.5, 0.6957, BestOfBothPath::RefineStratSearch),
-    ("clic2025-1024/2684452db505ddbb.png",
-        0.5, 0.6667, BestOfBothPath::RefineStratSearch),
-    ("gb82-sc/graph.png", 0.5, 0.5271, BestOfBothPath::SkippedStratSearchAsScreenshot),
-    ("gb82-sc/gmessages.png", 0.5, 0.5265, BestOfBothPath::SkippedStratSearchAsScreenshot),
-
+    (
+        "clic2025-1024/22ea12c903e41583.png",
+        0.5,
+        0.6957,
+        BestOfBothPath::RefineStratSearch,
+    ),
+    (
+        "clic2025-1024/2684452db505ddbb.png",
+        0.5,
+        0.6667,
+        BestOfBothPath::RefineStratSearch,
+    ),
+    (
+        "gb82-sc/graph.png",
+        0.5,
+        0.5271,
+        BestOfBothPath::SkippedStratSearchAsScreenshot,
+    ),
+    (
+        "gb82-sc/gmessages.png",
+        0.5,
+        0.5265,
+        BestOfBothPath::SkippedStratSearchAsScreenshot,
+    ),
     // ===== d=2.0 (aggressive web compression) =====
     // At d>1.5, refinement statistically regresses on most photos.
     // Smart's best-of-3 catches that — most cases pick the uniform
     // candidate (reported as RefineDct8 path label).
-    ("clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
-        2.0, 2.1525, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
-        2.0, 2.0550, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
-        2.0, 1.8807, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/1e2f9d41529197f1.png",
-        2.0, 1.5000, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
-        2.0, 1.9975, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
-        2.0, 2.0202, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
-        2.0, 2.0866, BestOfBothPath::RefineStratSearch),
-    ("clic2025-1024/22ea12c903e41583.png",
-        2.0, 2.0949, BestOfBothPath::RefineDct8),
-    ("clic2025-1024/2684452db505ddbb.png",
-        2.0, 2.1252, BestOfBothPath::RefineDct8),
-    ("gb82-sc/graph.png", 2.0, 1.4447, BestOfBothPath::SkippedStratSearchAsScreenshot),
-    ("gb82-sc/gmessages.png", 2.0, 1.6462, BestOfBothPath::SkippedStratSearchAsScreenshot),
+    (
+        "clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
+        2.0,
+        2.1525,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
+        2.0,
+        2.0550,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
+        2.0,
+        1.8807,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/1e2f9d41529197f1.png",
+        2.0,
+        1.5000,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
+        2.0,
+        1.9975,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
+        2.0,
+        2.0202,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
+        2.0,
+        2.0866,
+        BestOfBothPath::RefineStratSearch,
+    ),
+    (
+        "clic2025-1024/22ea12c903e41583.png",
+        2.0,
+        2.0949,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "clic2025-1024/2684452db505ddbb.png",
+        2.0,
+        2.1252,
+        BestOfBothPath::RefineDct8,
+    ),
+    (
+        "gb82-sc/graph.png",
+        2.0,
+        1.4447,
+        BestOfBothPath::SkippedStratSearchAsScreenshot,
+    ),
+    (
+        "gb82-sc/gmessages.png",
+        2.0,
+        1.6462,
+        BestOfBothPath::SkippedStratSearchAsScreenshot,
+    ),
 ];
 
 /// Tolerance for score comparison. 0.5% is tight enough to catch
@@ -245,7 +381,16 @@ fn corpus_regression_smart_turnkey_d1_iter4() {
         let initial_aq = lossy.compute_aq_field(&enc, &r, &g, &b, *distance);
 
         let result = refine_and_encode_smart(
-            &enc, &lossy, &mut bg, &r, &g, &b, &pixels, &initial_aq, *distance, ITERS,
+            &enc,
+            &lossy,
+            &mut bg,
+            &r,
+            &g,
+            &b,
+            &pixels,
+            &initial_aq,
+            *distance,
+            ITERS,
         );
         let (_rec_r, _rec_g, _rec_b, path, scores) = match result {
             Ok(v) => v,

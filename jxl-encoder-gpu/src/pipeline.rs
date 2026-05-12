@@ -3447,9 +3447,7 @@ fn partition_16x16_cost_with_extras(
 ) -> f32 {
     let bx = rx16 * 2;
     let by = ry16 * 2;
-    let cell_cost = |g: &[f32], stride: usize, cx: usize, cy: usize| -> f32 {
-        g[cy * stride + cx]
-    };
+    let cell_cost = |g: &[f32], stride: usize, cx: usize, cy: usize| -> f32 { g[cy * stride + cx] };
     match p {
         Partition16x16::Dct16x16 => cost_dct16x16[ry16 * xsize_blocks_16 + rx16],
         Partition16x16::FourDct8x8 => {
@@ -3462,8 +3460,10 @@ fn partition_16x16_cost_with_extras(
             // Two 16x8 blocks at (bx, by) and (bx+1, by) in the
             // 16x8 grid (xsize = xsize_blocks_8).
             match extra.dct_16x8 {
-                Some(g) => cell_cost(g, xsize_blocks_8, bx, ry16)
-                    + cell_cost(g, xsize_blocks_8, bx + 1, ry16),
+                Some(g) => {
+                    cell_cost(g, xsize_blocks_8, bx, ry16)
+                        + cell_cost(g, xsize_blocks_8, bx + 1, ry16)
+                }
                 None => f32::INFINITY,
             }
         }
@@ -3471,8 +3471,10 @@ fn partition_16x16_cost_with_extras(
             // Two 8x16 blocks at (rx16, by) and (rx16, by+1) in the
             // 8x16 grid (xsize = xsize_blocks_8 / 2 = xsize_blocks_16).
             match extra.dct_8x16 {
-                Some(g) => cell_cost(g, xsize_blocks_16, rx16, by)
-                    + cell_cost(g, xsize_blocks_16, rx16, by + 1),
+                Some(g) => {
+                    cell_cost(g, xsize_blocks_16, rx16, by)
+                        + cell_cost(g, xsize_blocks_16, rx16, by + 1)
+                }
                 None => f32::INFINITY,
             }
         }
@@ -3645,8 +3647,7 @@ pub fn partitions_16x16_to_assignments(
                     }
                 }
                 Partition16x16::FourSubBlocks(subs) => {
-                    for ((dx, dy), sub) in
-                        [(0, 0), (1, 0), (0, 1), (1, 1)].iter().zip(subs.iter())
+                    for ((dx, dy), sub) in [(0, 0), (1, 0), (0, 1), (1, 1)].iter().zip(subs.iter())
                     {
                         let raw = match sub {
                             SubStrategy::Dct8 => RAW_STRATEGY_DCT,
@@ -3746,8 +3747,7 @@ pub fn partitions_32x32_to_assignments(
                     // ordering matches Partition16x16 conventions: TL,
                     // TR, BL, BR within the 32×32 region.
                     let mini = [subs[0], subs[1], subs[2], subs[3]];
-                    let mini_assignments =
-                        partitions_16x16_to_assignments(&mini, 4, 4);
+                    let mini_assignments = partitions_16x16_to_assignments(&mini, 4, 4);
                     // mini_assignments is in 8×8-block coords relative to
                     // a 4×4-block (= 32×32 pixel) region; offset by (bx, by).
                     for a in mini_assignments {
@@ -3836,8 +3836,7 @@ pub fn partitions_64x64_to_assignments(
                     // and call the 32x32 lowering on the 8×8-block-sized
                     // mini-grid (8 blocks per side = 4×4 in 32x32-grid).
                     let mini = [subs[0], subs[1], subs[2], subs[3]];
-                    let mini_assignments =
-                        partitions_32x32_to_assignments(&mini, 8, 8);
+                    let mini_assignments = partitions_32x32_to_assignments(&mini, 8, 8);
                     for a in mini_assignments {
                         out.push(StrategyAssignment {
                             bx: bx + a.bx,

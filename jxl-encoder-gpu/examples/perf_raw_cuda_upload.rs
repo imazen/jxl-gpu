@@ -181,9 +181,7 @@ fn main() {
         "  {:32}  {:>10}  {:>14}  {:>14}",
         "192 MB f32 padded (cubecl)", "1423", "0.13", "0.008×"
     );
-    println!(
-        "\nDeltas above show how much bandwidth cubecl 0.10's create_from_slice"
-    );
+    println!("\nDeltas above show how much bandwidth cubecl 0.10's create_from_slice");
     println!("is leaving on the table relative to raw cuMemcpyHtoD.");
 }
 

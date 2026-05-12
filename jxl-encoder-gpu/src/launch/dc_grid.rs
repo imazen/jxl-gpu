@@ -17,8 +17,14 @@ pub fn dc_grid_8x8<R: Runtime>(
     width: u32,
     height: u32,
 ) {
-    assert!(width.is_multiple_of(8), "width {width} must be multiple of 8");
-    assert!(height.is_multiple_of(8), "height {height} must be multiple of 8");
+    assert!(
+        width.is_multiple_of(8),
+        "width {width} must be multiple of 8"
+    );
+    assert!(
+        height.is_multiple_of(8),
+        "height {height} must be multiple of 8"
+    );
     let blocks_per_row = width / 8;
     let blocks_per_col = height / 8;
     let n_blocks = blocks_per_row * blocks_per_col;

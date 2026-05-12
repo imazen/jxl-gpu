@@ -140,7 +140,11 @@ pub fn dequant_strategy_kernel_broadcast_w_dct8(
         } else {
             let q = q_int as f32;
             if f32::abs(q) < 1.125f32 {
-                if q > 0.0f32 { channel_bias } else { -channel_bias }
+                if q > 0.0f32 {
+                    channel_bias
+                } else {
+                    -channel_bias
+                }
             } else {
                 q - BIAS_RECIP / q
             }

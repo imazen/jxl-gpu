@@ -43,7 +43,7 @@ fn main() {
     use std::time::Instant;
 
     use jxl_encoder_gpu::encoder::GpuEncoder;
-    use jxl_encoder_gpu::lossy_encoder::{distance_to_qac, LossyEncoder};
+    use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
     type B = cubecl::cuda::CudaRuntime;
 
@@ -67,7 +67,10 @@ fn main() {
             target_mp = raw_args.get(4).and_then(|s| s.parse().ok());
             iter_arg_pos = 5;
         }
-        iters = raw_args.get(iter_arg_pos).and_then(|s| s.parse().ok()).unwrap_or(5);
+        iters = raw_args
+            .get(iter_arg_pos)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
         let mut img = image::open(path)
             .unwrap_or_else(|e| panic!("failed to open {path}: {e}"))
             .to_rgb8();
@@ -144,8 +147,8 @@ fn main() {
 
     let enc: GpuEncoder<B> = GpuEncoder::new();
     let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, width, height);
-    let nb8 = (lossy.padded_dimensions().0 as usize / 8)
-        * (lossy.padded_dimensions().1 as usize / 8);
+    let nb8 =
+        (lossy.padded_dimensions().0 as usize / 8) * (lossy.padded_dimensions().1 as usize / 8);
     let aq_field = vec![distance_to_qac(distance); nb8];
 
     // Warmup: build a plan + run one encode to JIT/upload static buffers.
@@ -276,16 +279,16 @@ fn main() {
     }
 
     // ── Summary ──
-    let total_ms: f64 = iter_times
-        .iter()
-        .map(|d| d.as_secs_f64() * 1000.0)
-        .sum();
+    let total_ms: f64 = iter_times.iter().map(|d| d.as_secs_f64() * 1000.0).sum();
     let mean_ms = total_ms / iters as f64;
     let min_ms = iter_times
         .iter()
         .map(|d| d.as_secs_f64() * 1000.0)
         .fold(f64::INFINITY, f64::min);
-    println!("\nencode-with-plan summary: mean {:.2} ms, min {:.2} ms (over {iters} iters)", mean_ms, min_ms);
+    println!(
+        "\nencode-with-plan summary: mean {:.2} ms, min {:.2} ms (over {iters} iters)",
+        mean_ms, min_ms
+    );
 
     println!("\nstage breakdown (mean across {iters} iters, sorted by total):");
     let mut entries: Vec<(&&'static str, &f64)> = stage_totals.iter().collect();

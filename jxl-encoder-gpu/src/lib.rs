@@ -70,14 +70,14 @@ extern crate alloc;
 pub mod encoder;
 #[cfg(feature = "encoder")]
 pub mod forks;
+#[cfg(feature = "encoder")]
+pub mod groups;
 pub mod kernels;
 pub mod launch;
 #[cfg(feature = "encoder")]
 pub mod lossy_encoder;
 #[cfg(feature = "encoder")]
 pub mod persistent;
-#[cfg(feature = "encoder")]
-pub mod groups;
 #[cfg(feature = "encoder")]
 pub mod pipeline;
 pub mod quant_weights;

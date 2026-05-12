@@ -261,13 +261,13 @@ pub struct BlockRecipe<'a> {
 /// `restore_llf_*` helpers.
 fn llf_dims_for_strategy(raw_strategy: u8) -> (u32, u32) {
     use crate::forks::transform::{
+        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
+    };
+    use crate::forks::transform::{
         RAW_STRATEGY_DCT, RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
         RAW_STRATEGY_DCT8X4, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
         RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
         RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_IDENTITY,
-    };
-    use crate::forks::transform::{
-        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
     };
     match raw_strategy {
         RAW_STRATEGY_DCT
@@ -388,7 +388,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     out_plane_gpu: Option<&crate::persistent::GpuPlane<R>>,
 ) {
     use crate::forks::transform::{
-        apply_dct_batch_persistent, coeff_count_per_strategy, tile_dims_pixels, RAW_STRATEGY_DCT,
+        RAW_STRATEGY_DCT, apply_dct_batch_persistent, coeff_count_per_strategy, tile_dims_pixels,
     };
     use crate::pipeline::group_assignments_by_strategy;
 
@@ -432,8 +432,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     // null it out for the no-download optimization). Require padded-size
     // when the host slice is the upload source.
     debug_assert!(
-        dc_grid_gpu.is_some()
-            || dc_grid_per_8x8_block.len() == xsize_blocks_8 * ysize_blocks_8,
+        dc_grid_gpu.is_some() || dc_grid_per_8x8_block.len() == xsize_blocks_8 * ysize_blocks_8,
         "dc_grid_per_8x8_block must have xsize_blocks_8*ysize_blocks_8 entries when \
          dc_grid_gpu is None (got len {}, expected {})",
         dc_grid_per_8x8_block.len(),
@@ -460,8 +459,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         debug_assert_eq!(p.height(), padded_height as u32);
         p
     } else {
-        g_plane_owned =
-            enc.upload_plane(xyb_channel, padded_width as u32, padded_height as u32);
+        g_plane_owned = enc.upload_plane(xyb_channel, padded_width as u32, padded_height as u32);
         &g_plane_owned
     };
 
@@ -618,13 +616,13 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 &weights_template,
                 &qac_for_strategy,
                 thresholds,
-                8, 8, 1, 1,
+                8,
+                8,
+                1,
+                1,
             );
-            let g_dequant = enc.dequant_strategy_persistent(
-                &g_quant,
-                &weights_template,
-                &qac_for_strategy,
-            );
+            let g_dequant =
+                enc.dequant_strategy_persistent(&g_quant, &weights_template, &qac_for_strategy);
             let mut dequant = enc.download_blocks(&g_dequant);
             // LLF restore for AFV: empirically (test_afv_packed_dc_for_uniform_input)
             // the forward AFV transform on uniform M input produces
@@ -660,7 +658,11 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                     .map(|&(bx, by)| (bx as u32, by as u32))
                     .collect();
                 enc.indexed_scatter_blocks_persistent(
-                    &g_pixels, &coords_u32, g_out_plane, 8u32, 8u32,
+                    &g_pixels,
+                    &coords_u32,
+                    g_out_plane,
+                    8u32,
+                    8u32,
                 );
                 used_gpu_for_any = true;
             } else {
@@ -681,8 +683,10 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         // layout matches the host batch byte-for-byte (verified by
         // test_indexed_gather_blocks_persistent_matches_host across 5
         // tile shapes).
-        let coords_u32: Vec<(u32, u32)> =
-            coords.iter().map(|&(bx, by)| (bx as u32, by as u32)).collect();
+        let coords_u32: Vec<(u32, u32)> = coords
+            .iter()
+            .map(|&(bx, by)| (bx as u32, by as u32))
+            .collect();
         let g_pixels = enc.indexed_gather_blocks_persistent(
             g_plane,
             &coords_u32,
@@ -788,11 +792,8 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
             );
             // Persistent IDCT for this strategy + GPU scatter back into
             // g_out_plane at the strategy's tile positions.
-            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
-                enc,
-                &g_dequant,
-                raw_strategy,
-            );
+            let g_recon =
+                crate::forks::transform::apply_idct_batch_persistent(enc, &g_dequant, raw_strategy);
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
@@ -814,22 +815,28 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         {
             if raw_strategy == RAW_STRATEGY_DCT64X64 {
                 enc.set_llf_dct64x64_indexed_persistent(
-                    g_dc_grid, &coords_u32, &g_dequant, xsize_blocks_8 as u32,
+                    g_dc_grid,
+                    &coords_u32,
+                    &g_dequant,
+                    xsize_blocks_8 as u32,
                 );
             } else if raw_strategy == RAW_STRATEGY_DCT64X32 {
                 enc.set_llf_dct64x32_indexed_persistent(
-                    g_dc_grid, &coords_u32, &g_dequant, xsize_blocks_8 as u32,
+                    g_dc_grid,
+                    &coords_u32,
+                    &g_dequant,
+                    xsize_blocks_8 as u32,
                 );
             } else {
                 enc.set_llf_dct32x64_indexed_persistent(
-                    g_dc_grid, &coords_u32, &g_dequant, xsize_blocks_8 as u32,
+                    g_dc_grid,
+                    &coords_u32,
+                    &g_dequant,
+                    xsize_blocks_8 as u32,
                 );
             }
-            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
-                enc,
-                &g_dequant,
-                raw_strategy,
-            );
+            let g_recon =
+                crate::forks::transform::apply_idct_batch_persistent(enc, &g_dequant, raw_strategy);
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
@@ -850,11 +857,8 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 &g_dequant,
                 xsize_blocks_8 as u32,
             );
-            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
-                enc,
-                &g_dequant,
-                raw_strategy,
-            );
+            let g_recon =
+                crate::forks::transform::apply_idct_batch_persistent(enc, &g_dequant, raw_strategy);
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
@@ -872,11 +876,8 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 &g_dequant,
                 xsize_blocks_8 as u32,
             );
-            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
-                enc,
-                &g_dequant,
-                raw_strategy,
-            );
+            let g_recon =
+                crate::forks::transform::apply_idct_batch_persistent(enc, &g_dequant, raw_strategy);
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
@@ -897,11 +898,8 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 &g_dequant,
                 xsize_blocks_8 as u32,
             );
-            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
-                enc,
-                &g_dequant,
-                raw_strategy,
-            );
+            let g_recon =
+                crate::forks::transform::apply_idct_batch_persistent(enc, &g_dequant, raw_strategy);
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
@@ -922,11 +920,8 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 &g_dequant,
                 xsize_blocks_8 as u32,
             );
-            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
-                enc,
-                &g_dequant,
-                raw_strategy,
-            );
+            let g_recon =
+                crate::forks::transform::apply_idct_batch_persistent(enc, &g_dequant, raw_strategy);
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
@@ -941,7 +936,7 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
         // 1×2 / 2×1-LLF GPU fast path for DCT16×8 / DCT8×16 — same chain
         // shape as the 1×1-LLF path above but with the matching
         // 2-position LLF kernel.
-        use crate::forks::transform::{RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT8X16};
+        use crate::forks::transform::{RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8};
         if raw_strategy == RAW_STRATEGY_DCT16X8 || raw_strategy == RAW_STRATEGY_DCT8X16 {
             // dc_step = stride for vertical pair (DCT16x8), 1 for
             // horizontal pair (DCT8x16). dc_stride is xsize_blocks_8.
@@ -957,11 +952,8 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
                 xsize_blocks_8 as u32,
                 dc_step,
             );
-            let g_recon = crate::forks::transform::apply_idct_batch_persistent(
-                enc,
-                &g_dequant,
-                raw_strategy,
-            );
+            let g_recon =
+                crate::forks::transform::apply_idct_batch_persistent(enc, &g_dequant, raw_strategy);
             enc.indexed_scatter_blocks_persistent(
                 &g_recon,
                 &coords_u32,
@@ -1030,9 +1022,9 @@ pub fn encode_and_reconstruct_mixed_strategy_single_channel<R: Runtime>(
     // out_plane was never used) — but the caller still needs to have
     // supplied it for those hypothetical strategies.
     if !recipes.is_empty() {
-        let out_host = out_plane.as_deref_mut().expect(
-            "encode_and_reconstruct: out_plane must be Some when host LLF fallback fires",
-        );
+        let out_host = out_plane
+            .as_deref_mut()
+            .expect("encode_and_reconstruct: out_plane must be Some when host LLF fallback fires");
         reconstruct_mixed_strategy_gpu(enc, &recipes, out_host, padded_width);
     }
 
@@ -2626,8 +2618,16 @@ mod tests {
         //   (every row identical, so block mean = row mean).
         // Block (1,0): pixels x=8..15, mean = (8+9+..+15)/8 = 92/8 = 11.5.
         assert_eq!(dc.len(), 2);
-        assert!((dc[0] - 3.5).abs() < 1e-4, "block0: got {} expected 3.5", dc[0]);
-        assert!((dc[1] - 11.5).abs() < 1e-4, "block1: got {} expected 11.5", dc[1]);
+        assert!(
+            (dc[0] - 3.5).abs() < 1e-4,
+            "block0: got {} expected 3.5",
+            dc[0]
+        );
+        assert!(
+            (dc[1] - 11.5).abs() < 1e-4,
+            "block1: got {} expected 11.5",
+            dc[1]
+        );
     }
 
     /// Smoke test: encode_and_reconstruct_mixed_strategy_single_channel
@@ -2718,8 +2718,8 @@ mod tests {
     #[test]
     fn test_afv_isolated_reconstruct_uniform_input() {
         use crate::forks::transform::{
-            coeff_count_per_strategy, RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2,
-            RAW_STRATEGY_AFV3,
+            RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
+            coeff_count_per_strategy,
         };
         use crate::pipeline::StrategyAssignment;
         use crate::quant_weights::afv_weights_per_channel;
@@ -2749,10 +2749,9 @@ mod tests {
         let (_afv_x, afv_y, _afv_b) = afv_weights_per_channel();
         let weights_for = move |s: u8| -> Vec<f32> {
             match s {
-                RAW_STRATEGY_AFV0
-                | RAW_STRATEGY_AFV1
-                | RAW_STRATEGY_AFV2
-                | RAW_STRATEGY_AFV3 => afv_y.to_vec(),
+                RAW_STRATEGY_AFV0 | RAW_STRATEGY_AFV1 | RAW_STRATEGY_AFV2 | RAW_STRATEGY_AFV3 => {
+                    afv_y.to_vec()
+                }
                 _ => alloc::vec![1.0_f32; coeff_count_per_strategy(s)],
             }
         };
@@ -2770,8 +2769,20 @@ mod tests {
                 .collect();
             let mut out = alloc::vec![0.0_f32; pw * ph];
             encode_and_reconstruct_mixed_strategy_single_channel(
-                &enc, &xyb, pw, ph, &assignments, &weights_for, &qac, &thresholds,
-                &dc_grid, 1, Some(&mut out), None, None, None,
+                &enc,
+                &xyb,
+                pw,
+                ph,
+                &assignments,
+                &weights_for,
+                &qac,
+                &thresholds,
+                &dc_grid,
+                1,
+                Some(&mut out),
+                None,
+                None,
+                None,
             );
             let mut sumsq = 0.0_f64;
             for i in 0..pw * ph {
@@ -2798,8 +2809,20 @@ mod tests {
                 .collect();
             let mut out = alloc::vec![0.0_f32; pw * ph];
             encode_and_reconstruct_mixed_strategy_single_channel(
-                &enc, &xyb, pw, ph, &assignments, &weights_for, &qac, &thresholds,
-                &dc_grid, 1, Some(&mut out), None, None, None,
+                &enc,
+                &xyb,
+                pw,
+                ph,
+                &assignments,
+                &weights_for,
+                &qac,
+                &thresholds,
+                &dc_grid,
+                1,
+                Some(&mut out),
+                None,
+                None,
+                None,
             );
             let mut sumsq = 0.0_f64;
             let mut min_v = f32::INFINITY;
@@ -2825,7 +2848,7 @@ mod tests {
     #[test]
     fn test_dct32x32_reconstruct_smooth_gradient() {
         use crate::forks::transform::{
-            coeff_count_per_strategy, RAW_STRATEGY_DCT, RAW_STRATEGY_DCT32X32,
+            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT32X32, coeff_count_per_strategy,
         };
         use crate::pipeline::StrategyAssignment;
         type B = cubecl::cuda::CudaRuntime;
@@ -2860,13 +2883,23 @@ mod tests {
                 })
             })
             .collect();
-        let weights_for = |s: u8| -> Vec<f32> {
-            alloc::vec![1.0_f32; coeff_count_per_strategy(s)]
-        };
+        let weights_for = |s: u8| -> Vec<f32> { alloc::vec![1.0_f32; coeff_count_per_strategy(s)] };
         let mut out_dct8 = alloc::vec![0.0_f32; pw * ph];
         encode_and_reconstruct_mixed_strategy_single_channel(
-            &enc, &xyb, pw, ph, &assignments_dct8, &weights_for, &qac, &thresholds,
-            &dc_grid, 1, Some(&mut out_dct8), None, None, None,
+            &enc,
+            &xyb,
+            pw,
+            ph,
+            &assignments_dct8,
+            &weights_for,
+            &qac,
+            &thresholds,
+            &dc_grid,
+            1,
+            Some(&mut out_dct8),
+            None,
+            None,
+            None,
         );
         let mut sse_dct8 = 0.0_f64;
         for i in 0..pw * ph {
@@ -2887,8 +2920,20 @@ mod tests {
             .collect();
         let mut out_dct32 = alloc::vec![0.0_f32; pw * ph];
         encode_and_reconstruct_mixed_strategy_single_channel(
-            &enc, &xyb, pw, ph, &assignments_dct32, &weights_for, &qac, &thresholds,
-            &dc_grid, 1, Some(&mut out_dct32), None, None, None,
+            &enc,
+            &xyb,
+            pw,
+            ph,
+            &assignments_dct32,
+            &weights_for,
+            &qac,
+            &thresholds,
+            &dc_grid,
+            1,
+            Some(&mut out_dct32),
+            None,
+            None,
+            None,
         );
         let mut sse_dct32 = 0.0_f64;
         for i in 0..pw * ph {
@@ -2901,8 +2946,12 @@ mod tests {
         std::println!("[dct32-diag] all-DCT32 RMSE = {rmse_dct32:.6}");
         std::println!("[dct32-diag] sample pixels (ref / dct8 / dct32):");
         for &i in &[0_usize, 33, 1024, 2047, 4095] {
-            std::println!("  [{i}] ref={:.4} dct8={:.4} dct32={:.4}",
-                xyb[i], out_dct8[i], out_dct32[i]);
+            std::println!(
+                "  [{i}] ref={:.4} dct8={:.4} dct32={:.4}",
+                xyb[i],
+                out_dct8[i],
+                out_dct32[i]
+            );
         }
     }
 

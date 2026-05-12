@@ -522,13 +522,7 @@ pub fn inverse_afv_transform_batch_persistent<R: Runtime>(
     // 2. Inverse 4×4 / 4×4 / 4×8 batched.
     let h_basis = client.create_from_slice(f32::as_bytes(basis_t));
     let h_afv_out = client.empty(n_blocks * 16 * 4);
-    crate::launch::afv::afv_idct_4x4::<R>(
-        client,
-        h_afv_in,
-        h_basis,
-        h_afv_out.clone(),
-        nb_u32,
-    );
+    crate::launch::afv::afv_idct_4x4::<R>(client, h_afv_in, h_basis, h_afv_out.clone(), nb_u32);
     let h_dct4_out = client.empty(n_blocks * 16 * 4);
     crate::launch::idct4_raw::idct_4x4_raw::<R>(client, h_dct4_in, h_dct4_out.clone(), nb_u32);
     let h_dct4x8_out = client.empty(n_blocks * 32 * 4);
@@ -814,13 +808,34 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
 
         // grid_w=8, grid_h=8, llf_x=1, llf_y=1 (matches DCT8 shape).
         let g_qx = enc.quantize_large_blocks_broadcast_w_persistent(
-            &g_cx, weights_x_template, qac_qm_x, thresholds_x, 8, 8, 1, 1,
+            &g_cx,
+            weights_x_template,
+            qac_qm_x,
+            thresholds_x,
+            8,
+            8,
+            1,
+            1,
         );
         let g_qy = enc.quantize_large_blocks_broadcast_w_persistent(
-            &g_cy, weights_y_template, qac_qm_y, thresholds_y, 8, 8, 1, 1,
+            &g_cy,
+            weights_y_template,
+            qac_qm_y,
+            thresholds_y,
+            8,
+            8,
+            1,
+            1,
         );
         let g_qb = enc.quantize_large_blocks_broadcast_w_persistent(
-            &g_cb, weights_b_template, qac_qm_b, thresholds_b, 8, 8, 1, 1,
+            &g_cb,
+            weights_b_template,
+            qac_qm_b,
+            thresholds_b,
+            8,
+            8,
+            1,
+            1,
         );
         // dequant_strategy_persistent applies `q * w / qac`.
         let g_dx = enc.dequant_strategy_persistent(&g_qx, weights_x_template, qac_qm_x);
@@ -896,12 +911,8 @@ mod tests {
             let host =
                 inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs, kind);
             let g_in = enc.upload_blocks(&coeffs, n_blocks as u32, 64);
-            let g_out = inverse_afv_transform_batch_persistent(
-                &enc,
-                &AFV4X4_BASIS_TRANSPOSE,
-                &g_in,
-                kind,
-            );
+            let g_out =
+                inverse_afv_transform_batch_persistent(&enc, &AFV4X4_BASIS_TRANSPOSE, &g_in, kind);
             assert_eq!(g_out.num_blocks() as usize, n_blocks);
             assert_eq!(g_out.coeffs_per_block(), 64);
             let gpu_host = enc.download_blocks(&g_out);
@@ -932,8 +943,7 @@ mod tests {
         }
         for kind in 0_usize..4 {
             // Host roundtrip
-            let host_coeffs =
-                afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixels, kind);
+            let host_coeffs = afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixels, kind);
             let host_recon =
                 inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &host_coeffs, kind);
             // Persistent roundtrip
@@ -970,8 +980,7 @@ mod tests {
                 let bx = i % 8;
                 let by = i / 8;
                 pixel_blocks[b * 64 + i] =
-                    (b as f32 * 0.13) + bx as f32 * 0.5 + by as f32 * 0.7
-                        - (bx * by) as f32 * 0.05;
+                    (b as f32 * 0.13) + bx as f32 * 0.5 + by as f32 * 0.7 - (bx * by) as f32 * 0.05;
             }
         }
         for kind in 0_usize..4 {
@@ -1140,23 +1149,28 @@ mod tests {
             let coeffs = afv_transform_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &pixels, kind);
             std::println!(
                 "[afv-pack] kind={kind} M={m}: coeffs[0]={:.6}  coeffs[1]={:.6}  coeffs[8]={:.6}  (ratios: {:.6} / {:.6} / {:.6})",
-                coeffs[0], coeffs[1], coeffs[8],
-                coeffs[0] / m, coeffs[1] / m, coeffs[8] / m
+                coeffs[0],
+                coeffs[1],
+                coeffs[8],
+                coeffs[0] / m,
+                coeffs[1] / m,
+                coeffs[8] / m
             );
 
             // Verify: feeding these packed coeffs into inverse_afv
             // should reconstruct the uniform input M exactly (within
             // fp32 noise).
             let recon = crate::forks::afv::inverse_afv_transform_gpu(
-                &enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs, kind,
+                &enc,
+                &AFV4X4_BASIS_TRANSPOSE,
+                &coeffs,
+                kind,
             );
             let mut max_err = 0.0_f32;
             for i in 0..64 {
                 max_err = max_err.max((recon[i] - m).abs());
             }
-            std::println!(
-                "[afv-pack] kind={kind} roundtrip max-err vs M=1.0: {max_err:.6e}"
-            );
+            std::println!("[afv-pack] kind={kind} roundtrip max-err vs M=1.0: {max_err:.6e}");
         }
     }
 
@@ -1185,17 +1199,41 @@ mod tests {
 
         // Warm up.
         let _ = afv_cost_grid_xyb_host(
-            &enc, &AFV4X4_BASIS_TRANSPOSE,
-            &px, &py, &pb, &wx, &wy, &wb,
-            &qac_qm, &qac_qm, &qac_qm, &thr, &thr, &thr, &mask,
+            &enc,
+            &AFV4X4_BASIS_TRANSPOSE,
+            &px,
+            &py,
+            &pb,
+            &wx,
+            &wy,
+            &wb,
+            &qac_qm,
+            &qac_qm,
+            &qac_qm,
+            &thr,
+            &thr,
+            &thr,
+            &mask,
         );
 
         // Total time.
         let t0 = std::time::Instant::now();
         let _ = afv_cost_grid_xyb_host(
-            &enc, &AFV4X4_BASIS_TRANSPOSE,
-            &px, &py, &pb, &wx, &wy, &wb,
-            &qac_qm, &qac_qm, &qac_qm, &thr, &thr, &thr, &mask,
+            &enc,
+            &AFV4X4_BASIS_TRANSPOSE,
+            &px,
+            &py,
+            &pb,
+            &wx,
+            &wy,
+            &wb,
+            &qac_qm,
+            &qac_qm,
+            &qac_qm,
+            &thr,
+            &thr,
+            &thr,
+            &mask,
         );
         let dt_total = t0.elapsed();
 
@@ -1212,9 +1250,12 @@ mod tests {
         let coeffs_zero = vec![0.0_f32; N * 64];
         let t2 = std::time::Instant::now();
         for kind in 0..4 {
-            let _ = inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs_zero, kind);
-            let _ = inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs_zero, kind);
-            let _ = inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs_zero, kind);
+            let _ =
+                inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs_zero, kind);
+            let _ =
+                inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs_zero, kind);
+            let _ =
+                inverse_afv_transform_batch_gpu(&enc, &AFV4X4_BASIS_TRANSPOSE, &coeffs_zero, kind);
         }
         let dt_inverse = t2.elapsed();
 
@@ -1227,7 +1268,8 @@ mod tests {
             dt_total.as_secs_f64() * 1000.0,
             dt_transforms.as_secs_f64() * 1000.0,
             dt_inverse.as_secs_f64() * 1000.0,
-            (dt_total.as_secs_f64() - dt_transforms.as_secs_f64() - dt_inverse.as_secs_f64()) * 1000.0,
+            (dt_total.as_secs_f64() - dt_transforms.as_secs_f64() - dt_inverse.as_secs_f64())
+                * 1000.0,
         );
     }
 

@@ -939,14 +939,25 @@ pub fn estimate_entropy_full_dct8_batch_gpu<R: Runtime>(
             )
         }
         CostMode::UpstreamPerBlock { quant_for_coeffs } => {
-            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_x = (0..n_blocks)
+                .map(|b| x_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks)
+                .map(|b| y_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks)
+                .map(|b| b_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
             per_block_upstream_cost_per_block(
-                &entropy_x, &entropy_y, &entropy_b,
-                &nzeros_x, &nzeros_y, &nzeros_b,
+                &entropy_x,
+                &entropy_y,
+                &entropy_b,
+                &nzeros_x,
+                &nzeros_y,
+                &nzeros_b,
                 &pixel_loss_total,
-                entropy_mul, scaled_constants,
+                entropy_mul,
+                scaled_constants,
                 &quant_for_coeffs,
                 64,
             )
@@ -1013,7 +1024,13 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
 
     // Step 2: per-channel entropy + error-coef writeback (no sync).
     let (g_y_stats, g_y_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-        &dct_y, &dct_y, weights_y_t, inv_y_t, 0.0, quant_y, cost_delta,
+        &dct_y,
+        &dct_y,
+        weights_y_t,
+        inv_y_t,
+        0.0,
+        quant_y,
+        cost_delta,
     );
     let (g_x_stats, g_x_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
         &dct_x,
@@ -1074,11 +1091,9 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
     // outputs — no intermediate downloads). One batched
     // client.read instead of six sequential read_one syncs —
     // saves 5 queue-drain stalls.
-    let ((x_stats, y_stats, b_stats), (loss_x, loss_y, loss_b)) = enc
-        .download_3stats_3losses(
-            &g_x_stats, &g_y_stats, &g_b_stats,
-            &g_loss_x, &g_loss_y, &g_loss_b,
-        );
+    let ((x_stats, y_stats, b_stats), (loss_x, loss_y, loss_b)) = enc.download_3stats_3losses(
+        &g_x_stats, &g_y_stats, &g_b_stats, &g_loss_x, &g_loss_y, &g_loss_b,
+    );
 
     // Step 6: combine per-channel losses via CHANNEL_MUL (host).
     let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
@@ -1095,9 +1110,15 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
             per_block_total_cost(&entropy_total, &pixel_loss_total, entropy_mul)
         }
         CostMode::Upstream { quant_for_coeffs } => {
-            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_x = (0..n_blocks)
+                .map(|b| x_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks)
+                .map(|b| y_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks)
+                .map(|b| b_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
             per_block_upstream_cost(
                 &entropy_x,
                 &entropy_y,
@@ -1113,14 +1134,25 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
             )
         }
         CostMode::UpstreamPerBlock { quant_for_coeffs } => {
-            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_x = (0..n_blocks)
+                .map(|b| x_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks)
+                .map(|b| y_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks)
+                .map(|b| b_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
             per_block_upstream_cost_per_block(
-                &entropy_x, &entropy_y, &entropy_b,
-                &nzeros_x, &nzeros_y, &nzeros_b,
+                &entropy_x,
+                &entropy_y,
+                &entropy_b,
+                &nzeros_x,
+                &nzeros_y,
+                &nzeros_b,
                 &pixel_loss_total,
-                entropy_mul, scaled_constants,
+                entropy_mul,
+                scaled_constants,
                 &quant_for_coeffs,
                 64,
             )
@@ -1348,14 +1380,25 @@ pub fn estimate_entropy_full_strategy_batch_gpu<R: Runtime>(
             )
         }
         CostMode::UpstreamPerBlock { quant_for_coeffs } => {
-            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_x = (0..n_blocks)
+                .map(|b| x_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks)
+                .map(|b| y_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks)
+                .map(|b| b_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
             per_block_upstream_cost_per_block(
-                &entropy_x, &entropy_y, &entropy_b,
-                &nzeros_x, &nzeros_y, &nzeros_b,
+                &entropy_x,
+                &entropy_y,
+                &entropy_b,
+                &nzeros_x,
+                &nzeros_y,
+                &nzeros_b,
                 &pixel_loss_total,
-                entropy_mul, scaled_constants,
+                entropy_mul,
+                scaled_constants,
                 &quant_for_coeffs,
                 block_pixels,
             )
@@ -1554,11 +1597,9 @@ pub fn estimate_entropy_full_strategy_batch_persistent_with_handle<R: Runtime>(
     // Step 5: download only the small final stats and losses. One
     // batched client.read instead of six sequential read_one
     // syncs (saves 5 queue-drain stalls).
-    let ((x_stats, y_stats, b_stats), (loss_x_init, loss_y, loss_b)) = enc
-        .download_3stats_3losses(
-            &g_x_stats, &g_y_stats, &g_b_stats,
-            &g_loss_x, &g_loss_y, &g_loss_b,
-        );
+    let ((x_stats, y_stats, b_stats), (loss_x_init, loss_y, loss_b)) = enc.download_3stats_3losses(
+        &g_x_stats, &g_y_stats, &g_b_stats, &g_loss_x, &g_loss_y, &g_loss_b,
+    );
     let mut loss_x = loss_x_init;
 
     // Step 6: extract per-block entropy + apply X-channel multi-block weight.
@@ -1581,9 +1622,15 @@ pub fn estimate_entropy_full_strategy_batch_persistent_with_handle<R: Runtime>(
             per_block_total_cost(&entropy_total, &pixel_loss_total, entropy_mul)
         }
         CostMode::Upstream { quant_for_coeffs } => {
-            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_x = (0..n_blocks)
+                .map(|b| x_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks)
+                .map(|b| y_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks)
+                .map(|b| b_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
             per_block_upstream_cost(
                 &entropy_x,
                 &entropy_y,
@@ -1599,14 +1646,25 @@ pub fn estimate_entropy_full_strategy_batch_persistent_with_handle<R: Runtime>(
             )
         }
         CostMode::UpstreamPerBlock { quant_for_coeffs } => {
-            let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<Vec<_>>();
-            let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<Vec<_>>();
+            let nzeros_x = (0..n_blocks)
+                .map(|b| x_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_y = (0..n_blocks)
+                .map(|b| y_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
+            let nzeros_b = (0..n_blocks)
+                .map(|b| b_stats[b * 4 + 1])
+                .collect::<Vec<_>>();
             per_block_upstream_cost_per_block(
-                &entropy_x, &entropy_y, &entropy_b,
-                &nzeros_x, &nzeros_y, &nzeros_b,
+                &entropy_x,
+                &entropy_y,
+                &entropy_b,
+                &nzeros_x,
+                &nzeros_y,
+                &nzeros_b,
                 &pixel_loss_total,
-                entropy_mul, scaled_constants,
+                entropy_mul,
+                scaled_constants,
                 &quant_for_coeffs,
                 block_pixels,
             )
@@ -1716,8 +1774,7 @@ pub fn repack_plane_to_blocks(
             for ly in 0..tile_h {
                 let src_off = (by * tile_h + ly) * padded_width + bx * tile_w;
                 let dst_row = dst_off + ly * tile_w;
-                out[dst_row..dst_row + tile_w]
-                    .copy_from_slice(&plane[src_off..src_off + tile_w]);
+                out[dst_row..dst_row + tile_w].copy_from_slice(&plane[src_off..src_off + tile_w]);
             }
         }
     }
@@ -1814,9 +1871,15 @@ pub fn strategy_search_costs_dct8_16x16<R: Runtime>(
         weights_dct8_x.try_into().expect("64-float DCT8 weights X"),
         weights_dct8_y.try_into().expect("64-float DCT8 weights Y"),
         weights_dct8_b.try_into().expect("64-float DCT8 weights B"),
-        inv_weights_dct8_x.try_into().expect("64-float DCT8 inv_weights X"),
-        inv_weights_dct8_y.try_into().expect("64-float DCT8 inv_weights Y"),
-        inv_weights_dct8_b.try_into().expect("64-float DCT8 inv_weights B"),
+        inv_weights_dct8_x
+            .try_into()
+            .expect("64-float DCT8 inv_weights X"),
+        inv_weights_dct8_y
+            .try_into()
+            .expect("64-float DCT8 inv_weights Y"),
+        inv_weights_dct8_b
+            .try_into()
+            .expect("64-float DCT8 inv_weights B"),
         quant_x,
         quant_y,
         quant_b,
@@ -1952,9 +2015,15 @@ pub fn strategy_search_costs_dct8_16x16_persistent<R: Runtime>(
         weights_dct8_x.try_into().expect("64-float DCT8 weights X"),
         weights_dct8_y.try_into().expect("64-float DCT8 weights Y"),
         weights_dct8_b.try_into().expect("64-float DCT8 weights B"),
-        inv_weights_dct8_x.try_into().expect("64-float DCT8 inv_weights X"),
-        inv_weights_dct8_y.try_into().expect("64-float DCT8 inv_weights Y"),
-        inv_weights_dct8_b.try_into().expect("64-float DCT8 inv_weights B"),
+        inv_weights_dct8_x
+            .try_into()
+            .expect("64-float DCT8 inv_weights X"),
+        inv_weights_dct8_y
+            .try_into()
+            .expect("64-float DCT8 inv_weights Y"),
+        inv_weights_dct8_b
+            .try_into()
+            .expect("64-float DCT8 inv_weights B"),
         quant_x,
         quant_y,
         quant_b,
@@ -2413,7 +2482,7 @@ pub fn strategy_search_costs_dct64x32_or_32x64<R: Runtime>(
     ytob: i8,
     scaled_constants: (f32, f32, f32),
 ) -> Vec<f32> {
-    use crate::forks::transform::{tile_dims_pixels, RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT64X32};
+    use crate::forks::transform::{RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT64X32, tile_dims_pixels};
     debug_assert!(
         raw_strategy == RAW_STRATEGY_DCT64X32 || raw_strategy == RAW_STRATEGY_DCT32X64,
         "this helper is for DCT64x32/DCT32x64 only; got {raw_strategy}"
@@ -2503,7 +2572,7 @@ pub fn strategy_search_costs_dct32x16_or_16x32<R: Runtime>(
     ytob: i8,
     scaled_constants: (f32, f32, f32),
 ) -> Vec<f32> {
-    use crate::forks::transform::{tile_dims_pixels, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16};
+    use crate::forks::transform::{RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, tile_dims_pixels};
     debug_assert!(
         raw_strategy == RAW_STRATEGY_DCT32X16 || raw_strategy == RAW_STRATEGY_DCT16X32,
         "this helper is for DCT32x16/DCT16x32 only; got {raw_strategy}"
@@ -2608,7 +2677,7 @@ pub fn strategy_search_costs_dct16x8_or_8x16<R: Runtime>(
     ytob: i8,
     scaled_constants: (f32, f32, f32),
 ) -> Vec<f32> {
-    use crate::forks::transform::{tile_dims_pixels, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT8X16};
+    use crate::forks::transform::{RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, tile_dims_pixels};
     debug_assert!(
         raw_strategy == RAW_STRATEGY_DCT16X8 || raw_strategy == RAW_STRATEGY_DCT8X16,
         "this helper is for DCT16x8/DCT8x16 only; got {raw_strategy}"
@@ -2766,18 +2835,33 @@ pub fn strategy_search_costs_dct16x8_or_8x16_persistent<R: Runtime>(
     ytob: i8,
     scaled_constants: (f32, f32, f32),
 ) -> Vec<f32> {
-    use crate::forks::transform::{RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT8X16};
+    use crate::forks::transform::{RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8};
     debug_assert!(
         raw_strategy == RAW_STRATEGY_DCT16X8 || raw_strategy == RAW_STRATEGY_DCT8X16,
         "this helper is for DCT16x8/DCT8x16 only; got {raw_strategy}"
     );
     rect_strategy_cost_xyb_persistent(
-        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
-        padded_width, padded_height, mask1x1, raw_strategy,
-        weights_x, weights_y, weights_b,
-        inv_weights_x, inv_weights_y, inv_weights_b,
-        quant_x, quant_y, quant_b, ytox, ytob,
-        scaled_constants, 1.21_f32,
+        enc,
+        xyb_plane_x,
+        xyb_plane_y,
+        xyb_plane_b,
+        padded_width,
+        padded_height,
+        mask1x1,
+        raw_strategy,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        scaled_constants,
+        1.21_f32,
     )
 }
 
@@ -2809,12 +2893,27 @@ pub fn strategy_search_costs_dct32x32_persistent<R: Runtime>(
     use crate::forks::transform::RAW_STRATEGY_DCT32X32;
     // entropy_mul = 3.0 — see the host-slice variant for bisection history.
     rect_strategy_cost_xyb_persistent(
-        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
-        padded_width, padded_height, mask1x1, RAW_STRATEGY_DCT32X32,
-        weights_x, weights_y, weights_b,
-        inv_weights_x, inv_weights_y, inv_weights_b,
-        quant_x, quant_y, quant_b, ytox, ytob,
-        scaled_constants, 3.0_f32,
+        enc,
+        xyb_plane_x,
+        xyb_plane_y,
+        xyb_plane_b,
+        padded_width,
+        padded_height,
+        mask1x1,
+        RAW_STRATEGY_DCT32X32,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        scaled_constants,
+        3.0_f32,
     )
 }
 
@@ -2908,10 +3007,7 @@ pub fn strategy_search_costs_dct32x32_persistent_with_aq_field<R: Runtime>(
         // pass the median quant_norm16 as the scalar quant_y — the
         // kernel-side fix (per-block quant in coefficient quantization)
         // is the harder, GPU-buffer-required follow-up.
-        quant_norm16
-            .iter()
-            .copied()
-            .sum::<f32>() / n_blocks as f32,
+        quant_norm16.iter().copied().sum::<f32>() / n_blocks as f32,
         quant_b,
         ytox,
         ytob,
@@ -2958,12 +3054,27 @@ pub fn strategy_search_costs_dct32x16_or_16x32_persistent<R: Runtime>(
     );
     // entropy_mul = 2.2 — see the host-slice variant for bisection history.
     rect_strategy_cost_xyb_persistent(
-        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
-        padded_width, padded_height, mask1x1, raw_strategy,
-        weights_x, weights_y, weights_b,
-        inv_weights_x, inv_weights_y, inv_weights_b,
-        quant_x, quant_y, quant_b, ytox, ytob,
-        scaled_constants, 2.2_f32,
+        enc,
+        xyb_plane_x,
+        xyb_plane_y,
+        xyb_plane_b,
+        padded_width,
+        padded_height,
+        mask1x1,
+        raw_strategy,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        scaled_constants,
+        2.2_f32,
     )
 }
 
@@ -2995,12 +3106,27 @@ pub fn strategy_search_costs_dct64x64_persistent<R: Runtime>(
     use crate::forks::transform::RAW_STRATEGY_DCT64X64;
     // entropy_mul = 4.8 — see the host-slice variant for bisection history.
     rect_strategy_cost_xyb_persistent(
-        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
-        padded_width, padded_height, mask1x1, RAW_STRATEGY_DCT64X64,
-        weights_x, weights_y, weights_b,
-        inv_weights_x, inv_weights_y, inv_weights_b,
-        quant_x, quant_y, quant_b, ytox, ytob,
-        scaled_constants, 4.8_f32,
+        enc,
+        xyb_plane_x,
+        xyb_plane_y,
+        xyb_plane_b,
+        padded_width,
+        padded_height,
+        mask1x1,
+        RAW_STRATEGY_DCT64X64,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        scaled_constants,
+        4.8_f32,
     )
 }
 
@@ -3036,12 +3162,27 @@ pub fn strategy_search_costs_dct64x32_or_32x64_persistent<R: Runtime>(
     );
     // entropy_mul = 4.8 — same as DCT64x64; see host-slice variant.
     rect_strategy_cost_xyb_persistent(
-        enc, xyb_plane_x, xyb_plane_y, xyb_plane_b,
-        padded_width, padded_height, mask1x1, raw_strategy,
-        weights_x, weights_y, weights_b,
-        inv_weights_x, inv_weights_y, inv_weights_b,
-        quant_x, quant_y, quant_b, ytox, ytob,
-        scaled_constants, 4.8_f32,
+        enc,
+        xyb_plane_x,
+        xyb_plane_y,
+        xyb_plane_b,
+        padded_width,
+        padded_height,
+        mask1x1,
+        raw_strategy,
+        weights_x,
+        weights_y,
+        weights_b,
+        inv_weights_x,
+        inv_weights_y,
+        inv_weights_b,
+        quant_x,
+        quant_y,
+        quant_b,
+        ytox,
+        ytob,
+        scaled_constants,
+        4.8_f32,
     )
 }
 
@@ -3264,15 +3405,31 @@ mod tests {
 
         let scaled = COEFF_DOMAIN_CONSTANTS;
         let entropy_mul = 0.8;
-        let mode = CostMode::Upstream { quant_for_coeffs: 0.7 };
+        let mode = CostMode::Upstream {
+            quant_for_coeffs: 0.7,
+        };
         let costs_a = estimate_entropy_full_dct8_batch_gpu(
             &enc,
-            &bx, &by, &bb,
-            &weights_x, &weights_y, &weights_b,
-            &inv_x, &inv_y, &inv_b,
-            0.7, 0.7, 0.7, 0, 0,
-            &mask, &mask_row_base, pw,
-            scaled, entropy_mul, mode.clone(),
+            &bx,
+            &by,
+            &bb,
+            &weights_x,
+            &weights_y,
+            &weights_b,
+            &inv_x,
+            &inv_y,
+            &inv_b,
+            0.7,
+            0.7,
+            0.7,
+            0,
+            0,
+            &mask,
+            &mask_row_base,
+            pw,
+            scaled,
+            entropy_mul,
+            mode.clone(),
         );
 
         // Persistent path: pre-upload pixel blocks and mask to GPU.
@@ -3282,12 +3439,25 @@ mod tests {
         let g_mask = enc.upload_plane(&mask, pw, ph);
         let costs_b = estimate_entropy_full_dct8_batch_persistent(
             &enc,
-            &g_bx, &g_by, &g_bb,
-            &weights_x, &weights_y, &weights_b,
-            &inv_x, &inv_y, &inv_b,
-            0.7, 0.7, 0.7, 0, 0,
-            &g_mask, &mask_row_base,
-            scaled, entropy_mul, mode,
+            &g_bx,
+            &g_by,
+            &g_bb,
+            &weights_x,
+            &weights_y,
+            &weights_b,
+            &inv_x,
+            &inv_y,
+            &inv_b,
+            0.7,
+            0.7,
+            0.7,
+            0,
+            0,
+            &g_mask,
+            &mask_row_base,
+            scaled,
+            entropy_mul,
+            mode,
         );
 
         assert_eq!(costs_a.len(), costs_b.len());
@@ -3627,14 +3797,10 @@ mod tests {
         let scaled = (10.0_f32, 5.0, 1.0);
         let qs = vec![0.7_f32, 0.7, 0.7];
         let scalar = per_block_upstream_cost(
-            &entropy, &entropy, &entropy,
-            &nzeros, &nzeros, &nzeros,
-            &loss, 1.5, scaled, 0.7, 64,
+            &entropy, &entropy, &entropy, &nzeros, &nzeros, &nzeros, &loss, 1.5, scaled, 0.7, 64,
         );
         let perblock = per_block_upstream_cost_per_block(
-            &entropy, &entropy, &entropy,
-            &nzeros, &nzeros, &nzeros,
-            &loss, 1.5, scaled, &qs, 64,
+            &entropy, &entropy, &entropy, &nzeros, &nzeros, &nzeros, &loss, 1.5, scaled, &qs, 64,
         );
         for i in 0..scalar.len() {
             assert!(
@@ -3657,9 +3823,7 @@ mod tests {
         let scaled = (1.0_f32, 1.0, 0.0);
         let qs = vec![1.0_f32, 0.5];
         let costs = per_block_upstream_cost_per_block(
-            &entropy, &entropy, &entropy,
-            &nzeros, &nzeros, &nzeros,
-            &loss, 1.0, scaled, &qs, 64,
+            &entropy, &entropy, &entropy, &nzeros, &nzeros, &nzeros, &loss, 1.0, scaled, &qs, 64,
         );
         // With q=1.0 vs q=0.5: cost1 / cost0 should be 2.0 (since
         // inv_q = 1/q = 1 vs 2, and loss_scalar scales with inv_q).
@@ -3711,7 +3875,12 @@ mod tests {
         // let me recompute: (15*1 + 65536)/16 = 4096.94. pow(4096.94, 1/16).
         // 4096 = 2^12 → 2^(12/16) = 2^0.75 ≈ 1.6818.
         let expected = (4096.9375_f32).powf(1.0 / 16.0);
-        assert!((q[0] - expected).abs() < 1e-3, "got {}, expected {}", q[0], expected);
+        assert!(
+            (q[0] - expected).abs() < 1e-3,
+            "got {}, expected {}",
+            q[0],
+            expected
+        );
     }
 
     #[test]

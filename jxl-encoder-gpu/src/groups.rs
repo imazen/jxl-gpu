@@ -161,8 +161,8 @@ impl GroupGeometry {
         let mut out = Vec::with_capacity(bounds.num_blocks());
         for by in bounds.block_y_start..bounds.block_y_end {
             let row_off = (by * xsize_blocks_8) as usize;
-            let row = &field[row_off + bounds.block_x_start as usize
-                ..row_off + bounds.block_x_end as usize];
+            let row = &field
+                [row_off + bounds.block_x_start as usize..row_off + bounds.block_x_end as usize];
             out.extend_from_slice(row);
         }
         out
@@ -252,8 +252,7 @@ impl GroupBounds {
     /// Number of 8×8 padded blocks in this group.
     #[inline]
     pub fn num_blocks(&self) -> usize {
-        ((self.block_x_end - self.block_x_start)
-            * (self.block_y_end - self.block_y_start)) as usize
+        ((self.block_x_end - self.block_x_start) * (self.block_y_end - self.block_y_start)) as usize
     }
 
     /// Number of pixels in this group (padded — equals `pixel_w *
@@ -289,13 +288,13 @@ impl Iterator for GroupIter<'_> {
 #[cfg(debug_assertions)]
 fn strategy_coverage_blocks(raw_strategy: u8) -> (u32, u32) {
     use crate::forks::transform::{
-        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
-        RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
-        RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
-        RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
     };
     use crate::forks::transform::{
-        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
+        RAW_STRATEGY_DCT, RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
+        RAW_STRATEGY_DCT8X4, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
+        RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+        RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_IDENTITY,
     };
     match raw_strategy {
         RAW_STRATEGY_DCT
@@ -364,7 +363,10 @@ mod tests {
                 }
             }
         }
-        assert!(hits.iter().all(|&h| h == 1), "every pixel covered exactly once");
+        assert!(
+            hits.iter().all(|&h| h == 1),
+            "every pixel covered exactly once"
+        );
     }
 
     #[test]
@@ -384,7 +386,7 @@ mod tests {
         // 512×256: 2 groups horizontally. Group 1 (right) has blocks
         // at x∈[32..64), y∈[0..32). field[0..1024] is group 0, [1024..2048] is group 1.
         let g = GroupGeometry::for_padded(512, 256);
-        let xb = 64;  // 512/8
+        let xb = 64; // 512/8
         let mut field = alloc::vec![0.0_f32; xb * 32];
         // Mark group 1's first row distinctively
         for x in 32..64 {
@@ -405,13 +407,29 @@ mod tests {
         let g = GroupGeometry::for_padded(512, 512);
         let assignments = alloc::vec![
             // Group (0,0): bx=0, by=0
-            StrategyAssignment { bx: 0, by: 0, raw_strategy: 0 },
+            StrategyAssignment {
+                bx: 0,
+                by: 0,
+                raw_strategy: 0
+            },
             // Group (1,0): bx=32, by=0
-            StrategyAssignment { bx: 32, by: 0, raw_strategy: 0 },
+            StrategyAssignment {
+                bx: 32,
+                by: 0,
+                raw_strategy: 0
+            },
             // Group (0,1): bx=0, by=32
-            StrategyAssignment { bx: 0, by: 32, raw_strategy: 0 },
+            StrategyAssignment {
+                bx: 0,
+                by: 32,
+                raw_strategy: 0
+            },
             // Group (1,1): bx=63, by=63
-            StrategyAssignment { bx: 63, by: 63, raw_strategy: 0 },
+            StrategyAssignment {
+                bx: 63,
+                by: 63,
+                raw_strategy: 0
+            },
         ];
         let counts = g.assignment_counts_per_group(&assignments);
         assert_eq!(counts, alloc::vec![1u32, 1, 1, 1]);
@@ -431,8 +449,16 @@ mod tests {
         let g = GroupGeometry::for_padded(512, 512);
         let dct64 = crate::forks::transform::RAW_STRATEGY_DCT64X64;
         let assignments = alloc::vec![
-            StrategyAssignment { bx: 0, by: 0, raw_strategy: dct64 },
-            StrategyAssignment { bx: 32, by: 32, raw_strategy: dct64 },
+            StrategyAssignment {
+                bx: 0,
+                by: 0,
+                raw_strategy: dct64
+            },
+            StrategyAssignment {
+                bx: 32,
+                by: 32,
+                raw_strategy: dct64
+            },
         ];
         let p00 = g.partition_assignments(&assignments, g.group_bounds(0));
         let p11 = g.partition_assignments(&assignments, g.group_bounds(3));

@@ -7,8 +7,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::kernels::set_llf::{
-    set_llf_dct16x16_indexed_kernel, set_llf_dct16x32_indexed_kernel,
-    set_llf_dct16x8_or_8x16_indexed_kernel, set_llf_dct32x16_indexed_kernel,
+    set_llf_dct16x8_or_8x16_indexed_kernel, set_llf_dct16x16_indexed_kernel,
+    set_llf_dct16x32_indexed_kernel, set_llf_dct32x16_indexed_kernel,
     set_llf_dct32x32_indexed_kernel, set_llf_dct32x64_indexed_kernel,
     set_llf_dct64x32_indexed_kernel, set_llf_dct64x64_indexed_kernel,
 };

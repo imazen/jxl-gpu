@@ -40,10 +40,10 @@ use cubecl::prelude::*;
 /// `n_blocks` is derived from `out.len() / 64`.
 #[cube(launch_unchecked)]
 pub fn afv_compose_forward_kernel(
-    afv_in: &Array<f32>,      // n_blocks * 16
-    dct4_in: &Array<f32>,     // n_blocks * 16
-    dct4x8_in: &Array<f32>,   // n_blocks * 32
-    out: &mut Array<f32>,     // n_blocks * 64
+    afv_in: &Array<f32>,    // n_blocks * 16
+    dct4_in: &Array<f32>,   // n_blocks * 16
+    dct4x8_in: &Array<f32>, // n_blocks * 32
+    out: &mut Array<f32>,   // n_blocks * 64
 ) {
     let b = ABSOLUTE_POS;
     let n_blocks = out.len() / 64;
@@ -253,9 +253,7 @@ pub fn afv_compose_inverse_kernel(
         let mut ix: u32 = 0u32;
         while ix < 4u32 {
             let block_x = if afv_x == 1u32 { 3u32 - ix } else { ix };
-            let dst = (iy + afv_y * 4u32) as usize * 8
-                + (afv_x * 4u32) as usize
-                + ix as usize;
+            let dst = (iy + afv_y * 4u32) as usize * 8 + (afv_x * 4u32) as usize + ix as usize;
             let src = block_y as usize * 4 + block_x as usize;
             out[out_base + dst] = afv_pixels[afv_base + src];
             ix += 1u32;
@@ -268,9 +266,8 @@ pub fn afv_compose_inverse_kernel(
     while iy < 4u32 {
         let mut ix: u32 = 0u32;
         while ix < 4u32 {
-            let dst = (iy + afv_y * 4u32) as usize * 8
-                + ((1u32 - afv_x) * 4u32) as usize
-                + ix as usize;
+            let dst =
+                (iy + afv_y * 4u32) as usize * 8 + ((1u32 - afv_x) * 4u32) as usize + ix as usize;
             let src = iy as usize * 4 + ix as usize;
             out[out_base + dst] = dct4_pixels[dct4_base + src];
             ix += 1u32;

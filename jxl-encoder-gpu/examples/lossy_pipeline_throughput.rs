@@ -261,15 +261,12 @@ fn main() {
             let coeffs_x = enc.dct_8x8_wide_persistent(&bx_g);
             let coeffs_y = enc.dct_8x8_wide_persistent(&by_g);
             let coeffs_b = enc.dct_8x8_wide_persistent(&bb_g);
-            let q_x = enc.quantize_dct8_persistent_broadcast_w(
-                &coeffs_x, &weights_g, &qac_vec, &thr,
-            );
-            let q_y = enc.quantize_dct8_persistent_broadcast_w(
-                &coeffs_y, &weights_g, &qac_vec, &thr,
-            );
-            let q_b = enc.quantize_dct8_persistent_broadcast_w(
-                &coeffs_b, &weights_g, &qac_vec, &thr,
-            );
+            let q_x =
+                enc.quantize_dct8_persistent_broadcast_w(&coeffs_x, &weights_g, &qac_vec, &thr);
+            let q_y =
+                enc.quantize_dct8_persistent_broadcast_w(&coeffs_y, &weights_g, &qac_vec, &thr);
+            let q_b =
+                enc.quantize_dct8_persistent_broadcast_w(&coeffs_b, &weights_g, &qac_vec, &thr);
             // Dequant (broadcast-weights kernel)
             let (dq_x, dq_y, dq_b) = enc.dequant_dct8_persistent_broadcast_w(
                 &q_x, &q_y, &q_b, &weights_g, &weights_g, &weights_g, &qac_vec, &qac_vec, &qac_vec,

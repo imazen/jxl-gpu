@@ -35,7 +35,7 @@ fn main() {
 #[cfg(all(feature = "cuda", feature = "encoder"))]
 fn main() {
     use jxl_encoder_gpu::encoder::GpuEncoder;
-    use jxl_encoder_gpu::lossy_encoder::{distance_to_qac, LossyEncoder};
+    use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
     type B = cubecl::cuda::CudaRuntime;
 
@@ -67,12 +67,19 @@ fn main() {
 
     println!(
         "quant_norm16_divergence: src {}×{} ({:.2} MP), distance={}",
-        w, h, n as f32 / 1e6, distance,
+        w,
+        h,
+        n as f32 / 1e6,
+        distance,
     );
 
     let to_linear = |c: u8| -> f32 {
         let f = c as f32 / 255.0;
-        if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+        if f <= 0.04045 {
+            f / 12.92
+        } else {
+            ((f + 0.055) / 1.055).powf(2.4)
+        }
     };
     let mut r = Vec::with_capacity(n);
     let mut g = Vec::with_capacity(n);
@@ -111,15 +118,20 @@ fn main() {
         distance, scalar_qac
     );
     println!();
-    println!("{:<10} {:>6} {:>9} {:>9} {:>9} {:>9} {:>7} {:>7} {:>7}",
-             "strategy", "n", "mean", "median", "min", "max",
-             "p5%>", "p10%>", "p20%>");
+    println!(
+        "{:<10} {:>6} {:>9} {:>9} {:>9} {:>9} {:>7} {:>7} {:>7}",
+        "strategy", "n", "mean", "median", "min", "max", "p5%>", "p10%>", "p20%>"
+    );
 
     for (name, cx, cy) in &strategies {
-        if xs8 < *cx || ys8 < *cy { continue; }
+        if xs8 < *cx || ys8 < *cy {
+            continue;
+        }
         let qn16 = compute_quant_norm16_per_region(&aq_field, xs8, ys8, *cx, *cy);
         let ratios: Vec<f32> = qn16.iter().map(|q| q / scalar_qac).collect();
-        if ratios.is_empty() { continue; }
+        if ratios.is_empty() {
+            continue;
+        }
         let mut sorted = ratios.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         let mean = ratios.iter().sum::<f32>() / ratios.len() as f32;
@@ -132,12 +144,19 @@ fn main() {
         let n_total = ratios.len();
         println!(
             "{:<10} {:>6} {:>9.4} {:>9.4} {:>9.4} {:>9.4} {:>5.1}% {:>5.1}% {:>5.1}%",
-            name, n_total, mean, med, min, max,
+            name,
+            n_total,
+            mean,
+            med,
+            min,
+            max,
             100.0 * p5 as f32 / n_total as f32,
             100.0 * p10 as f32 / n_total as f32,
             100.0 * p20 as f32 / n_total as f32,
         );
     }
     println!();
-    println!("hypothesis: if median deviates >5% OR p10% > 30%, the wedge fix needs per-block quant_norm16.");
+    println!(
+        "hypothesis: if median deviates >5% OR p10% > 30%, the wedge fix needs per-block quant_norm16."
+    );
 }

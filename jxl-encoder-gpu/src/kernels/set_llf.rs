@@ -181,7 +181,14 @@ fn dct1d_4(a: f32, b: f32, c: f32, d: f32) -> (f32, f32, f32, f32) {
 #[cube]
 #[allow(clippy::too_many_arguments)]
 fn dct1d_8(
-    a0: f32, a1: f32, a2: f32, a3: f32, a4: f32, a5: f32, a6: f32, a7: f32,
+    a0: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
+    a4: f32,
+    a5: f32,
+    a6: f32,
+    a7: f32,
 ) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
     let t0 = a0 + a7;
     let t1 = a1 + a6;
@@ -272,22 +279,70 @@ pub fn set_llf_dct64x64_indexed_kernel(
     let r5 = (by + 5usize) * stride + bx;
     let r6 = (by + 6usize) * stride + bx;
     let r7 = (by + 7usize) * stride + bx;
-    let m00 = dc_grid[r0]; let m01 = dc_grid[r0 + 1usize]; let m02 = dc_grid[r0 + 2usize]; let m03 = dc_grid[r0 + 3usize];
-    let m04 = dc_grid[r0 + 4usize]; let m05 = dc_grid[r0 + 5usize]; let m06 = dc_grid[r0 + 6usize]; let m07 = dc_grid[r0 + 7usize];
-    let m10 = dc_grid[r1]; let m11 = dc_grid[r1 + 1usize]; let m12 = dc_grid[r1 + 2usize]; let m13 = dc_grid[r1 + 3usize];
-    let m14 = dc_grid[r1 + 4usize]; let m15 = dc_grid[r1 + 5usize]; let m16 = dc_grid[r1 + 6usize]; let m17 = dc_grid[r1 + 7usize];
-    let m20 = dc_grid[r2]; let m21 = dc_grid[r2 + 1usize]; let m22 = dc_grid[r2 + 2usize]; let m23 = dc_grid[r2 + 3usize];
-    let m24 = dc_grid[r2 + 4usize]; let m25 = dc_grid[r2 + 5usize]; let m26 = dc_grid[r2 + 6usize]; let m27 = dc_grid[r2 + 7usize];
-    let m30 = dc_grid[r3]; let m31 = dc_grid[r3 + 1usize]; let m32 = dc_grid[r3 + 2usize]; let m33 = dc_grid[r3 + 3usize];
-    let m34 = dc_grid[r3 + 4usize]; let m35 = dc_grid[r3 + 5usize]; let m36 = dc_grid[r3 + 6usize]; let m37 = dc_grid[r3 + 7usize];
-    let m40 = dc_grid[r4]; let m41 = dc_grid[r4 + 1usize]; let m42 = dc_grid[r4 + 2usize]; let m43 = dc_grid[r4 + 3usize];
-    let m44 = dc_grid[r4 + 4usize]; let m45 = dc_grid[r4 + 5usize]; let m46 = dc_grid[r4 + 6usize]; let m47 = dc_grid[r4 + 7usize];
-    let m50 = dc_grid[r5]; let m51 = dc_grid[r5 + 1usize]; let m52 = dc_grid[r5 + 2usize]; let m53 = dc_grid[r5 + 3usize];
-    let m54 = dc_grid[r5 + 4usize]; let m55 = dc_grid[r5 + 5usize]; let m56 = dc_grid[r5 + 6usize]; let m57 = dc_grid[r5 + 7usize];
-    let m60 = dc_grid[r6]; let m61 = dc_grid[r6 + 1usize]; let m62 = dc_grid[r6 + 2usize]; let m63 = dc_grid[r6 + 3usize];
-    let m64 = dc_grid[r6 + 4usize]; let m65 = dc_grid[r6 + 5usize]; let m66 = dc_grid[r6 + 6usize]; let m67 = dc_grid[r6 + 7usize];
-    let m70 = dc_grid[r7]; let m71 = dc_grid[r7 + 1usize]; let m72 = dc_grid[r7 + 2usize]; let m73 = dc_grid[r7 + 3usize];
-    let m74 = dc_grid[r7 + 4usize]; let m75 = dc_grid[r7 + 5usize]; let m76 = dc_grid[r7 + 6usize]; let m77 = dc_grid[r7 + 7usize];
+    let m00 = dc_grid[r0];
+    let m01 = dc_grid[r0 + 1usize];
+    let m02 = dc_grid[r0 + 2usize];
+    let m03 = dc_grid[r0 + 3usize];
+    let m04 = dc_grid[r0 + 4usize];
+    let m05 = dc_grid[r0 + 5usize];
+    let m06 = dc_grid[r0 + 6usize];
+    let m07 = dc_grid[r0 + 7usize];
+    let m10 = dc_grid[r1];
+    let m11 = dc_grid[r1 + 1usize];
+    let m12 = dc_grid[r1 + 2usize];
+    let m13 = dc_grid[r1 + 3usize];
+    let m14 = dc_grid[r1 + 4usize];
+    let m15 = dc_grid[r1 + 5usize];
+    let m16 = dc_grid[r1 + 6usize];
+    let m17 = dc_grid[r1 + 7usize];
+    let m20 = dc_grid[r2];
+    let m21 = dc_grid[r2 + 1usize];
+    let m22 = dc_grid[r2 + 2usize];
+    let m23 = dc_grid[r2 + 3usize];
+    let m24 = dc_grid[r2 + 4usize];
+    let m25 = dc_grid[r2 + 5usize];
+    let m26 = dc_grid[r2 + 6usize];
+    let m27 = dc_grid[r2 + 7usize];
+    let m30 = dc_grid[r3];
+    let m31 = dc_grid[r3 + 1usize];
+    let m32 = dc_grid[r3 + 2usize];
+    let m33 = dc_grid[r3 + 3usize];
+    let m34 = dc_grid[r3 + 4usize];
+    let m35 = dc_grid[r3 + 5usize];
+    let m36 = dc_grid[r3 + 6usize];
+    let m37 = dc_grid[r3 + 7usize];
+    let m40 = dc_grid[r4];
+    let m41 = dc_grid[r4 + 1usize];
+    let m42 = dc_grid[r4 + 2usize];
+    let m43 = dc_grid[r4 + 3usize];
+    let m44 = dc_grid[r4 + 4usize];
+    let m45 = dc_grid[r4 + 5usize];
+    let m46 = dc_grid[r4 + 6usize];
+    let m47 = dc_grid[r4 + 7usize];
+    let m50 = dc_grid[r5];
+    let m51 = dc_grid[r5 + 1usize];
+    let m52 = dc_grid[r5 + 2usize];
+    let m53 = dc_grid[r5 + 3usize];
+    let m54 = dc_grid[r5 + 4usize];
+    let m55 = dc_grid[r5 + 5usize];
+    let m56 = dc_grid[r5 + 6usize];
+    let m57 = dc_grid[r5 + 7usize];
+    let m60 = dc_grid[r6];
+    let m61 = dc_grid[r6 + 1usize];
+    let m62 = dc_grid[r6 + 2usize];
+    let m63 = dc_grid[r6 + 3usize];
+    let m64 = dc_grid[r6 + 4usize];
+    let m65 = dc_grid[r6 + 5usize];
+    let m66 = dc_grid[r6 + 6usize];
+    let m67 = dc_grid[r6 + 7usize];
+    let m70 = dc_grid[r7];
+    let m71 = dc_grid[r7 + 1usize];
+    let m72 = dc_grid[r7 + 2usize];
+    let m73 = dc_grid[r7 + 3usize];
+    let m74 = dc_grid[r7 + 4usize];
+    let m75 = dc_grid[r7 + 5usize];
+    let m76 = dc_grid[r7 + 6usize];
+    let m77 = dc_grid[r7 + 7usize];
 
     // Step 2: dct1d_8 on each row, then × 1/8.
     let inv8 = 0.125f32;
@@ -305,28 +360,84 @@ pub fn set_llf_dct64x64_indexed_kernel(
     // We pre-multiply each input by inv8 (deferred from step 2) to absorb
     // the first 1/8 scale; then × inv8 again on output.
     let (b00, b01, b02, b03, b04, b05, b06, b07) = dct1d_8(
-        a00 * inv8, a10 * inv8, a20 * inv8, a30 * inv8, a40 * inv8, a50 * inv8, a60 * inv8, a70 * inv8,
+        a00 * inv8,
+        a10 * inv8,
+        a20 * inv8,
+        a30 * inv8,
+        a40 * inv8,
+        a50 * inv8,
+        a60 * inv8,
+        a70 * inv8,
     );
     let (b10, b11, b12, b13, b14, b15, b16, b17) = dct1d_8(
-        a01 * inv8, a11 * inv8, a21 * inv8, a31 * inv8, a41 * inv8, a51 * inv8, a61 * inv8, a71 * inv8,
+        a01 * inv8,
+        a11 * inv8,
+        a21 * inv8,
+        a31 * inv8,
+        a41 * inv8,
+        a51 * inv8,
+        a61 * inv8,
+        a71 * inv8,
     );
     let (b20, b21, b22, b23, b24, b25, b26, b27) = dct1d_8(
-        a02 * inv8, a12 * inv8, a22 * inv8, a32 * inv8, a42 * inv8, a52 * inv8, a62 * inv8, a72 * inv8,
+        a02 * inv8,
+        a12 * inv8,
+        a22 * inv8,
+        a32 * inv8,
+        a42 * inv8,
+        a52 * inv8,
+        a62 * inv8,
+        a72 * inv8,
     );
     let (b30, b31, b32, b33, b34, b35, b36, b37) = dct1d_8(
-        a03 * inv8, a13 * inv8, a23 * inv8, a33 * inv8, a43 * inv8, a53 * inv8, a63 * inv8, a73 * inv8,
+        a03 * inv8,
+        a13 * inv8,
+        a23 * inv8,
+        a33 * inv8,
+        a43 * inv8,
+        a53 * inv8,
+        a63 * inv8,
+        a73 * inv8,
     );
     let (b40, b41, b42, b43, b44, b45, b46, b47) = dct1d_8(
-        a04 * inv8, a14 * inv8, a24 * inv8, a34 * inv8, a44 * inv8, a54 * inv8, a64 * inv8, a74 * inv8,
+        a04 * inv8,
+        a14 * inv8,
+        a24 * inv8,
+        a34 * inv8,
+        a44 * inv8,
+        a54 * inv8,
+        a64 * inv8,
+        a74 * inv8,
     );
     let (b50, b51, b52, b53, b54, b55, b56, b57) = dct1d_8(
-        a05 * inv8, a15 * inv8, a25 * inv8, a35 * inv8, a45 * inv8, a55 * inv8, a65 * inv8, a75 * inv8,
+        a05 * inv8,
+        a15 * inv8,
+        a25 * inv8,
+        a35 * inv8,
+        a45 * inv8,
+        a55 * inv8,
+        a65 * inv8,
+        a75 * inv8,
     );
     let (b60, b61, b62, b63, b64, b65, b66, b67) = dct1d_8(
-        a06 * inv8, a16 * inv8, a26 * inv8, a36 * inv8, a46 * inv8, a56 * inv8, a66 * inv8, a76 * inv8,
+        a06 * inv8,
+        a16 * inv8,
+        a26 * inv8,
+        a36 * inv8,
+        a46 * inv8,
+        a56 * inv8,
+        a66 * inv8,
+        a76 * inv8,
     );
     let (b70, b71, b72, b73, b74, b75, b76, b77) = dct1d_8(
-        a07 * inv8, a17 * inv8, a27 * inv8, a37 * inv8, a47 * inv8, a57 * inv8, a67 * inv8, a77 * inv8,
+        a07 * inv8,
+        a17 * inv8,
+        a27 * inv8,
+        a37 * inv8,
+        a47 * inv8,
+        a57 * inv8,
+        a67 * inv8,
+        a77 * inv8,
     );
 
     // Step 5: per-position scale by (inv8 / (s64[iy] * s64[ix])).
@@ -456,14 +567,38 @@ pub fn set_llf_dct64x32_indexed_kernel(
     let r5 = (by + 5usize) * stride + bx;
     let r6 = (by + 6usize) * stride + bx;
     let r7 = (by + 7usize) * stride + bx;
-    let m00 = dc_grid[r0]; let m01 = dc_grid[r0 + 1usize]; let m02 = dc_grid[r0 + 2usize]; let m03 = dc_grid[r0 + 3usize];
-    let m10 = dc_grid[r1]; let m11 = dc_grid[r1 + 1usize]; let m12 = dc_grid[r1 + 2usize]; let m13 = dc_grid[r1 + 3usize];
-    let m20 = dc_grid[r2]; let m21 = dc_grid[r2 + 1usize]; let m22 = dc_grid[r2 + 2usize]; let m23 = dc_grid[r2 + 3usize];
-    let m30 = dc_grid[r3]; let m31 = dc_grid[r3 + 1usize]; let m32 = dc_grid[r3 + 2usize]; let m33 = dc_grid[r3 + 3usize];
-    let m40 = dc_grid[r4]; let m41 = dc_grid[r4 + 1usize]; let m42 = dc_grid[r4 + 2usize]; let m43 = dc_grid[r4 + 3usize];
-    let m50 = dc_grid[r5]; let m51 = dc_grid[r5 + 1usize]; let m52 = dc_grid[r5 + 2usize]; let m53 = dc_grid[r5 + 3usize];
-    let m60 = dc_grid[r6]; let m61 = dc_grid[r6 + 1usize]; let m62 = dc_grid[r6 + 2usize]; let m63 = dc_grid[r6 + 3usize];
-    let m70 = dc_grid[r7]; let m71 = dc_grid[r7 + 1usize]; let m72 = dc_grid[r7 + 2usize]; let m73 = dc_grid[r7 + 3usize];
+    let m00 = dc_grid[r0];
+    let m01 = dc_grid[r0 + 1usize];
+    let m02 = dc_grid[r0 + 2usize];
+    let m03 = dc_grid[r0 + 3usize];
+    let m10 = dc_grid[r1];
+    let m11 = dc_grid[r1 + 1usize];
+    let m12 = dc_grid[r1 + 2usize];
+    let m13 = dc_grid[r1 + 3usize];
+    let m20 = dc_grid[r2];
+    let m21 = dc_grid[r2 + 1usize];
+    let m22 = dc_grid[r2 + 2usize];
+    let m23 = dc_grid[r2 + 3usize];
+    let m30 = dc_grid[r3];
+    let m31 = dc_grid[r3 + 1usize];
+    let m32 = dc_grid[r3 + 2usize];
+    let m33 = dc_grid[r3 + 3usize];
+    let m40 = dc_grid[r4];
+    let m41 = dc_grid[r4 + 1usize];
+    let m42 = dc_grid[r4 + 2usize];
+    let m43 = dc_grid[r4 + 3usize];
+    let m50 = dc_grid[r5];
+    let m51 = dc_grid[r5 + 1usize];
+    let m52 = dc_grid[r5 + 2usize];
+    let m53 = dc_grid[r5 + 3usize];
+    let m60 = dc_grid[r6];
+    let m61 = dc_grid[r6 + 1usize];
+    let m62 = dc_grid[r6 + 2usize];
+    let m63 = dc_grid[r6 + 3usize];
+    let m70 = dc_grid[r7];
+    let m71 = dc_grid[r7 + 1usize];
+    let m72 = dc_grid[r7 + 2usize];
+    let m73 = dc_grid[r7 + 3usize];
 
     // Step 2: dct1d_4 on each of 8 rows.
     let (a00, a01, a02, a03) = dct1d_4(m00, m01, m02, m03);
@@ -479,16 +614,44 @@ pub fn set_llf_dct64x32_indexed_kernel(
     // We multiply by inv8 inside the dct1d_8 inputs to absorb the 1/8 scale.
     let inv8 = 0.125f32;
     let (b00, b01, b02, b03, b04, b05, b06, b07) = dct1d_8(
-        a00 * inv8, a10 * inv8, a20 * inv8, a30 * inv8, a40 * inv8, a50 * inv8, a60 * inv8, a70 * inv8,
+        a00 * inv8,
+        a10 * inv8,
+        a20 * inv8,
+        a30 * inv8,
+        a40 * inv8,
+        a50 * inv8,
+        a60 * inv8,
+        a70 * inv8,
     );
     let (b10, b11, b12, b13, b14, b15, b16, b17) = dct1d_8(
-        a01 * inv8, a11 * inv8, a21 * inv8, a31 * inv8, a41 * inv8, a51 * inv8, a61 * inv8, a71 * inv8,
+        a01 * inv8,
+        a11 * inv8,
+        a21 * inv8,
+        a31 * inv8,
+        a41 * inv8,
+        a51 * inv8,
+        a61 * inv8,
+        a71 * inv8,
     );
     let (b20, b21, b22, b23, b24, b25, b26, b27) = dct1d_8(
-        a02 * inv8, a12 * inv8, a22 * inv8, a32 * inv8, a42 * inv8, a52 * inv8, a62 * inv8, a72 * inv8,
+        a02 * inv8,
+        a12 * inv8,
+        a22 * inv8,
+        a32 * inv8,
+        a42 * inv8,
+        a52 * inv8,
+        a62 * inv8,
+        a72 * inv8,
     );
     let (b30, b31, b32, b33, b34, b35, b36, b37) = dct1d_8(
-        a03 * inv8, a13 * inv8, a23 * inv8, a33 * inv8, a43 * inv8, a53 * inv8, a63 * inv8, a73 * inv8,
+        a03 * inv8,
+        a13 * inv8,
+        a23 * inv8,
+        a33 * inv8,
+        a43 * inv8,
+        a53 * inv8,
+        a63 * inv8,
+        a73 * inv8,
     );
 
     // Step 5: per-position scale by 1 / (4 * SCALE_32_TO_4[iy] * SCALE_64_TO_8[ix]).
@@ -507,23 +670,23 @@ pub fn set_llf_dct64x32_indexed_kernel(
 
     let off = i * cpb;
     // Row 0
-    dst[off]            = b00 * (1.0f32 / (4.0f32 * s32_0 * s64_0));
-    dst[off + 1usize]   = b01 * (1.0f32 / (4.0f32 * s32_0 * s64_1));
-    dst[off + 2usize]   = b02 * (1.0f32 / (4.0f32 * s32_0 * s64_2));
-    dst[off + 3usize]   = b03 * (1.0f32 / (4.0f32 * s32_0 * s64_3));
-    dst[off + 4usize]   = b04 * (1.0f32 / (4.0f32 * s32_0 * s64_4));
-    dst[off + 5usize]   = b05 * (1.0f32 / (4.0f32 * s32_0 * s64_5));
-    dst[off + 6usize]   = b06 * (1.0f32 / (4.0f32 * s32_0 * s64_6));
-    dst[off + 7usize]   = b07 * (1.0f32 / (4.0f32 * s32_0 * s64_7));
+    dst[off] = b00 * (1.0f32 / (4.0f32 * s32_0 * s64_0));
+    dst[off + 1usize] = b01 * (1.0f32 / (4.0f32 * s32_0 * s64_1));
+    dst[off + 2usize] = b02 * (1.0f32 / (4.0f32 * s32_0 * s64_2));
+    dst[off + 3usize] = b03 * (1.0f32 / (4.0f32 * s32_0 * s64_3));
+    dst[off + 4usize] = b04 * (1.0f32 / (4.0f32 * s32_0 * s64_4));
+    dst[off + 5usize] = b05 * (1.0f32 / (4.0f32 * s32_0 * s64_5));
+    dst[off + 6usize] = b06 * (1.0f32 / (4.0f32 * s32_0 * s64_6));
+    dst[off + 7usize] = b07 * (1.0f32 / (4.0f32 * s32_0 * s64_7));
     // Row 1 (+64)
-    dst[off + 64usize]  = b10 * (1.0f32 / (4.0f32 * s32_1 * s64_0));
-    dst[off + 65usize]  = b11 * (1.0f32 / (4.0f32 * s32_1 * s64_1));
-    dst[off + 66usize]  = b12 * (1.0f32 / (4.0f32 * s32_1 * s64_2));
-    dst[off + 67usize]  = b13 * (1.0f32 / (4.0f32 * s32_1 * s64_3));
-    dst[off + 68usize]  = b14 * (1.0f32 / (4.0f32 * s32_1 * s64_4));
-    dst[off + 69usize]  = b15 * (1.0f32 / (4.0f32 * s32_1 * s64_5));
-    dst[off + 70usize]  = b16 * (1.0f32 / (4.0f32 * s32_1 * s64_6));
-    dst[off + 71usize]  = b17 * (1.0f32 / (4.0f32 * s32_1 * s64_7));
+    dst[off + 64usize] = b10 * (1.0f32 / (4.0f32 * s32_1 * s64_0));
+    dst[off + 65usize] = b11 * (1.0f32 / (4.0f32 * s32_1 * s64_1));
+    dst[off + 66usize] = b12 * (1.0f32 / (4.0f32 * s32_1 * s64_2));
+    dst[off + 67usize] = b13 * (1.0f32 / (4.0f32 * s32_1 * s64_3));
+    dst[off + 68usize] = b14 * (1.0f32 / (4.0f32 * s32_1 * s64_4));
+    dst[off + 69usize] = b15 * (1.0f32 / (4.0f32 * s32_1 * s64_5));
+    dst[off + 70usize] = b16 * (1.0f32 / (4.0f32 * s32_1 * s64_6));
+    dst[off + 71usize] = b17 * (1.0f32 / (4.0f32 * s32_1 * s64_7));
     // Row 2 (+128)
     dst[off + 128usize] = b20 * (1.0f32 / (4.0f32 * s32_2 * s64_0));
     dst[off + 129usize] = b21 * (1.0f32 / (4.0f32 * s32_2 * s64_1));
@@ -579,14 +742,38 @@ pub fn set_llf_dct32x64_indexed_kernel(
     let r1 = (by + 1usize) * stride + bx;
     let r2 = (by + 2usize) * stride + bx;
     let r3 = (by + 3usize) * stride + bx;
-    let m00 = dc_grid[r0]; let m01 = dc_grid[r0 + 1usize]; let m02 = dc_grid[r0 + 2usize]; let m03 = dc_grid[r0 + 3usize];
-    let m04 = dc_grid[r0 + 4usize]; let m05 = dc_grid[r0 + 5usize]; let m06 = dc_grid[r0 + 6usize]; let m07 = dc_grid[r0 + 7usize];
-    let m10 = dc_grid[r1]; let m11 = dc_grid[r1 + 1usize]; let m12 = dc_grid[r1 + 2usize]; let m13 = dc_grid[r1 + 3usize];
-    let m14 = dc_grid[r1 + 4usize]; let m15 = dc_grid[r1 + 5usize]; let m16 = dc_grid[r1 + 6usize]; let m17 = dc_grid[r1 + 7usize];
-    let m20 = dc_grid[r2]; let m21 = dc_grid[r2 + 1usize]; let m22 = dc_grid[r2 + 2usize]; let m23 = dc_grid[r2 + 3usize];
-    let m24 = dc_grid[r2 + 4usize]; let m25 = dc_grid[r2 + 5usize]; let m26 = dc_grid[r2 + 6usize]; let m27 = dc_grid[r2 + 7usize];
-    let m30 = dc_grid[r3]; let m31 = dc_grid[r3 + 1usize]; let m32 = dc_grid[r3 + 2usize]; let m33 = dc_grid[r3 + 3usize];
-    let m34 = dc_grid[r3 + 4usize]; let m35 = dc_grid[r3 + 5usize]; let m36 = dc_grid[r3 + 6usize]; let m37 = dc_grid[r3 + 7usize];
+    let m00 = dc_grid[r0];
+    let m01 = dc_grid[r0 + 1usize];
+    let m02 = dc_grid[r0 + 2usize];
+    let m03 = dc_grid[r0 + 3usize];
+    let m04 = dc_grid[r0 + 4usize];
+    let m05 = dc_grid[r0 + 5usize];
+    let m06 = dc_grid[r0 + 6usize];
+    let m07 = dc_grid[r0 + 7usize];
+    let m10 = dc_grid[r1];
+    let m11 = dc_grid[r1 + 1usize];
+    let m12 = dc_grid[r1 + 2usize];
+    let m13 = dc_grid[r1 + 3usize];
+    let m14 = dc_grid[r1 + 4usize];
+    let m15 = dc_grid[r1 + 5usize];
+    let m16 = dc_grid[r1 + 6usize];
+    let m17 = dc_grid[r1 + 7usize];
+    let m20 = dc_grid[r2];
+    let m21 = dc_grid[r2 + 1usize];
+    let m22 = dc_grid[r2 + 2usize];
+    let m23 = dc_grid[r2 + 3usize];
+    let m24 = dc_grid[r2 + 4usize];
+    let m25 = dc_grid[r2 + 5usize];
+    let m26 = dc_grid[r2 + 6usize];
+    let m27 = dc_grid[r2 + 7usize];
+    let m30 = dc_grid[r3];
+    let m31 = dc_grid[r3 + 1usize];
+    let m32 = dc_grid[r3 + 2usize];
+    let m33 = dc_grid[r3 + 3usize];
+    let m34 = dc_grid[r3 + 4usize];
+    let m35 = dc_grid[r3 + 5usize];
+    let m36 = dc_grid[r3 + 6usize];
+    let m37 = dc_grid[r3 + 7usize];
 
     // Step 2: dct1d_8 + 1/8 on each of 4 rows.
     let inv8 = 0.125f32;
@@ -611,10 +798,38 @@ pub fn set_llf_dct32x64_indexed_kernel(
     // For iy in 0..4, ix in 0..8: result[iy*8 + ix] = c{ix, iy}.
     // We index c by (ix, iy):  c00..c03 = ix=0; c10..c13 = ix=1; etc.
     // result row iy = (c0_iy, c1_iy, c2_iy, c3_iy, c4_iy, c5_iy, c6_iy, c7_iy)
-    let r00 = c00; let r01 = c10; let r02 = c20; let r03 = c30; let r04 = c40; let r05 = c50; let r06 = c60; let r07 = c70;
-    let r10 = c01; let r11 = c11; let r12 = c21; let r13 = c31; let r14 = c41; let r15 = c51; let r16 = c61; let r17 = c71;
-    let r20 = c02; let r21 = c12; let r22 = c22; let r23 = c32; let r24 = c42; let r25 = c52; let r26 = c62; let r27 = c72;
-    let r30 = c03; let r31 = c13; let r32 = c23; let r33 = c33; let r34 = c43; let r35 = c53; let r36 = c63; let r37 = c73;
+    let r00 = c00;
+    let r01 = c10;
+    let r02 = c20;
+    let r03 = c30;
+    let r04 = c40;
+    let r05 = c50;
+    let r06 = c60;
+    let r07 = c70;
+    let r10 = c01;
+    let r11 = c11;
+    let r12 = c21;
+    let r13 = c31;
+    let r14 = c41;
+    let r15 = c51;
+    let r16 = c61;
+    let r17 = c71;
+    let r20 = c02;
+    let r21 = c12;
+    let r22 = c22;
+    let r23 = c32;
+    let r24 = c42;
+    let r25 = c52;
+    let r26 = c62;
+    let r27 = c72;
+    let r30 = c03;
+    let r31 = c13;
+    let r32 = c23;
+    let r33 = c33;
+    let r34 = c43;
+    let r35 = c53;
+    let r36 = c63;
+    let r37 = c73;
 
     // Step 6: per-position scale by 1 / (4 * SCALE_32_TO_4[iy] * SCALE_64_TO_8[ix]).
     let s32_0 = 1.0f32;
@@ -632,23 +847,23 @@ pub fn set_llf_dct32x64_indexed_kernel(
 
     let off = i * cpb;
     // Row 0
-    dst[off]            = r00 * (1.0f32 / (4.0f32 * s32_0 * s64_0));
-    dst[off + 1usize]   = r01 * (1.0f32 / (4.0f32 * s32_0 * s64_1));
-    dst[off + 2usize]   = r02 * (1.0f32 / (4.0f32 * s32_0 * s64_2));
-    dst[off + 3usize]   = r03 * (1.0f32 / (4.0f32 * s32_0 * s64_3));
-    dst[off + 4usize]   = r04 * (1.0f32 / (4.0f32 * s32_0 * s64_4));
-    dst[off + 5usize]   = r05 * (1.0f32 / (4.0f32 * s32_0 * s64_5));
-    dst[off + 6usize]   = r06 * (1.0f32 / (4.0f32 * s32_0 * s64_6));
-    dst[off + 7usize]   = r07 * (1.0f32 / (4.0f32 * s32_0 * s64_7));
+    dst[off] = r00 * (1.0f32 / (4.0f32 * s32_0 * s64_0));
+    dst[off + 1usize] = r01 * (1.0f32 / (4.0f32 * s32_0 * s64_1));
+    dst[off + 2usize] = r02 * (1.0f32 / (4.0f32 * s32_0 * s64_2));
+    dst[off + 3usize] = r03 * (1.0f32 / (4.0f32 * s32_0 * s64_3));
+    dst[off + 4usize] = r04 * (1.0f32 / (4.0f32 * s32_0 * s64_4));
+    dst[off + 5usize] = r05 * (1.0f32 / (4.0f32 * s32_0 * s64_5));
+    dst[off + 6usize] = r06 * (1.0f32 / (4.0f32 * s32_0 * s64_6));
+    dst[off + 7usize] = r07 * (1.0f32 / (4.0f32 * s32_0 * s64_7));
     // Row 1 (+64)
-    dst[off + 64usize]  = r10 * (1.0f32 / (4.0f32 * s32_1 * s64_0));
-    dst[off + 65usize]  = r11 * (1.0f32 / (4.0f32 * s32_1 * s64_1));
-    dst[off + 66usize]  = r12 * (1.0f32 / (4.0f32 * s32_1 * s64_2));
-    dst[off + 67usize]  = r13 * (1.0f32 / (4.0f32 * s32_1 * s64_3));
-    dst[off + 68usize]  = r14 * (1.0f32 / (4.0f32 * s32_1 * s64_4));
-    dst[off + 69usize]  = r15 * (1.0f32 / (4.0f32 * s32_1 * s64_5));
-    dst[off + 70usize]  = r16 * (1.0f32 / (4.0f32 * s32_1 * s64_6));
-    dst[off + 71usize]  = r17 * (1.0f32 / (4.0f32 * s32_1 * s64_7));
+    dst[off + 64usize] = r10 * (1.0f32 / (4.0f32 * s32_1 * s64_0));
+    dst[off + 65usize] = r11 * (1.0f32 / (4.0f32 * s32_1 * s64_1));
+    dst[off + 66usize] = r12 * (1.0f32 / (4.0f32 * s32_1 * s64_2));
+    dst[off + 67usize] = r13 * (1.0f32 / (4.0f32 * s32_1 * s64_3));
+    dst[off + 68usize] = r14 * (1.0f32 / (4.0f32 * s32_1 * s64_4));
+    dst[off + 69usize] = r15 * (1.0f32 / (4.0f32 * s32_1 * s64_5));
+    dst[off + 70usize] = r16 * (1.0f32 / (4.0f32 * s32_1 * s64_6));
+    dst[off + 71usize] = r17 * (1.0f32 / (4.0f32 * s32_1 * s64_7));
     // Row 2 (+128)
     dst[off + 128usize] = r20 * (1.0f32 / (4.0f32 * s32_2 * s64_0));
     dst[off + 129usize] = r21 * (1.0f32 / (4.0f32 * s32_2 * s64_1));

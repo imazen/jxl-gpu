@@ -1881,6 +1881,7 @@ name = "jxl-encoder-simd"
 version = "0.3.2"
 dependencies = [
  "archmage",
+ "libm",
  "magetypes",
 ]
 

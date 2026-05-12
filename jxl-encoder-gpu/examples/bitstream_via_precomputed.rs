@@ -26,9 +26,9 @@ fn main() {
     use std::time::Instant;
 
     use jxl_encoder_gpu::encoder::GpuEncoder;
-    use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
     #[cfg(feature = "butteraugli-loop")]
     use jxl_encoder_gpu::forks::butteraugli_loop::ButteraugliLoopGpu;
+    use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 
     type B = cubecl::cuda::CudaRuntime;
 
@@ -139,11 +139,16 @@ fn main() {
         (12, "DCT64x64"),
         (13, "DCT64x32"),
         (14, "DCT32x64"),
-    ].into_iter().collect();
+    ]
+    .into_iter()
+    .collect();
     for (s, c) in &histo {
         let pct = *c as f32 / total as f32 * 100.0;
         let name = names.get(s).copied().unwrap_or("?");
-        println!("  raw_strategy={:2} ({:9}) = {:6} ({:5.2}%)", s, name, c, pct);
+        println!(
+            "  raw_strategy={:2} ({:9}) = {:6} ({:5.2}%)",
+            s, name, c, pct
+        );
     }
     drop(plan);
 
@@ -151,7 +156,10 @@ fn main() {
     let bitstream = if e8_iters > 0 {
         #[cfg(feature = "butteraugli-loop")]
         {
-            println!("[run] encode_lossy_to_bitstream_via_precomputed_with_butteraugli (iters={}) …", e8_iters);
+            println!(
+                "[run] encode_lossy_to_bitstream_via_precomputed_with_butteraugli (iters={}) …",
+                e8_iters
+            );
             let mut bg: ButteraugliLoopGpu<B> = ButteraugliLoopGpu::new_multires(&enc, w, h);
             bg.set_reference(&pixels_u8).expect("set_reference");
             enc.encode_lossy_to_bitstream_via_precomputed_with_butteraugli(
@@ -196,7 +204,11 @@ fn main() {
     }
     println!(
         "  [sig] valid {} signature",
-        if is_container { "container" } else { "codestream" }
+        if is_container {
+            "container"
+        } else {
+            "codestream"
+        }
     );
 
     if let Some(path) = out_path {

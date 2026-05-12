@@ -132,12 +132,8 @@ fn main() {
         distance,
         &mut |_| {},
     );
-    let _ = lossy.prepare_strategy_search_plan_traced_from_u8(
-        &enc,
-        &pixels_u8,
-        distance,
-        &mut |_| {},
-    );
+    let _ =
+        lossy.prepare_strategy_search_plan_traced_from_u8(&enc, &pixels_u8, distance, &mut |_| {});
 
     // ── Path A: f32 ──────────────────────────────────────────────
     let mut a_times: Vec<f64> = Vec::with_capacity(runs);
@@ -181,8 +177,14 @@ fn main() {
     println!();
     summary("Path A: prepare(f32, 3×plane upload)", &a_times);
     summary("Path B: prepare_from_u8 (fused)     ", &b_times);
-    let a_min = *a_times.iter().min_by(|x, y| x.partial_cmp(y).unwrap()).unwrap();
-    let b_min = *b_times.iter().min_by(|x, y| x.partial_cmp(y).unwrap()).unwrap();
+    let a_min = *a_times
+        .iter()
+        .min_by(|x, y| x.partial_cmp(y).unwrap())
+        .unwrap();
+    let b_min = *b_times
+        .iter()
+        .min_by(|x, y| x.partial_cmp(y).unwrap())
+        .unwrap();
     let a_med = a_times[runs / 2];
     let b_med = b_times[runs / 2];
     println!(

@@ -27,7 +27,7 @@ fn main() {
 
     use jxl_encoder::api::{Limits, LossyConfig, PixelLayout};
     use jxl_encoder_gpu::encoder::GpuEncoder;
-    use jxl_encoder_gpu::lossy_encoder::{distance_to_qac, LossyEncoder};
+    use jxl_encoder_gpu::lossy_encoder::{LossyEncoder, distance_to_qac};
 
     type B = cubecl::cuda::CudaRuntime;
 
@@ -111,7 +111,9 @@ fn main() {
     println!(
         "perf_cpu_vs_gpu: image={image_path} (final {}x{}, {:.2} MP) effort={effort} distance={distance} \
          iters={iters} runs={runs}",
-        w, h, (w as f32 * h as f32) / 1_000_000.0
+        w,
+        h,
+        (w as f32 * h as f32) / 1_000_000.0
     );
     let n = (w * h) as usize;
 
@@ -179,8 +181,8 @@ fn main() {
     let (gpu_min, gpu_med, gpu_mean) = if do_gpu {
         eprintln!("[gpu] constructing LossyEncoder …");
         let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, w, h);
-        let nb8 = (lossy.padded_dimensions().0 as usize / 8)
-            * (lossy.padded_dimensions().1 as usize / 8);
+        let nb8 =
+            (lossy.padded_dimensions().0 as usize / 8) * (lossy.padded_dimensions().1 as usize / 8);
         let aq_field = vec![distance_to_qac(distance); nb8];
 
         eprintln!("[gpu] starting warmup …");

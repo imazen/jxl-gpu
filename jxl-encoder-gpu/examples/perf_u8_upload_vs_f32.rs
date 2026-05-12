@@ -83,7 +83,12 @@ fn main() {
     let ph = pad_to_16(h);
     println!(
         "perf_u8_upload_vs_f32: src {}×{} ({:.2} MP), padded {}×{}, runs={}",
-        w, h, n as f32 / 1e6, pw, ph, runs
+        w,
+        h,
+        n as f32 / 1e6,
+        pw,
+        ph,
+        runs
     );
 
     let enc: GpuEncoder<B> = GpuEncoder::new();
@@ -170,8 +175,14 @@ fn main() {
     println!();
     summary("Path A (f32 upload, 3 planes)", &a_times);
     summary("Path B (u8 upload + fused)   ", &b_times);
-    let a_min = *a_times.iter().min_by(|x, y| x.partial_cmp(y).unwrap()).unwrap();
-    let b_min = *b_times.iter().min_by(|x, y| x.partial_cmp(y).unwrap()).unwrap();
+    let a_min = *a_times
+        .iter()
+        .min_by(|x, y| x.partial_cmp(y).unwrap())
+        .unwrap();
+    let b_min = *b_times
+        .iter()
+        .min_by(|x, y| x.partial_cmp(y).unwrap())
+        .unwrap();
     println!(
         "\n  speedup (min):  {:.2}×  (Δ {:.2} ms)",
         a_min / b_min,

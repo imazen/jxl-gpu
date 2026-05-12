@@ -7,9 +7,8 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 use crate::kernels::dct8::{
-    dct_8x8_kernel, dequant_idct_dc_scatter_dct8_kernel,
-    dequant_idct_dc_scatter_dct8_wide_kernel, idct_8x8_kernel,
-    idct_8x8_set_dc_scatter_kernel,
+    dct_8x8_kernel, dequant_idct_dc_scatter_dct8_kernel, dequant_idct_dc_scatter_dct8_wide_kernel,
+    idct_8x8_kernel, idct_8x8_set_dc_scatter_kernel,
 };
 
 /// Forward 8x8 DCT for `num_blocks` contiguous 8x8 blocks.

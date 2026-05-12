@@ -924,8 +924,7 @@ impl<R: Runtime> LossyEncoder<R> {
         target_distance: f32,
         mark: &mut dyn FnMut(&'static str),
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-        let plan =
-            self.prepare_strategy_search_plan_traced(enc, r, g, b, target_distance, mark);
+        let plan = self.prepare_strategy_search_plan_traced(enc, r, g, b, target_distance, mark);
         self.encode_with_strategy_plan_adaptive_traced(enc, &plan, aq_field, mark)
     }
 
@@ -944,6 +943,27 @@ impl<R: Runtime> LossyEncoder<R> {
         target_distance: f32,
     ) -> StrategySearchPlan<R> {
         self.prepare_strategy_search_plan_traced(enc, r, g, b, target_distance, &mut |_| {})
+    }
+
+    /// Non-traced wrapper around
+    /// [`Self::prepare_strategy_search_plan_traced_from_u8`]. Takes
+    /// raw interleaved sRGB u8 RGB and runs the entire pipeline
+    /// (sRGB→linear + pad + XYB + cost-grid) without ever
+    /// materialising the f32 linear planes on the host. Saves the
+    /// per-pixel host `powf` cost and 4× the upload bandwidth (48 MB
+    /// raw u8 vs 192 MB converted f32 at 16 MP).
+    pub fn prepare_strategy_search_plan_from_u8(
+        &self,
+        enc: &GpuEncoder<R>,
+        pixels_u8: &[u8],
+        target_distance: f32,
+    ) -> StrategySearchPlan<R> {
+        self.prepare_strategy_search_plan_traced_from_u8(
+            enc,
+            pixels_u8,
+            target_distance,
+            &mut |_| {},
+        )
     }
 
     /// Cost-grid stage of strat-search. Computes XYB + gaborish + masks,
@@ -1069,31 +1089,30 @@ impl<R: Runtime> LossyEncoder<R> {
         // distance-ramp.
         let distance = target_distance;
         use crate::forks::cost::{
-            compute_scaled_constants, strategy_search_costs_dct16x8_or_8x16_persistent,
+            compute_scaled_constants, strategy_search_costs_dct8_16x16_persistent,
+            strategy_search_costs_dct16x8_or_8x16_persistent,
             strategy_search_costs_dct32x16_or_16x32_persistent,
             strategy_search_costs_dct32x32_persistent_with_aq_field,
             strategy_search_costs_dct64x32_or_32x64_persistent,
             strategy_search_costs_dct64x64_persistent,
-            strategy_search_costs_dct8_16x16_persistent,
         };
         use crate::forks::transform::{
-            RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT2X2,
-            RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT4X4,
-            RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT8X16,
-            RAW_STRATEGY_DCT8X4, RAW_STRATEGY_IDENTITY,
+            RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8, RAW_STRATEGY_DCT8X4,
+            RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X32,
+            RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT64X32,
+            RAW_STRATEGY_IDENTITY,
         };
         use crate::pipeline::{
-            partitions_16x16_to_assignments, partitions_32x32_to_assignments,
-            partitions_64x64_to_assignments, select_partitions_16x16_full,
-            select_partitions_32x32_with_extras16, select_partitions_64x64_with_extras16,
-            CostGrids16x16, CostGrids32x32, CostGrids64x64,
+            CostGrids16x16, CostGrids32x32, CostGrids64x64, partitions_16x16_to_assignments,
+            partitions_32x32_to_assignments, partitions_64x64_to_assignments,
+            select_partitions_16x16_full, select_partitions_32x32_with_extras16,
+            select_partitions_64x64_with_extras16,
         };
         use crate::quant_weights::{
-            dct16x16_weights_per_channel, dct16x32_weights_per_channel,
-            dct16x8_weights_per_channel, dct2x2_weights_per_channel,
-            dct32x32_weights_per_channel, dct32x64_weights_per_channel,
-            dct4x4_weights_per_channel, dct4x8_weights_per_channel,
-            dct64x64_weights_per_channel, dct8_weights_per_channel,
+            dct2x2_weights_per_channel, dct4x4_weights_per_channel, dct4x8_weights_per_channel,
+            dct8_weights_per_channel, dct16x8_weights_per_channel, dct16x16_weights_per_channel,
+            dct16x32_weights_per_channel, dct32x32_weights_per_channel,
+            dct32x64_weights_per_channel, dct64x64_weights_per_channel,
             identity_weights_per_channel,
         };
 
@@ -1181,10 +1200,14 @@ impl<R: Runtime> LossyEncoder<R> {
                 let mut count = 0_usize;
                 for dy in 0..8 {
                     let y = by * 8 + dy;
-                    if y >= h { break; }
+                    if y >= h {
+                        break;
+                    }
                     for dx in 0..8 {
                         let x = bx * 8 + dx;
-                        if x >= w { break; }
+                        if x >= w {
+                            break;
+                        }
                         sum += mask_pixels[y * pw + x] as f64;
                         count += 1;
                     }
@@ -1326,12 +1349,29 @@ impl<R: Runtime> LossyEncoder<R> {
         // 11-image corpus: 2.16 ✓, 1.6 ✓, 1.2 ✓, 1.08 ✓ (libjxl).
         // Now at exact libjxl reference value.
         let cost_dct4x4 = strategy_search_costs_subblock_8x8_with_handle(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
-            &h_mrb_subblock, mask_row_base_subblock.len(),
+            enc,
+            &g_8x,
+            &g_8y,
+            &g_8b,
+            pw,
+            ph,
+            &g_mask,
+            &h_mrb_subblock,
+            mask_row_base_subblock.len(),
             RAW_STRATEGY_DCT4X4,
-            &dct4x4_x, &dct4x4_y, &dct4x4_b,
-            &inv_4x4_x, &inv_4x4_y, &inv_4x4_b,
-            qac, qac, qac, 0, 0, scaled_constants, 1.08,
+            &dct4x4_x,
+            &dct4x4_y,
+            &dct4x4_b,
+            &inv_4x4_x,
+            &inv_4x4_y,
+            &inv_4x4_b,
+            qac,
+            qac,
+            qac,
+            0,
+            0,
+            scaled_constants,
+            1.08,
         );
 
         let (dct4x8_x, dct4x8_y, dct4x8_b) = dct4x8_weights_per_channel();
@@ -1344,20 +1384,54 @@ impl<R: Runtime> LossyEncoder<R> {
         // +2% (FP-tied path-shift; bisected 1.72 ✓ → 1.2 ✓ → 1.0 ✓
         // → 0.98 ✓ → 0.95 ✗).
         let cost_dct4x8 = strategy_search_costs_subblock_8x8_with_handle(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
-            &h_mrb_subblock, mask_row_base_subblock.len(),
+            enc,
+            &g_8x,
+            &g_8y,
+            &g_8b,
+            pw,
+            ph,
+            &g_mask,
+            &h_mrb_subblock,
+            mask_row_base_subblock.len(),
             RAW_STRATEGY_DCT4X8,
-            &dct4x8_x, &dct4x8_y, &dct4x8_b,
-            &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
-            qac, qac, qac, 0, 0, scaled_constants, 0.98,
+            &dct4x8_x,
+            &dct4x8_y,
+            &dct4x8_b,
+            &inv_4x8_x,
+            &inv_4x8_y,
+            &inv_4x8_b,
+            qac,
+            qac,
+            qac,
+            0,
+            0,
+            scaled_constants,
+            0.98,
         );
         let cost_dct8x4 = strategy_search_costs_subblock_8x8_with_handle(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
-            &h_mrb_subblock, mask_row_base_subblock.len(),
+            enc,
+            &g_8x,
+            &g_8y,
+            &g_8b,
+            pw,
+            ph,
+            &g_mask,
+            &h_mrb_subblock,
+            mask_row_base_subblock.len(),
             RAW_STRATEGY_DCT8X4,
-            &dct4x8_x, &dct4x8_y, &dct4x8_b,
-            &inv_4x8_x, &inv_4x8_y, &inv_4x8_b,
-            qac, qac, qac, 0, 0, scaled_constants, 0.98,
+            &dct4x8_x,
+            &dct4x8_y,
+            &dct4x8_b,
+            &inv_4x8_x,
+            &inv_4x8_y,
+            &inv_4x8_b,
+            qac,
+            qac,
+            qac,
+            0,
+            0,
+            scaled_constants,
+            0.98,
         );
 
         // IDENTITY: 2.09 → 1.85 (May 9 2026, ~12% reduction gated by
@@ -1377,12 +1451,29 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_id_y: Vec<f32> = id_y.iter().map(|w| 1.0 / w).collect();
         let inv_id_b: Vec<f32> = id_b.iter().map(|w| 1.0 / w).collect();
         let cost_identity = strategy_search_costs_subblock_8x8_with_handle(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
-            &h_mrb_subblock, mask_row_base_subblock.len(),
+            enc,
+            &g_8x,
+            &g_8y,
+            &g_8b,
+            pw,
+            ph,
+            &g_mask,
+            &h_mrb_subblock,
+            mask_row_base_subblock.len(),
             RAW_STRATEGY_IDENTITY,
-            &id_x, &id_y, &id_b,
-            &inv_id_x, &inv_id_y, &inv_id_b,
-            qac, qac, qac, 0, 0, scaled_constants, 1.85,
+            &id_x,
+            &id_y,
+            &id_b,
+            &inv_id_x,
+            &inv_id_y,
+            &inv_id_b,
+            qac,
+            qac,
+            qac,
+            0,
+            0,
+            scaled_constants,
+            1.85,
         );
 
         // DCT2X2: 1.90 → 0.95 (libjxl reference, May 9 2026, gated by
@@ -1393,12 +1484,29 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_d2_y: Vec<f32> = d2_y.iter().map(|w| 1.0 / w).collect();
         let inv_d2_b: Vec<f32> = d2_b.iter().map(|w| 1.0 / w).collect();
         let cost_dct2x2 = strategy_search_costs_subblock_8x8_with_handle(
-            enc, &g_8x, &g_8y, &g_8b, pw, ph, &g_mask,
-            &h_mrb_subblock, mask_row_base_subblock.len(),
+            enc,
+            &g_8x,
+            &g_8y,
+            &g_8b,
+            pw,
+            ph,
+            &g_mask,
+            &h_mrb_subblock,
+            mask_row_base_subblock.len(),
             RAW_STRATEGY_DCT2X2,
-            &d2_x, &d2_y, &d2_b,
-            &inv_d2_x, &inv_d2_y, &inv_d2_b,
-            qac, qac, qac, 0, 0, scaled_constants, 0.95,
+            &d2_x,
+            &d2_y,
+            &d2_b,
+            &inv_d2_x,
+            &inv_d2_y,
+            &inv_d2_b,
+            qac,
+            qac,
+            qac,
+            0,
+            0,
+            scaled_constants,
+            0.95,
         );
         mark("cost_subblock_8x8");
 
@@ -1435,11 +1543,21 @@ impl<R: Runtime> LossyEncoder<R> {
         let mut cost_dct8x4 = cost_dct8x4;
         let mut cost_identity = cost_identity;
         let mut cost_dct2x2 = cost_dct2x2;
-        for c in cost_dct4x4.iter_mut() { *c *= dist_bias; }
-        for c in cost_dct4x8.iter_mut() { *c *= dist_bias; }
-        for c in cost_dct8x4.iter_mut() { *c *= dist_bias; }
-        for c in cost_identity.iter_mut() { *c *= dist_bias; }
-        for c in cost_dct2x2.iter_mut() { *c *= dist_bias; }
+        for c in cost_dct4x4.iter_mut() {
+            *c *= dist_bias;
+        }
+        for c in cost_dct4x8.iter_mut() {
+            *c *= dist_bias;
+        }
+        for c in cost_dct8x4.iter_mut() {
+            *c *= dist_bias;
+        }
+        for c in cost_identity.iter_mut() {
+            *c *= dist_bias;
+        }
+        for c in cost_dct2x2.iter_mut() {
+            *c *= dist_bias;
+        }
 
         let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16_persistent(
             enc,
@@ -1491,8 +1609,12 @@ impl<R: Runtime> LossyEncoder<R> {
         // Distance-scaled anti-bias (same as DCT16x16).
         let mut cost_dct16x8 = cost_dct16x8;
         let mut cost_dct8x16 = cost_dct8x16;
-        for c in cost_dct16x8.iter_mut() { *c *= dist_bias; }
-        for c in cost_dct8x16.iter_mut() { *c *= dist_bias; }
+        for c in cost_dct16x8.iter_mut() {
+            *c *= dist_bias;
+        }
+        for c in cost_dct8x16.iter_mut() {
+            *c *= dist_bias;
+        }
 
         // Optional: DCT32x32 cost grid (only when padded dims are
         // multiples of 32). Returns empty Vec when ineligible; selector
@@ -1565,7 +1687,9 @@ impl<R: Runtime> LossyEncoder<R> {
         // factor since DCT32 over-selection at high d is more severe).
         let mut cost_dct32x32 = cost_dct32x32;
         let dist_bias_32 = 1.0 + bias_scale * 1.5;
-        for c in cost_dct32x32.iter_mut() { *c *= dist_bias_32; }
+        for c in cost_dct32x32.iter_mut() {
+            *c *= dist_bias_32;
+        }
 
         // Optional: DCT32x16 + DCT16x32 cost grids (rectangular DCT32
         // family). Both feed into the 32x32-tier selector via CostGrids32x32.
@@ -1579,16 +1703,48 @@ impl<R: Runtime> LossyEncoder<R> {
             let inv_32x16_y: Vec<f32> = dct32x16_y.iter().map(|w| 1.0 / w).collect();
             let inv_32x16_b: Vec<f32> = dct32x16_b.iter().map(|w| 1.0 / w).collect();
             let c_32x16 = strategy_search_costs_dct32x16_or_16x32_persistent(
-                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask, RAW_STRATEGY_DCT32X16,
-                &dct32x16_x, &dct32x16_y, &dct32x16_b,
-                &inv_32x16_x, &inv_32x16_y, &inv_32x16_b,
-                qac, qac, qac, 0, 0, scaled_constants,
+                enc,
+                &xx_g,
+                &xy_g,
+                &xb_g,
+                pw,
+                ph,
+                &g_mask,
+                RAW_STRATEGY_DCT32X16,
+                &dct32x16_x,
+                &dct32x16_y,
+                &dct32x16_b,
+                &inv_32x16_x,
+                &inv_32x16_y,
+                &inv_32x16_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
             );
             let c_16x32 = strategy_search_costs_dct32x16_or_16x32_persistent(
-                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask, RAW_STRATEGY_DCT16X32,
-                &dct32x16_x, &dct32x16_y, &dct32x16_b,
-                &inv_32x16_x, &inv_32x16_y, &inv_32x16_b,
-                qac, qac, qac, 0, 0, scaled_constants,
+                enc,
+                &xx_g,
+                &xy_g,
+                &xb_g,
+                pw,
+                ph,
+                &g_mask,
+                RAW_STRATEGY_DCT16X32,
+                &dct32x16_x,
+                &dct32x16_y,
+                &dct32x16_b,
+                &inv_32x16_x,
+                &inv_32x16_y,
+                &inv_32x16_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
             );
             (c_32x16, c_16x32)
         } else {
@@ -1601,8 +1757,12 @@ impl<R: Runtime> LossyEncoder<R> {
         // Distance-scaled anti-bias for rectangular DCT32 (same as DCT32x32).
         let mut cost_dct32x16 = cost_dct32x16;
         let mut cost_dct16x32 = cost_dct16x32;
-        for c in cost_dct32x16.iter_mut() { *c *= dist_bias_32; }
-        for c in cost_dct16x32.iter_mut() { *c *= dist_bias_32; }
+        for c in cost_dct32x16.iter_mut() {
+            *c *= dist_bias_32;
+        }
+        for c in cost_dct16x32.iter_mut() {
+            *c *= dist_bias_32;
+        }
 
         // Optional: DCT64x64 + DCT64x32 + DCT32x64 cost grids.
         // All gated on dct64_eligible (image dims multiple of 64).
@@ -1624,22 +1784,69 @@ impl<R: Runtime> LossyEncoder<R> {
             let inv_64x32_y: Vec<f32> = dct64x32_y.iter().map(|w| 1.0 / w).collect();
             let inv_64x32_b: Vec<f32> = dct64x32_b.iter().map(|w| 1.0 / w).collect();
             let c64 = strategy_search_costs_dct64x64_persistent(
-                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask,
-                &dct64_x, &dct64_y, &dct64_b,
-                &inv_64x, &inv_64y, &inv_64b,
-                qac, qac, qac, 0, 0, scaled_constants,
+                enc,
+                &xx_g,
+                &xy_g,
+                &xb_g,
+                pw,
+                ph,
+                &g_mask,
+                &dct64_x,
+                &dct64_y,
+                &dct64_b,
+                &inv_64x,
+                &inv_64y,
+                &inv_64b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
             );
             let c64x32 = strategy_search_costs_dct64x32_or_32x64_persistent(
-                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask, RAW_STRATEGY_DCT64X32,
-                &dct64x32_x, &dct64x32_y, &dct64x32_b,
-                &inv_64x32_x, &inv_64x32_y, &inv_64x32_b,
-                qac, qac, qac, 0, 0, scaled_constants,
+                enc,
+                &xx_g,
+                &xy_g,
+                &xb_g,
+                pw,
+                ph,
+                &g_mask,
+                RAW_STRATEGY_DCT64X32,
+                &dct64x32_x,
+                &dct64x32_y,
+                &dct64x32_b,
+                &inv_64x32_x,
+                &inv_64x32_y,
+                &inv_64x32_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
             );
             let c32x64 = strategy_search_costs_dct64x32_or_32x64_persistent(
-                enc, &xx_g, &xy_g, &xb_g, pw, ph, &g_mask, RAW_STRATEGY_DCT32X64,
-                &dct64x32_x, &dct64x32_y, &dct64x32_b,
-                &inv_64x32_x, &inv_64x32_y, &inv_64x32_b,
-                qac, qac, qac, 0, 0, scaled_constants,
+                enc,
+                &xx_g,
+                &xy_g,
+                &xb_g,
+                pw,
+                ph,
+                &g_mask,
+                RAW_STRATEGY_DCT32X64,
+                &dct64x32_x,
+                &dct64x32_y,
+                &dct64x32_b,
+                &inv_64x32_x,
+                &inv_64x32_y,
+                &inv_64x32_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
             );
             (c64, c64x32, c32x64)
         } else {
@@ -1658,9 +1865,15 @@ impl<R: Runtime> LossyEncoder<R> {
         let mut cost_dct64x32 = cost_dct64x32;
         let mut cost_dct32x64 = cost_dct32x64;
         let dist_bias_64 = 1.0 + bias_scale * 2.0;
-        for c in cost_dct64x64.iter_mut() { *c *= dist_bias_64; }
-        for c in cost_dct64x32.iter_mut() { *c *= dist_bias_64; }
-        for c in cost_dct32x64.iter_mut() { *c *= dist_bias_64; }
+        for c in cost_dct64x64.iter_mut() {
+            *c *= dist_bias_64;
+        }
+        for c in cost_dct64x32.iter_mut() {
+            *c *= dist_bias_64;
+        }
+        for c in cost_dct32x64.iter_mut() {
+            *c *= dist_bias_64;
+        }
 
         // Stage 5: host-side selector + assignments. All 5 sub-block
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
@@ -1841,13 +2054,27 @@ impl<R: Runtime> LossyEncoder<R> {
         // encode/recon stage recomputes them from the same const
         // weight functions.
         let _ = (
-            &dct8_x, &dct8_y, &dct8_b,
-            &dct16_x, &dct16_y, &dct16_b,
-            &dct16x8_x, &dct16x8_y, &dct16x8_b,
-            &dct32_x, &dct32_y, &dct32_b,
-            &dct32x16_x, &dct32x16_y, &dct32x16_b,
-            &dct64_x, &dct64_y, &dct64_b,
-            &dct64x32_x, &dct64x32_y, &dct64x32_b,
+            &dct8_x,
+            &dct8_y,
+            &dct8_b,
+            &dct16_x,
+            &dct16_y,
+            &dct16_b,
+            &dct16x8_x,
+            &dct16x8_y,
+            &dct16x8_b,
+            &dct32_x,
+            &dct32_y,
+            &dct32_b,
+            &dct32x16_x,
+            &dct32x16_y,
+            &dct32x16_b,
+            &dct64_x,
+            &dct64_y,
+            &dct64_b,
+            &dct64x32_x,
+            &dct64x32_y,
+            &dct64x32_b,
         );
 
         StrategySearchPlan {
@@ -1915,12 +2142,7 @@ impl<R: Runtime> LossyEncoder<R> {
         crate::persistent::GpuPlane<R>,
         crate::persistent::GpuPlane<R>,
     ) {
-        self.encode_with_strategy_plan_adaptive_persistent_traced(
-            enc,
-            plan,
-            aq_field,
-            &mut |_| {},
-        )
+        self.encode_with_strategy_plan_adaptive_persistent_traced(enc, plan, aq_field, &mut |_| {})
     }
 
     /// Encode + recon + postpass stage of strat-search using a
@@ -1981,15 +2203,14 @@ impl<R: Runtime> LossyEncoder<R> {
             encode_and_reconstruct_mixed_strategy_3channel, gab_weights,
         };
         use crate::forks::transform::{
-            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT16X8,
-            RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
-            RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_DCT8X16,
+            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
+            RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32,
+            RAW_STRATEGY_DCT32X64, RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64,
         };
         use crate::quant_weights::{
-            dct16x16_weights_per_channel, dct16x32_weights_per_channel,
-            dct16x8_weights_per_channel, dct32x32_weights_per_channel,
+            dct8_weights_per_channel, dct16x8_weights_per_channel, dct16x16_weights_per_channel,
+            dct16x32_weights_per_channel, dct32x32_weights_per_channel,
             dct32x64_weights_per_channel, dct64x64_weights_per_channel,
-            dct8_weights_per_channel,
         };
 
         let (w, h) = (self.width as usize, self.height as usize);
@@ -2056,13 +2277,11 @@ impl<R: Runtime> LossyEncoder<R> {
         // DCT2x2). The strat-search 16x16 selector can pick these
         // (cost grids computed in the prepare stage), so the
         // encode/recon stage must support them too.
-        let (dct4x4_xw, dct4x4_yw, dct4x4_bw) =
-            crate::quant_weights::dct4x4_weights_per_channel();
+        let (dct4x4_xw, dct4x4_yw, dct4x4_bw) = crate::quant_weights::dct4x4_weights_per_channel();
         let dct4x4_x_clone = dct4x4_xw.clone();
         let dct4x4_y_clone = dct4x4_yw.clone();
         let dct4x4_b_clone = dct4x4_bw.clone();
-        let (dct4x8_xw, dct4x8_yw, dct4x8_bw) =
-            crate::quant_weights::dct4x8_weights_per_channel();
+        let (dct4x8_xw, dct4x8_yw, dct4x8_bw) = crate::quant_weights::dct4x8_weights_per_channel();
         let dct4x8_x_clone = dct4x8_xw.clone();
         let dct4x8_y_clone = dct4x8_yw.clone();
         let dct4x8_b_clone = dct4x8_bw.clone();
@@ -2221,7 +2440,6 @@ impl<R: Runtime> LossyEncoder<R> {
         );
         mark("mixed_strategy_encode_recon");
 
-
         // Stage 8: postpass (gab_smooth + EPF + xyb_to_linear), matching
         // run_pipeline_with_qac. EPF closes most of the perceptual gap
         // vs the uniform-qac DCT8 baseline.
@@ -2242,13 +2460,8 @@ impl<R: Runtime> LossyEncoder<R> {
             .map(|&q| (q * 50.0).round().clamp(1.0, 255.0) as u8)
             .collect();
         let sharpness = vec![4_u8; nb8];
-        let inv_sigma_vec = crate::forks::epf::compute_inv_sigma_map(
-            &qf_u8,
-            &sharpness,
-            0.01,
-            xb8,
-            yb8,
-        );
+        let inv_sigma_vec =
+            crate::forks::epf::compute_inv_sigma_map(&qf_u8, &sharpness, 0.01, xb8, yb8);
         let inv_sigma_h = enc.upload_inv_sigma(&inv_sigma_vec);
         let xsize_blocks = self.padded_width / 8;
         let ysize_blocks = self.padded_height / 8;
@@ -2289,8 +2502,7 @@ impl<R: Runtime> LossyEncoder<R> {
             crate::forks::epf::EPF_BORDER_SAD_MUL,
         );
 
-        let (rgb_r, rgb_g, rgb_b) =
-            enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
+        let (rgb_r, rgb_g, rgb_b) = enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
         mark("postpass_gab_epf_xyb");
         // GPU-resident: return the recon planes directly, no download
         // / crop. Wrapper f32 variant downloads + crops if needed.
@@ -2603,8 +2815,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // 1, 255)` and `quant_scale = 0.01`, giving
         // `quant_scale * raw_quant ≈ qac / 2 ≈ qf_float_equivalent`.
         // Sharpness uniform 4 (libjxl default).
-        let nb_blocks = (self.padded_width / 8) as usize
-            * (self.padded_height / 8) as usize;
+        let nb_blocks = (self.padded_width / 8) as usize * (self.padded_height / 8) as usize;
         debug_assert_eq!(qac_vec.len(), nb_blocks);
         let qf_u8: Vec<u8> = qac_vec
             .iter()
@@ -2660,8 +2871,7 @@ impl<R: Runtime> LossyEncoder<R> {
             crate::forks::epf::EPF_BORDER_SAD_MUL,
         );
 
-        let (rgb_r, rgb_g, rgb_b) =
-            enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
+        let (rgb_r, rgb_g, rgb_b) = enc.xyb_to_linear_rgb_planar_persistent(&s2_x, &s2_y, &s2_b);
         // Batched 3-channel D2H read — one client.read with one
         // queue-drain sync instead of three sequential read_one calls
         // (matches the same swap done for the strat-search path's
@@ -2966,7 +3176,11 @@ mod tests {
         let n = (w * h) as usize;
         let to_lin = |c: u8| {
             let f = c as f32 / 255.0;
-            if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+            if f <= 0.04045 {
+                f / 12.92
+            } else {
+                ((f + 0.055) / 1.055).powf(2.4)
+            }
         };
         let mut r = Vec::with_capacity(n);
         let mut g = Vec::with_capacity(n);
@@ -3068,7 +3282,7 @@ mod tests {
     #[test]
     fn test_dct_scale_convention_diag() {
         use crate::forks::transform::{
-            apply_dct_batch_gpu, RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16,
+            RAW_STRATEGY_DCT, RAW_STRATEGY_DCT16X16, apply_dct_batch_gpu,
         };
         type B = cubecl::cuda::CudaRuntime;
         let enc: GpuEncoder<B> = GpuEncoder::new();
@@ -3082,9 +3296,18 @@ mod tests {
         let dct16_coeffs =
             apply_dct_batch_gpu(&enc, &plane, stride, &[(0, 0)], RAW_STRATEGY_DCT16X16);
 
-        std::println!("[scale-diag] DCT8  coeffs[0..4]  = {:?}", &dct8_coeffs[0..4]);
-        std::println!("[scale-diag] DCT16 coeffs[0..4]  = {:?}", &dct16_coeffs[0..4]);
-        std::println!("[scale-diag] DCT16 coeffs[16..18]= {:?}", &dct16_coeffs[16..18]);
+        std::println!(
+            "[scale-diag] DCT8  coeffs[0..4]  = {:?}",
+            &dct8_coeffs[0..4]
+        );
+        std::println!(
+            "[scale-diag] DCT16 coeffs[0..4]  = {:?}",
+            &dct16_coeffs[0..4]
+        );
+        std::println!(
+            "[scale-diag] DCT16 coeffs[16..18]= {:?}",
+            &dct16_coeffs[16..18]
+        );
         // Predict:
         // - if orthonormal: DCT8 [0] = sum/8 = 3.2, DCT16 [0] = sum/16 = 6.4
         // - if mean-scaled: DCT8 [0] = 0.4, DCT16 [0] = 0.4
@@ -3105,7 +3328,10 @@ mod tests {
         let dc11 = (b00 - b01) - (b10 - b11);
         std::println!(
             "[scale-diag] dc_from_dct_16x16 -> [{:.4}, {:.4}, {:.4}, {:.4}]",
-            dc00, dc01, dc10, dc11
+            dc00,
+            dc01,
+            dc10,
+            dc11
         );
     }
 
@@ -3128,9 +3354,15 @@ mod tests {
         let h = 64_u32;
         let lossy = LossyEncoder::new(&enc, w, h);
         let n = (w * h) as usize;
-        let r: Vec<f32> = (0..n).map(|i| 0.30 + 0.20 * (i as f32 / n as f32)).collect();
-        let g: Vec<f32> = (0..n).map(|i| 0.40 + 0.15 * (i as f32 / n as f32)).collect();
-        let b: Vec<f32> = (0..n).map(|i| 0.20 + 0.10 * (i as f32 / n as f32)).collect();
+        let r: Vec<f32> = (0..n)
+            .map(|i| 0.30 + 0.20 * (i as f32 / n as f32))
+            .collect();
+        let g: Vec<f32> = (0..n)
+            .map(|i| 0.40 + 0.15 * (i as f32 / n as f32))
+            .collect();
+        let b: Vec<f32> = (0..n)
+            .map(|i| 0.20 + 0.10 * (i as f32 / n as f32))
+            .collect();
 
         let qac = distance_to_qac(1.0);
         let (e1_r, e1_g, e1_b) = lossy.encode_one(&enc, &r, &g, &b, qac);
@@ -3158,11 +3390,19 @@ mod tests {
         }
         std::println!(
             "[strat-diag] encode_one     R={:.6} G={:.6} B={:.6}  G range=[{:.4},{:.4}]",
-            rmse(&r, &e1_r), rmse(&g, &e1_g), rmse(&b, &e1_b), min1, max1
+            rmse(&r, &e1_r),
+            rmse(&g, &e1_g),
+            rmse(&b, &e1_b),
+            min1,
+            max1
         );
         std::println!(
             "[strat-diag] strat-search   R={:.6} G={:.6} B={:.6}  G range=[{:.4},{:.4}]",
-            rmse(&r, &es_r), rmse(&g, &es_g), rmse(&b, &es_b), mins, maxs
+            rmse(&r, &es_r),
+            rmse(&g, &es_g),
+            rmse(&b, &es_b),
+            mins,
+            maxs
         );
         std::println!(
             "[strat-diag] G original range=[{:.4},{:.4}], first 8 px input/e1/es:",
@@ -3170,7 +3410,12 @@ mod tests {
             g.iter().copied().fold(f32::NEG_INFINITY, f32::max),
         );
         for i in 0..8 {
-            std::println!("  [{i}] input={:.4} e1={:.4} es={:.4}", g[i], e1_g[i], es_g[i]);
+            std::println!(
+                "  [{i}] input={:.4} e1={:.4} es={:.4}",
+                g[i],
+                e1_g[i],
+                es_g[i]
+            );
         }
     }
 
@@ -3254,7 +3499,9 @@ mod tests {
         assert!(
             agreement >= 0.95,
             "u8 path dominant-strategy agreement too low: {:.3} (h_f32={:?}, h_u8={:?})",
-            agreement, h_f32, h_u8,
+            agreement,
+            h_f32,
+            h_u8,
         );
     }
 
@@ -3296,9 +3543,15 @@ mod tests {
         let h = 64_u32;
         let lossy = LossyEncoder::new(&enc, w, h);
         let n = (w * h) as usize;
-        let r: Vec<f32> = (0..n).map(|i| 0.30 + 0.20 * (i as f32 / n as f32)).collect();
-        let g: Vec<f32> = (0..n).map(|i| 0.40 + 0.15 * (i as f32 / n as f32)).collect();
-        let b: Vec<f32> = (0..n).map(|i| 0.20 + 0.10 * (i as f32 / n as f32)).collect();
+        let r: Vec<f32> = (0..n)
+            .map(|i| 0.30 + 0.20 * (i as f32 / n as f32))
+            .collect();
+        let g: Vec<f32> = (0..n)
+            .map(|i| 0.40 + 0.15 * (i as f32 / n as f32))
+            .collect();
+        let b: Vec<f32> = (0..n)
+            .map(|i| 0.20 + 0.10 * (i as f32 / n as f32))
+            .collect();
 
         for &distance in &[0.5_f32, 1.0, 2.0] {
             let (s_r, s_g, s_b) =

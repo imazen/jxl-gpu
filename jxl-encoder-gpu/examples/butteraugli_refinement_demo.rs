@@ -80,7 +80,10 @@ fn main() {
     println!("Image:         {image_path}");
     println!("Size:          {w}x{h} (padded {pw}x{ph}, {nb} blocks)");
     println!("Distance:      {distance:.2}");
-    println!("Iters:         {iters} (loop runs {} iterations total)\n", iters + 1);
+    println!(
+        "Iters:         {iters} (loop runs {} iterations total)\n",
+        iters + 1
+    );
 
     // Helper: encode → linear sRGB U8 → butteraugli score against
     // ORIGINAL pixel bytes. Returns (score, pnorm_3).
@@ -89,13 +92,8 @@ fn main() {
                          rec_g: &[f32],
                          rec_b: &[f32]|
      -> (f32, f32) {
-        let recon_srgb = linear_planar_to_srgb_u8_interleaved(
-            rec_r,
-            rec_g,
-            rec_b,
-            w as usize,
-            h as usize,
-        );
+        let recon_srgb =
+            linear_planar_to_srgb_u8_interleaved(rec_r, rec_g, rec_b, w as usize, h as usize);
         let result = bg
             .compute_with_reference(&recon_srgb)
             .expect("compute_with_reference");
@@ -121,8 +119,7 @@ fn main() {
     let qac_min = initial_aq.iter().copied().fold(f32::INFINITY, f32::min);
     let qac_max = initial_aq.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let qac_mean = initial_aq.iter().copied().sum::<f32>() / nb as f32;
-    let (rec_r_aq, rec_g_aq, rec_b_aq) =
-        lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
+    let (rec_r_aq, rec_g_aq, rec_b_aq) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
     let (score_aq, pn3_aq) = measure_score(&mut bg, &rec_r_aq, &rec_g_aq, &rec_b_aq);
     println!(
         "  initial AQ:     score={score_aq:.4}  pnorm_3={pn3_aq:.4}  (qac min={qac_min:.3} max={qac_max:.3} mean={qac_mean:.3})"
@@ -133,8 +130,7 @@ fn main() {
     let narrow_aq = block_means_to_qac_field_with_range(&block_means, distance, 1.4);
     let q_n_min = narrow_aq.iter().copied().fold(f32::INFINITY, f32::min);
     let q_n_max = narrow_aq.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let (rec_r_n, rec_g_n, rec_b_n) =
-        lossy.encode_one_adaptive(&enc, &r, &g, &b, &narrow_aq);
+    let (rec_r_n, rec_g_n, rec_b_n) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &narrow_aq);
     let (score_n, pn3_n) = measure_score(&mut bg, &rec_r_n, &rec_g_n, &rec_b_n);
     println!(
         "  narrow AQ R=1.4: score={score_n:.4}  pnorm_3={pn3_n:.4}  (qac min={q_n_min:.3} max={q_n_max:.3})"
@@ -146,15 +142,26 @@ fn main() {
     let mut stages: Vec<(&'static str, std::time::Instant)> = Vec::new();
     let t_strat0 = std::time::Instant::now();
     let _ = lossy.encode_one_with_strategy_search_dct8_16_traced(
-        &enc, &r, &g, &b, distance, &mut |_| {},
+        &enc,
+        &r,
+        &g,
+        &b,
+        distance,
+        &mut |_| {},
     );
     let dt_strat0 = t_strat0.elapsed();
 
     let t_strat = std::time::Instant::now();
-    let (rec_r_s, rec_g_s, rec_b_s) = lossy
-        .encode_one_with_strategy_search_dct8_16_traced(&enc, &r, &g, &b, distance, &mut |label| {
+    let (rec_r_s, rec_g_s, rec_b_s) = lossy.encode_one_with_strategy_search_dct8_16_traced(
+        &enc,
+        &r,
+        &g,
+        &b,
+        distance,
+        &mut |label| {
             stages.push((label, std::time::Instant::now()));
-        });
+        },
+    );
     let dt_strat = t_strat.elapsed();
     let (score_strat, pn3_strat) = measure_score(&mut bg, &rec_r_s, &rec_g_s, &rec_b_s);
     println!(
@@ -196,10 +203,17 @@ fn main() {
     let dt = t0.elapsed();
 
     println!("Per-iteration butteraugli scores:");
-    println!("  {:>4}  {:>9}  {:>9}  {:>9}", "iter", "score", "pnorm_3", "td_max");
+    println!(
+        "  {:>4}  {:>9}  {:>9}  {:>9}",
+        "iter", "score", "pnorm_3", "td_max"
+    );
     for t in &traces {
         let td_max = t.tile_dist.iter().copied().fold(0.0_f32, f32::max);
-        let suffix = if t.iter == t.iters { "  (compare-only, no adjust)" } else { "" };
+        let suffix = if t.iter == t.iters {
+            "  (compare-only, no adjust)"
+        } else {
+            ""
+        };
         println!(
             "  {:>4}  {:>9.4}  {:>9.4}  {:>9.4}{}",
             t.iter, t.score, t.pnorm_3, td_max, suffix
@@ -222,9 +236,7 @@ fn main() {
         .sum::<f64>()
         / nb as f64;
 
-    println!(
-        "\nRefined aq_field: min={qac_min_r:.3} max={qac_max_r:.3} mean={qac_mean_r:.3}"
-    );
+    println!("\nRefined aq_field: min={qac_min_r:.3} max={qac_max_r:.3} mean={qac_mean_r:.3}");
     println!("Mean |refined - initial|: {qac_drift:.4}");
     println!(
         "\nScore delta:    {score_delta:+.4}  (negative = better, target_distance={distance})"

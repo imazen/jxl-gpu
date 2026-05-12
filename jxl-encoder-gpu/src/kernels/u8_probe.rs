@@ -57,7 +57,11 @@ mod tests {
         assert_eq!(out_floats.len(), n);
         for i in 0..n {
             let expected = input[i] as f32;
-            assert_eq!(out_floats[i], expected, "idx {i}: expected {expected}, got {}", out_floats[i]);
+            assert_eq!(
+                out_floats[i], expected,
+                "idx {i}: expected {expected}, got {}",
+                out_floats[i]
+            );
         }
     }
 }

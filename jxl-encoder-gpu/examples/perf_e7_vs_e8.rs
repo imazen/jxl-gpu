@@ -123,8 +123,8 @@ fn main() {
 
     let enc: GpuEncoder<B> = GpuEncoder::new();
     let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, w, h);
-    let nb8 = (lossy.padded_dimensions().0 as usize / 8)
-        * (lossy.padded_dimensions().1 as usize / 8);
+    let nb8 =
+        (lossy.padded_dimensions().0 as usize / 8) * (lossy.padded_dimensions().1 as usize / 8);
     let initial_aq = vec![distance_to_qac(distance); nb8];
 
     // ── warmup both paths ────────────────────────────────────────
@@ -185,7 +185,17 @@ fn main() {
     // re-upload boundary by feeding GpuPlanes straight to
     // butteraugli-gpu's `compute_with_reference_from_linear_planes`.
     let _ = refine_aq_field_gpu_with_strategy_search_persistent(
-        &enc, &lossy, &mut bg, &r, &g, &b, &pixels_u8, &initial_aq, distance, iters_e8, |_| {},
+        &enc,
+        &lossy,
+        &mut bg,
+        &r,
+        &g,
+        &b,
+        &pixels_u8,
+        &initial_aq,
+        distance,
+        iters_e8,
+        |_| {},
     )
     .expect("refine persistent warmup");
     let mut e8p_times: Vec<f64> = Vec::with_capacity(runs);

@@ -74,20 +74,18 @@ fn main() {
     println!("Image:    {image_path}");
     println!("Size:     {w}x{h} (padded {pw}x{ph}, {nb} blocks)");
     println!("Distance: {distance:.2}");
-    println!("Iters:    {iters} (loop runs {} iterations total)\n", iters + 1);
+    println!(
+        "Iters:    {iters} (loop runs {} iterations total)\n",
+        iters + 1
+    );
 
     let measure_score = |bg: &mut ButteraugliLoopGpu<Backend>,
                          rec_r: &[f32],
                          rec_g: &[f32],
                          rec_b: &[f32]|
      -> (f32, f32) {
-        let recon_srgb = linear_planar_to_srgb_u8_interleaved(
-            rec_r,
-            rec_g,
-            rec_b,
-            w as usize,
-            h as usize,
-        );
+        let recon_srgb =
+            linear_planar_to_srgb_u8_interleaved(rec_r, rec_g, rec_b, w as usize, h as usize);
         let result = bg
             .compute_with_reference(&recon_srgb)
             .expect("compute_with_reference");
@@ -106,8 +104,7 @@ fn main() {
 
     // Pipeline 2: strat-search alone.
     // Warm up first (JIT + persistent buffers).
-    let _ =
-        lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, distance);
+    let _ = lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, distance);
     let t = std::time::Instant::now();
     let (rec_r_s, rec_g_s, rec_b_s) =
         lossy.encode_one_with_strategy_search_dct8_16(&enc, &r, &g, &b, distance);
@@ -116,8 +113,7 @@ fn main() {
 
     // Strategy histogram: prepare a plan and count assignments by raw_strategy.
     let plan = lossy.prepare_strategy_search_plan(&enc, &r, &g, &b, distance);
-    let mut histo: std::collections::BTreeMap<u8, usize> =
-        std::collections::BTreeMap::new();
+    let mut histo: std::collections::BTreeMap<u8, usize> = std::collections::BTreeMap::new();
     for a in &plan.assignments {
         *histo.entry(a.raw_strategy).or_insert(0) += 1;
     }
@@ -156,7 +152,10 @@ fn main() {
             100.0 * (*n as f32) / (n_assignments as f32)
         ));
     }
-    println!("=== Strat-search assignments ({} regions): ===", n_assignments);
+    println!(
+        "=== Strat-search assignments ({} regions): ===",
+        n_assignments
+    );
     println!("  {histo_str}\n");
 
     // Initial AQ field for the refinement loop.
@@ -268,9 +267,7 @@ fn main() {
         pct(score_refine_ss, score_un)
     );
     let cost_overhead = dt_refine_ss.as_secs_f64() / dt_refine_un.as_secs_f64();
-    println!(
-        "  combined-mode encode cost:    {cost_overhead:.2}× refine+DCT8 cost"
-    );
+    println!("  combined-mode encode cost:    {cost_overhead:.2}× refine+DCT8 cost");
 
     // Pipeline 5: best-of-both (uncompromising-quality wrapper).
     // Runs both pipelines, picks the lower-butteraugli winner.
@@ -298,9 +295,7 @@ fn main() {
         bob_scores.dct8_pnorm_3,
         bob_scores.strat_search_pnorm_3,
     );
-    let bob_score = bob_scores
-        .dct8_score
-        .min(bob_scores.strat_search_score);
+    let bob_score = bob_scores.dct8_score.min(bob_scores.strat_search_score);
     println!(
         "  winning score: {bob_score:.4}  ({:.0} ms total, {:.2}× refine+DCT8)",
         dt_bob.as_secs_f64() * 1000.0,
@@ -338,9 +333,7 @@ fn main() {
         smart_scores.dct8_score.min(smart_scores.strat_search_score)
     };
     println!("\n=== Smart pipeline (content-discriminator gate) ===");
-    println!(
-        "  content_looks_like_screenshot = {is_screenshot}  →  picked {smart_path:?}"
-    );
+    println!("  content_looks_like_screenshot = {is_screenshot}  →  picked {smart_path:?}");
     println!(
         "  winning score: {smart_score:.4}  ({:.0} ms total, {:.2}× refine+DCT8)",
         dt_smart.as_secs_f64() * 1000.0,

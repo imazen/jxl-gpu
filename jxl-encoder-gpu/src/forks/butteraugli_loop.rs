@@ -613,10 +613,7 @@ pub fn refine_quant_field_one_iter(
     cfg: &RefineConfig<'_>,
 ) -> Vec<f32> {
     debug_assert_eq!(quant_field_float.len(), initial_quant_field_float.len());
-    debug_assert_eq!(
-        quant_field_float.len(),
-        cfg.xsize_blocks * cfg.ysize_blocks
-    );
+    debug_assert_eq!(quant_field_float.len(), cfg.xsize_blocks * cfg.ysize_blocks);
     debug_assert_eq!(diffmap.len(), cfg.width * cfg.height);
 
     let tile_dist = compute_tile_distances(
@@ -1191,8 +1188,7 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
         (pw as usize / 8, ph as usize / 8)
     };
     let bounds = DeviationBounds::compute(initial_aq_field);
-    let (is_first_storage, cx_storage, cy_storage) =
-        dct8_only_storage(xsize_blocks * ysize_blocks);
+    let (is_first_storage, cx_storage, cy_storage) = dct8_only_storage(xsize_blocks * ysize_blocks);
     let cfg = RefineConfig {
         width: width as usize,
         height: height as usize,
@@ -1351,8 +1347,7 @@ pub fn refine_aq_field_gpu_with_strategy_search_smart_with_threshold<R: Runtime>
     let qac_uniform = distance_to_qac(target_distance);
     let nb = initial_aq_field.len();
     let uniform_aq = alloc::vec![qac_uniform; nb];
-    let (rec_r, rec_g, rec_b) =
-        lossy.encode_with_strategy_plan_adaptive(enc, &plan, &uniform_aq);
+    let (rec_r, rec_g, rec_b) = lossy.encode_with_strategy_plan_adaptive(enc, &plan, &uniform_aq);
     let recon_srgb = linear_planar_to_srgb_u8_interleaved(
         &rec_r,
         &rec_g,
@@ -1481,7 +1476,13 @@ pub fn refine_and_encode_best_of_both<R: Runtime>(
     initial_aq_field: &[f32],
     target_distance: f32,
     iters: usize,
-) -> butteraugli_gpu::Result<(Vec<f32>, Vec<f32>, Vec<f32>, BestOfBothPath, BestOfBothScores)> {
+) -> butteraugli_gpu::Result<(
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+    BestOfBothPath,
+    BestOfBothScores,
+)> {
     let (width, height) = lossy.dimensions();
     let n_pixels = (width as usize) * (height as usize);
 
@@ -1608,7 +1609,13 @@ pub fn refine_and_encode_smart<R: Runtime>(
     initial_aq_field: &[f32],
     target_distance: f32,
     iters: usize,
-) -> butteraugli_gpu::Result<(Vec<f32>, Vec<f32>, Vec<f32>, BestOfBothPath, BestOfBothScores)> {
+) -> butteraugli_gpu::Result<(
+    Vec<f32>,
+    Vec<f32>,
+    Vec<f32>,
+    BestOfBothPath,
+    BestOfBothScores,
+)> {
     if lossy.content_looks_like_screenshot(enc, r, g, b) {
         // Strat-search is unsafe on this content. Pick the best of
         // {uniform DCT8, refine+DCT8} — both pipelines independently
@@ -1732,9 +1739,7 @@ pub fn refine_and_encode_smart<R: Runtime>(
     // logically "uniform if un_result.score < bob_winner_score, else
     // best-of-both winner". We preserve the bob path for telemetry
     // when uniform doesn't win.
-    let bob_score = bob_scores
-        .dct8_score
-        .min(bob_scores.strat_search_score);
+    let bob_score = bob_scores.dct8_score.min(bob_scores.strat_search_score);
     if un_result.score < bob_score {
         // Uniform wins. Update scores so pnorm_3 reflects the winner.
         let scores = BestOfBothScores {
@@ -1949,7 +1954,10 @@ mod tests {
                     continue;
                 }
                 let bi = iy * 8 + ix;
-                assert!(!is_first[bi], "footprint cell ({ix},{iy}) should be is_first=false");
+                assert!(
+                    !is_first[bi],
+                    "footprint cell ({ix},{iy}) should be is_first=false"
+                );
             }
         }
     }
@@ -2387,8 +2395,18 @@ mod tests {
         let initial = lossy.compute_aq_field(&enc, &r, &g, &b, 4.0);
 
         let outcome = refine_aq_field_gpu_smart_with_threshold(
-            &enc, &lossy, &mut bg, &r, &g, &b, &ref_srgb, &initial, 4.0, 2,
-            f32::INFINITY, |_| (),
+            &enc,
+            &lossy,
+            &mut bg,
+            &r,
+            &g,
+            &b,
+            &ref_srgb,
+            &initial,
+            4.0,
+            2,
+            f32::INFINITY,
+            |_| (),
         )
         .expect("smart");
 
@@ -2418,8 +2436,18 @@ mod tests {
         let initial = lossy.compute_aq_field(&enc, &r, &g, &b, 1.0);
 
         let outcome = refine_aq_field_gpu_smart_with_threshold(
-            &enc, &lossy, &mut bg, &r, &g, &b, &ref_srgb, &initial, 1.0, 2,
-            0.0, |_| (),
+            &enc,
+            &lossy,
+            &mut bg,
+            &r,
+            &g,
+            &b,
+            &ref_srgb,
+            &initial,
+            1.0,
+            2,
+            0.0,
+            |_| (),
         )
         .expect("smart");
 
@@ -2450,7 +2478,17 @@ mod tests {
         let initial = lossy.compute_aq_field(&enc, &r, &g, &b, 4.0);
 
         let outcome = refine_aq_field_gpu_smart(
-            &enc, &lossy, &mut bg, &r, &g, &b, &ref_srgb, &initial, 4.0, 2, |_| (),
+            &enc,
+            &lossy,
+            &mut bg,
+            &r,
+            &g,
+            &b,
+            &ref_srgb,
+            &initial,
+            4.0,
+            2,
+            |_| (),
         )
         .expect("smart");
 
@@ -2483,7 +2521,17 @@ mod tests {
         let initial = lossy.compute_aq_field(&enc, &r, &g, &b, 1.0);
 
         let outcome = refine_aq_field_gpu_smart(
-            &enc, &lossy, &mut bg, &r, &g, &b, &ref_srgb, &initial, 1.0, 2, |_| (),
+            &enc,
+            &lossy,
+            &mut bg,
+            &r,
+            &g,
+            &b,
+            &ref_srgb,
+            &initial,
+            1.0,
+            2,
+            |_| (),
         )
         .expect("smart");
 

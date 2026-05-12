@@ -146,13 +146,8 @@ fn main() {
                        rec_g: &[f32],
                        rec_b: &[f32]|
          -> f32 {
-            let recon_srgb = linear_planar_to_srgb_u8_interleaved(
-                rec_r,
-                rec_g,
-                rec_b,
-                w as usize,
-                h as usize,
-            );
+            let recon_srgb =
+                linear_planar_to_srgb_u8_interleaved(rec_r, rec_g, rec_b, w as usize, h as usize);
             bg.compute_with_reference(&recon_srgb)
                 .expect("compute_with_reference")
                 .score
@@ -173,8 +168,7 @@ fn main() {
             let s_un = measure(&mut bg, &rr_un, &gg_un, &bb_un);
 
             let initial_aq = lossy.compute_aq_field(&enc, &r, &g, &b, d);
-            let (rr_aq, gg_aq, bb_aq) =
-                lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
+            let (rr_aq, gg_aq, bb_aq) = lossy.encode_one_adaptive(&enc, &r, &g, &b, &initial_aq);
             let s_aq = measure(&mut bg, &rr_aq, &gg_aq, &bb_aq);
 
             let refined = refine_aq_field_gpu(
@@ -228,8 +222,7 @@ fn main() {
             let src_rgb3 = to_rgb3(&pixels);
             let src_img = imgref::ImgVec::new(src_rgb3, w as usize, h as usize);
             let make_dst = |rr: &[f32], gg: &[f32], bb: &[f32]| {
-                let srgb =
-                    linear_planar_to_srgb_u8_interleaved(rr, gg, bb, w as usize, h as usize);
+                let srgb = linear_planar_to_srgb_u8_interleaved(rr, gg, bb, w as usize, h as usize);
                 imgref::ImgVec::new(to_rgb3(&srgb), w as usize, h as usize)
             };
             let dst_un = make_dst(&rr_un, &gg_un, &bb_un);
@@ -309,10 +302,20 @@ fn main() {
     }
 
     let nf = paths.len() as f64;
-    println!("\n=== Aggregate (n={}, lower butteraugli = better) ===", paths.len());
+    println!(
+        "\n=== Aggregate (n={}, lower butteraugli = better) ===",
+        paths.len()
+    );
     println!(
         "  {:>5}  {:>9}  {:>9}  {:>9}  {:>9}  {:>5}/{:>5}  {:>5}  {}",
-        "dist", "uniform µ", "AQ µ", "refined µ", "smart µ", "rf>un", "rf<un", "rf<AQ",
+        "dist",
+        "uniform µ",
+        "AQ µ",
+        "refined µ",
+        "smart µ",
+        "rf>un",
+        "rf<un",
+        "rf<AQ",
         "smart paths [DistGate / AQ→un / Refined]"
     );
     for (di, d) in distances.iter().enumerate() {

@@ -41,14 +41,14 @@ use cubecl::prelude::*;
 /// `out` is one f32 per block.
 #[cube(launch_unchecked)]
 pub fn sse_reduce_3channel_kernel(
-    orig_x: &Array<f32>,    // n_blocks * 64
-    orig_y: &Array<f32>,    // n_blocks * 64
-    orig_b: &Array<f32>,    // n_blocks * 64
-    recon_x: &Array<f32>,   // n_blocks * 64
-    recon_y: &Array<f32>,   // n_blocks * 64
-    recon_b: &Array<f32>,   // n_blocks * 64
-    mask: &Array<f32>,      // n_blocks * 64
-    out: &mut Array<f32>,   // n_blocks
+    orig_x: &Array<f32>,  // n_blocks * 64
+    orig_y: &Array<f32>,  // n_blocks * 64
+    orig_b: &Array<f32>,  // n_blocks * 64
+    recon_x: &Array<f32>, // n_blocks * 64
+    recon_y: &Array<f32>, // n_blocks * 64
+    recon_b: &Array<f32>, // n_blocks * 64
+    mask: &Array<f32>,    // n_blocks * 64
+    out: &mut Array<f32>, // n_blocks
 ) {
     let b = ABSOLUTE_POS;
     let n_blocks = out.len();

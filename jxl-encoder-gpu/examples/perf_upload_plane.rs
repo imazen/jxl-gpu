@@ -19,8 +19,8 @@ fn main() {
 
 #[cfg(all(feature = "cuda", feature = "encoder"))]
 fn main() {
-    use std::time::Instant;
     use jxl_encoder_gpu::encoder::GpuEncoder;
+    use std::time::Instant;
 
     type B = cubecl::cuda::CudaRuntime;
     let enc: GpuEncoder<B> = GpuEncoder::new();
@@ -60,9 +60,17 @@ fn main() {
 
     println!();
     println!("Summary (50 iters, 4 MB each):");
-    println!("  min     = {:5.2} ms ({:.1} MB/s)", min, 4.0 / (min / 1000.0));
+    println!(
+        "  min     = {:5.2} ms ({:.1} MB/s)",
+        min,
+        4.0 / (min / 1000.0)
+    );
     println!("  p25     = {:5.2} ms", p25);
-    println!("  median  = {:5.2} ms ({:.1} MB/s)", median, 4.0 / (median / 1000.0));
+    println!(
+        "  median  = {:5.2} ms ({:.1} MB/s)",
+        median,
+        4.0 / (median / 1000.0)
+    );
     println!("  p75     = {:5.2} ms", p75);
     println!("  max     = {:5.2} ms", max);
     println!("  mean    = {:5.2} ms", mean);
