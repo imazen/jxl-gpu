@@ -1894,6 +1894,7 @@ dependencies = [
  "jxl",
  "jxl-encoder",
  "jxl-encoder-simd",
+ "rayon",
 ]
 
 [[package]]

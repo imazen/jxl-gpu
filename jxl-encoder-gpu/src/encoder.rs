@@ -1804,10 +1804,10 @@ impl<R: Runtime> GpuEncoder<R> {
         // both the host conversion and the 4× upload bandwidth.
         let plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
 
-        // Step 2: download xyb planes (GPU-padded layout).
-        let xyb_x_gpu = self.download_plane(&plan.xyb_x_gpu);
-        let xyb_y_gpu = self.download_plane(&plan.xyb_y_gpu);
-        let xyb_b_gpu = self.download_plane(&plan.xyb_b_gpu);
+        // Step 2: download xyb planes (GPU-padded layout) in one
+        // batched read. Saves ~25 ms at 12 MP vs 3 sequential reads.
+        let (xyb_x_gpu, xyb_y_gpu, xyb_b_gpu) =
+            self.download_planes_3ch(&plan.xyb_x_gpu, &plan.xyb_y_gpu, &plan.xyb_b_gpu);
 
         // Step 2b: re-pack from GPU's 16-aligned (gpu_pw × gpu_ph) to
         // CPU's 8-aligned (cpu_pw × cpu_ph). When dims agree
@@ -1872,9 +1872,11 @@ impl<R: Runtime> GpuEncoder<R> {
                 dst
             }
         };
-        let xyb_x = repack(&xyb_x_gpu);
-        let xyb_y = repack(&xyb_y_gpu);
-        let xyb_b = repack(&xyb_b_gpu);
+        // 3-way rayon::join — saves ~50 ms at 12 MP vs sequential.
+        let ((xyb_x, xyb_y), xyb_b) = rayon::join(
+            || rayon::join(|| repack(&xyb_x_gpu), || repack(&xyb_y_gpu)),
+            || repack(&xyb_b_gpu),
+        );
 
         // Step 3: AcStrategyMap from plan.assignments. The padding
         // mismatch fix above (cpu_pw vs gpu_pw) means xsize_blocks /
@@ -2055,14 +2057,18 @@ impl<R: Runtime> GpuEncoder<R> {
         // `width * height * 3` bytes (no padding, no per-pixel powf).
         let plan = lossy.prepare_strategy_search_plan_from_u8(self, pixels_u8, distance);
 
-        // Step 2: download xyb planes (GPU-padded layout). Same as f32 path.
-        let xyb_x_gpu = self.download_plane(&plan.xyb_x_gpu);
-        let xyb_y_gpu = self.download_plane(&plan.xyb_y_gpu);
-        let xyb_b_gpu = self.download_plane(&plan.xyb_b_gpu);
+        // Step 2: download xyb planes (GPU-padded layout) in one
+        // batched read instead of three sequential round-trips.
+        // Saves ~25 ms at 12 MP by avoiding 2 extra submit+wait pairs.
+        let (xyb_x_gpu, xyb_y_gpu, xyb_b_gpu) =
+            self.download_planes_3ch(&plan.xyb_x_gpu, &plan.xyb_y_gpu, &plan.xyb_b_gpu);
 
         // Step 2b: re-pack from GPU's 16-aligned to CPU's 8-aligned —
         // identical fix-up to the f32 variant (see that fn for the
-        // gaborish-edge-replication rationale).
+        // gaborish-edge-replication rationale). Run all three
+        // channels in parallel (rayon::join × 3 — they're disjoint
+        // dest buffers, fully data-parallel). At 12 MP that's
+        // ~144 MB of host-memory bandwidth in 25 ms instead of 75 ms.
         let repack = |src: &[f32]| -> alloc::vec::Vec<f32> {
             if cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize {
                 src.to_vec()
@@ -2094,9 +2100,11 @@ impl<R: Runtime> GpuEncoder<R> {
                 dst
             }
         };
-        let xyb_x = repack(&xyb_x_gpu);
-        let xyb_y = repack(&xyb_y_gpu);
-        let xyb_b = repack(&xyb_b_gpu);
+        // 3-way rayon::join — saves ~50 ms at 12 MP vs sequential.
+        let ((xyb_x, xyb_y), xyb_b) = rayon::join(
+            || rayon::join(|| repack(&xyb_x_gpu), || repack(&xyb_y_gpu)),
+            || repack(&xyb_b_gpu),
+        );
 
         // Step 3: AcStrategyMap from plan.assignments (clip to CPU grid).
         let mut ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
