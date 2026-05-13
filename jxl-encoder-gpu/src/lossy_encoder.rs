@@ -107,6 +107,27 @@ const K_GABORISH: [f64; 5] = [
     -0.001_478_906_3,
 ];
 
+/// Test-only re-export of [`default_gaborish_weights`]. Production
+/// callers go through `LossyEncoder` which holds a precomputed
+/// `GaborishWeights` instance.
+#[cfg(test)]
+pub(crate) fn default_gaborish_weights_test_helper() -> GaborishWeights {
+    default_gaborish_weights()
+}
+
+/// Test-only re-export of [`pad_to_alignment`]. Lifetime-erased so
+/// the test gets an owned Vec regardless of dimension equality.
+#[cfg(test)]
+pub(crate) fn pad_to_alignment_test_helper(
+    src: &[f32],
+    width: usize,
+    height: usize,
+    padded_width: usize,
+    padded_height: usize,
+) -> alloc::vec::Vec<f32> {
+    pad_to_alignment(src, width, height, padded_width, padded_height).into_owned()
+}
+
 fn default_gaborish_weights() -> GaborishWeights {
     let sum_w = 1.0
         + 4.0

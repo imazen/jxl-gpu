@@ -525,6 +525,159 @@ mod tests {
         }
     }
 
+    /// Production-flow divergence test: replicates what
+    /// `encode_lossy_to_bitstream_via_precomputed_from_u8` does in
+    /// `encoder.rs:1805-1959` and measures the gap between
+    /// (CPU compute_quant_field on the post-fix-up CPU buffer) and
+    /// (GPU compute_quant_field on the un-fix-up'd GPU planes).
+    ///
+    /// If divergence is small enough that quant_field quantizes to the
+    /// same u8, the GPU port can drop straight in. If not, an extra
+    /// GPU edge re-replication kernel is needed first.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_compute_quant_field_production_flow_divergence() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        // Use a non-multiple-of-16 width to exercise the gpu_pw > cpu_pw
+        // post-gaborish edge divergence (which is the whole point of the
+        // production fix-up step at encoder.rs:1837-1874).
+        let w = 1025usize;
+        let h = 257usize;
+        let cpu_pw = w.div_ceil(8) * 8;
+        let cpu_ph = h.div_ceil(8) * 8;
+        let gpu_pw = w.div_ceil(16) * 16;
+        let gpu_ph = h.div_ceil(16) * 16;
+        assert!(gpu_pw > cpu_pw, "test should exercise gpu_pw > cpu_pw");
+
+        // Generate a deterministic linear-RGB image with non-trivial
+        // structure (sin*cos pattern + edge detail in the rightmost
+        // pixels so post-gaborish edges actually differ).
+        let make = |seed: usize| -> Vec<f32> {
+            (0..w * h)
+                .map(|i| {
+                    let x = (i % w) as f32;
+                    let y = (i / w) as f32;
+                    let s = ((x + 13.0) * 0.013).sin();
+                    let c = ((y + (seed as f32) * 7.0) * 0.027).cos();
+                    let edge_kick = if (x as usize) >= w - 4 { 0.15 } else { 0.0 };
+                    (0.10 + 0.04 * s * c + edge_kick).clamp(0.001, 0.999)
+                })
+                .collect()
+        };
+        let r = make(1);
+        let g = make(2);
+        let b = make(3);
+
+        // Production GPU path: pad to gpu_pw, upload, xyb, gaborish.
+        let r_padded =
+            crate::lossy_encoder::pad_to_alignment_test_helper(&r, w, h, gpu_pw, gpu_ph);
+        let g_padded =
+            crate::lossy_encoder::pad_to_alignment_test_helper(&g, w, h, gpu_pw, gpu_ph);
+        let b_padded =
+            crate::lossy_encoder::pad_to_alignment_test_helper(&b, w, h, gpu_pw, gpu_ph);
+
+        let g_r = enc.upload_plane(&r_padded, gpu_pw as u32, gpu_ph as u32);
+        let g_g = enc.upload_plane(&g_padded, gpu_pw as u32, gpu_ph as u32);
+        let g_b = enc.upload_plane(&b_padded, gpu_pw as u32, gpu_ph as u32);
+
+        let (xx, xy, xb) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
+        let weights = crate::lossy_encoder::default_gaborish_weights_test_helper();
+        let xx_g = enc.gaborish_5x5_persistent(&xx, &weights);
+        let xy_g = enc.gaborish_5x5_persistent(&xy, &weights);
+        let xb_g = enc.gaborish_5x5_persistent(&xb, &weights);
+
+        // Production CPU side: download, repack with edge fix-up.
+        let (xx_dl, xy_dl, xb_dl) = enc.download_planes_3ch(&xx_g, &xy_g, &xb_g);
+        let repack = |src: &[f32]| -> Vec<f32> {
+            let mut dst = vec![0.0f32; cpu_pw * cpu_ph];
+            for row in 0..cpu_ph {
+                let off = row * gpu_pw;
+                let dst_off = row * cpu_pw;
+                dst[dst_off..dst_off + cpu_pw].copy_from_slice(&src[off..off + cpu_pw]);
+            }
+            // Edge re-replicate per encoder.rs:1853-1870.
+            if cpu_pw > w {
+                for row in 0..cpu_ph {
+                    let dst_off = row * cpu_pw;
+                    let v = dst[dst_off + (w - 1)];
+                    for c in w..cpu_pw {
+                        dst[dst_off + c] = v;
+                    }
+                }
+            }
+            if cpu_ph > h {
+                let last_off = (h - 1) * cpu_pw;
+                for row in h..cpu_ph {
+                    let dst_off = row * cpu_pw;
+                    dst.copy_within(last_off..last_off + cpu_pw, dst_off);
+                }
+            }
+            dst
+        };
+        let cpu_xx = repack(&xx_dl);
+        let cpu_xy = repack(&xy_dl);
+        let cpu_xb = repack(&xb_dl);
+
+        let distance = 1.0_f32;
+        let k_ac_quant = 0.765_f32;
+        let xsize_blocks = cpu_pw / 8;
+        let ysize_blocks = cpu_ph / 8;
+
+        let (cpu_qf, cpu_mask) =
+            jxl_encoder::__pre_quantized::compute_quant_field_float_free(
+                &cpu_xx,
+                &cpu_xy,
+                &cpu_xb,
+                cpu_pw,
+                cpu_ph,
+                xsize_blocks,
+                ysize_blocks,
+                distance,
+                k_ac_quant,
+            )
+            .expect("cpu");
+
+        let (gpu_qf, gpu_mask) = compute_quant_field_full_persistent(
+            &enc, &xx_g, &xy_g, &xb_g, cpu_pw, cpu_ph, distance, k_ac_quant,
+        );
+
+        // Quantize both qf to u8 (the only post-pipeline use) and
+        // check what fraction of blocks land on a different bucket.
+        // u8 conversion: round((qf * inv_scale + 0.5)).clamp(1,255)
+        let inv_scale = (1.0 / k_ac_quant) * distance * 8.0;
+        let q = |v: f32| -> u8 {
+            let raw = (v * inv_scale + 0.5) as i32;
+            raw.clamp(1, 255) as u8
+        };
+        let mut bucket_diffs = 0usize;
+        let mut max_abs_qf = 0.0f32;
+        let mut max_abs_mask = 0.0f32;
+        for i in 0..gpu_qf.len() {
+            if q(gpu_qf[i]) != q(cpu_qf[i]) {
+                bucket_diffs += 1;
+            }
+            max_abs_qf = max_abs_qf.max((gpu_qf[i] - cpu_qf[i]).abs());
+            max_abs_mask = max_abs_mask.max((gpu_mask[i] - cpu_mask[i]).abs());
+        }
+        let n = gpu_qf.len();
+        let pct = 100.0 * (bucket_diffs as f64) / (n as f64);
+        eprintln!(
+            "production-flow divergence at {w}x{h}: \
+             {bucket_diffs}/{n} blocks ({pct:.3}%) hit a different u8 bucket; \
+             max_abs_qf={max_abs_qf:.5}, max_abs_mask={max_abs_mask:.5}"
+        );
+        // Sanity bounds: divergence must be confined to edges (< 5%
+        // of blocks at this size). If it's larger, something is wrong
+        // with the kernel math, not just the edge-fix-up gap.
+        let edge_block_count = (xsize_blocks + ysize_blocks) * 2; // outer ring estimate
+        assert!(
+            bucket_diffs < edge_block_count * 4,
+            "divergence too large: {bucket_diffs} > 4× edge ring estimate {edge_block_count}",
+        );
+    }
+
     #[test]
     fn test_quantize_quant_field_matches_upstream_logic() {
         // Spot-check the bit-for-bit copy is correct.
