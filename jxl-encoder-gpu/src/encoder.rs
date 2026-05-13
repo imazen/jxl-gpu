@@ -2174,6 +2174,27 @@ impl<R: Runtime> GpuEncoder<R> {
         let vardct = VarDctEncoder::new(distance);
         let params = DistanceParams::compute_for_profile(distance, &vardct.profile);
         let quant_field_u8 = quantize_quant_field(&quant_field_float, params.inv_scale);
+
+        // Conditional GPU pre-quantized AC fast path: if EVERY block
+        // is DCT8 (the simplest strategy, common at high distances /
+        // low-detail content), the GPU producer skips the CPU
+        // transform_and_quantize entirely. Falls back to the CPU
+        // path on any non-DCT8 block.
+        //
+        // The GPU producer is not byte-identical to CPU due to
+        // cubecl-vs-jxl_simd DCT FP precision (~2% of borderline
+        // chroma AC coefs flip by 1 near rounding ties). corpus
+        // regression at 0.5% score tolerance covers this.
+        let all_dct8 = (0..ysize_blocks).all(|by| {
+            (0..xsize_blocks).all(|bx| precomputed.ac_strategy.raw_strategy(bx, by) == 0)
+        });
+        if all_dct8 {
+            return run_gpu_dct8_pre_quantized_path(
+                self, &plan, &precomputed, &vardct, &quant_field_u8,
+                &params, distance, xsize_blocks, ysize_blocks,
+            );
+        }
+
         vardct
             .encode_from_precomputed(&precomputed, &quant_field_u8)
             .map_err(jxl_encoder::api::EncodeError::from)
@@ -2424,6 +2445,107 @@ impl<R: Runtime> Default for GpuEncoder<R> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Conditional GPU pre-quantized AC fast path. Mirrors
+/// `encode_lossy_to_bitstream_via_precomputed_from_u8`'s tail (steps
+/// 7–8) but produces the per-channel `quant_dc/quant_ac/nzeros/raw_nzeros`
+/// on GPU and feeds them to `encode_from_pre_quantized_ac` instead of
+/// re-running CPU `transform_and_quantize`.
+///
+/// Caller has already verified every block uses DCT8.
+#[allow(clippy::too_many_arguments)]
+fn run_gpu_dct8_pre_quantized_path<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    plan: &crate::lossy_encoder::StrategySearchPlan<R>,
+    precomputed: &jxl_encoder::__pre_quantized::EncoderPrecomputed,
+    vardct: &jxl_encoder::__pre_quantized::VarDctEncoder,
+    quant_field_u8: &[u8],
+    params: &jxl_encoder::__pre_quantized::DistanceParams,
+    distance: f32,
+    xsize_blocks: usize,
+    ysize_blocks: usize,
+) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
+    use crate::forks::pre_quantized_ac::{
+        PreQuantizedDct8Params, compute_pre_quantized_ac_dct8_persistent,
+        reshape_to_transform_output,
+    };
+    let _ = distance;
+    let n_blocks = xsize_blocks * ysize_blocks;
+    let cfl_map = &precomputed.cfl_map;
+
+    // Expand per-tile cfl_map to per-block factors. CfL tile = 64 px
+    // = 8 blocks per side.
+    const K_INV_COLOR_FACTOR: f32 = 1.0 / 84.0;
+    let mut x_factor_per_block = alloc::vec![0.0f32; n_blocks];
+    let mut b_factor_per_block = alloc::vec![0.0f32; n_blocks];
+    for by in 0..ysize_blocks {
+        for bx in 0..xsize_blocks {
+            let tx = bx / 8;
+            let ty = by / 8;
+            let i = by * xsize_blocks + bx;
+            x_factor_per_block[i] = (cfl_map.ytox_at(tx, ty) as f32) * K_INV_COLOR_FACTOR;
+            b_factor_per_block[i] = 1.0 + (cfl_map.ytob_at(tx, ty) as f32) * K_INV_COLOR_FACTOR;
+        }
+    }
+    let x_qm_mul = (1.25_f32).powf(params.x_qm_scale as f32 - 2.0);
+    let b_qm_mul = (1.25_f32).powf(params.b_qm_scale as f32 - 2.0);
+    let qac_per_block: alloc::vec::Vec<f32> =
+        quant_field_u8.iter().map(|&q| params.scale * q as f32).collect();
+    let qac_qm_x: alloc::vec::Vec<f32> =
+        qac_per_block.iter().map(|&q| q * x_qm_mul).collect();
+    let qac_qm_y: alloc::vec::Vec<f32> = qac_per_block.clone();
+    let qac_qm_b: alloc::vec::Vec<f32> =
+        qac_per_block.iter().map(|&q| q * b_qm_mul).collect();
+
+    fn arr64(s: &[f32]) -> [f32; 64] {
+        let mut a = [0.0_f32; 64];
+        a.copy_from_slice(s);
+        a
+    }
+    let dct8_weights_x = arr64(jxl_encoder::__pre_quantized::quant_weights_dct8(0));
+    let dct8_weights_y = arr64(jxl_encoder::__pre_quantized::quant_weights_dct8(1));
+    let dct8_weights_b = arr64(jxl_encoder::__pre_quantized::quant_weights_dct8(2));
+
+    let pq_params = PreQuantizedDct8Params {
+        qac_per_block,
+        x_factor_per_block,
+        b_factor_per_block,
+        qac_qm_x,
+        qac_qm_y,
+        qac_qm_b,
+        inv_dc_factor_x: jxl_encoder::__pre_quantized::INV_DC_QUANT[0] * params.scale_dc,
+        inv_dc_factor_y: jxl_encoder::__pre_quantized::INV_DC_QUANT[1] * params.scale_dc,
+        inv_dc_factor_b: jxl_encoder::__pre_quantized::INV_DC_QUANT[2] * params.scale_dc,
+        thresholds_x: jxl_encoder::__pre_quantized::default_thresholds_dct8(0),
+        thresholds_y: jxl_encoder::__pre_quantized::default_thresholds_dct8(1),
+        thresholds_b: jxl_encoder::__pre_quantized::default_thresholds_dct8(2),
+    };
+
+    let pq = compute_pre_quantized_ac_dct8_persistent(
+        enc,
+        &plan.xyb_x_gpu,
+        &plan.xyb_y_gpu,
+        &plan.xyb_b_gpu,
+        xsize_blocks,
+        ysize_blocks,
+        &dct8_weights_x,
+        &dct8_weights_y,
+        &dct8_weights_b,
+        &pq_params,
+    );
+    let r = reshape_to_transform_output(pq, xsize_blocks, ysize_blocks);
+
+    vardct
+        .encode_from_pre_quantized_ac(
+            precomputed,
+            quant_field_u8,
+            &r.quant_dc,
+            &r.quant_ac,
+            &r.nzeros,
+            &r.raw_nzeros,
+        )
+        .map_err(jxl_encoder::api::EncodeError::from)
 }
 
 /// Helper for the common "f32 in, same-size f32 out, num_blocks-driven
