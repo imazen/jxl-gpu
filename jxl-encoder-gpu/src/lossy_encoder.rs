@@ -209,6 +209,20 @@ pub struct StrategySearchPlan<R: Runtime> {
     pub dc_grid_b_gpu: GpuBlocks<R>,
     /// Per-region strategy picks from the cost-grid selector.
     pub assignments: Vec<crate::pipeline::StrategyAssignment>,
+    /// CPU-aligned per-block float quant_field — output of
+    /// `compute_quant_field_full_persistent` (the GPU port of
+    /// `jxl_encoder::vardct::adaptive_quant::compute_quant_field_float`).
+    /// Length = `(cpu_pw / 8) * (cpu_ph / 8)`, where
+    /// `cpu_pw = align_up(width, 8)` and `cpu_ph = align_up(height, 8)`.
+    /// Empty if the prepare path skipped the GPU compute_quant_field
+    /// (e.g. dimensions where gpu_pw == cpu_pw is not satisfied — see
+    /// `LossyEncoder::compute_quant_field_full_persistent_dims`).
+    pub quant_field_float: Vec<f32>,
+    /// CPU-aligned per-block masking field — Step 2.5 snapshot of the
+    /// post-fuzzy-erosion / pre-modulation aq_map (matches
+    /// `compute_mask_for_ac_strategy_use` per element). Same length /
+    /// emptiness contract as [`Self::quant_field_float`].
+    pub masking: Vec<f32>,
     /// Target distance used for cost-grid scaling (constant across
     /// refinement iterations).
     pub target_distance: f32,
@@ -2088,6 +2102,33 @@ impl<R: Runtime> LossyEncoder<R> {
             &dct64x32_b,
         );
 
+        // GPU compute_quant_field: runs the full
+        // pre_erosion → fuzzy_erosion → mask_for_ac_strategy →
+        // per_block_modulations chain on the persistent xyb planes
+        // and downloads `(quant_field_float, masking)` in one batched
+        // `read`. Replaces the CPU
+        // `compute_quant_field_float_free` call that production
+        // endpoints (encoder.rs:1948 / 2153) previously ran on the
+        // post-fix-up CPU buffer — saves ~50 ms at 12 MP.
+        //
+        // Bit-equivalence verified by
+        // `forks::adaptive_quant::tests::test_compute_quant_field_production_flow_divergence`:
+        // 0/4257 blocks land on a different u8 bucket at 1025×257.
+        let cpu_pw = (w).div_ceil(8) * 8;
+        let cpu_ph = (h).div_ceil(8) * 8;
+        let (quant_field_float, masking) =
+            crate::forks::adaptive_quant::compute_quant_field_full_persistent(
+                enc,
+                &xx_g,
+                &xy_g,
+                &xb_g,
+                cpu_pw,
+                cpu_ph,
+                target_distance,
+                K_AC_QUANT,
+            );
+        mark("gpu_quant_field");
+
         StrategySearchPlan {
             xyb_x,
             xyb_y,
@@ -2106,6 +2147,8 @@ impl<R: Runtime> LossyEncoder<R> {
             dc_grid_y_gpu,
             dc_grid_b_gpu,
             assignments,
+            quant_field_float,
+            masking,
             target_distance,
             padded_width: self.padded_width,
             padded_height: self.padded_height,

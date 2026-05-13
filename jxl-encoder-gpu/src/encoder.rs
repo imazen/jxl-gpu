@@ -1777,7 +1777,7 @@ impl<R: Runtime> GpuEncoder<R> {
     ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
         use jxl_encoder::__pre_quantized::{
             AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, compute_cfl_map,
-            compute_quant_field_float_free, quantize_quant_field,
+            quantize_quant_field,
         };
 
         let (width, height) = lossy.dimensions();
@@ -1937,27 +1937,15 @@ impl<R: Runtime> GpuEncoder<R> {
             10,   // newton_max_iters
         );
 
-        // Step 5: real quant_field_float + masking computed from XYB
-        // via the encoder's own helper (mirrors what
-        // EncoderPrecomputed::compute does on the adaptive_quant
-        // path). Real adaptive quant is the biggest size win — uniform
-        // qf passes more bits than necessary in flat regions.
-        // NOTE: per the CPU caller in precomputed.rs, this fn takes
-        // PADDED width/height (not image dims) as `width`/`height`.
-        // Passing image dims trips an off-by-one in the masking loop.
-        let (quant_field_float, masking) = compute_quant_field_float_free(
-            &xyb_x,
-            &xyb_y,
-            &xyb_b,
-            cpu_pw,
-            cpu_ph,
-            xsize_blocks,
-            ysize_blocks,
-            distance,
-            crate::lossy_encoder::K_AC_QUANT,
-        )
-        .map_err(jxl_encoder::api::EncodeError::from)?;
-        let _ = num_blocks; // sanity-checked by quant_field_float.len() == num_blocks
+        // Step 5: GPU-computed quant_field_float + masking from
+        // `prepare_strategy_search_plan` (compute_quant_field_full_persistent).
+        // Replaces the CPU compute_quant_field_float_free call —
+        // bitstream identical (verified by
+        // forks::adaptive_quant::tests::test_compute_quant_field_production_flow_divergence).
+        let quant_field_float = plan.quant_field_float.clone();
+        let masking = plan.masking.clone();
+        debug_assert_eq!(quant_field_float.len(), num_blocks, "qf len");
+        debug_assert_eq!(masking.len(), num_blocks, "mask len");
 
         // Step 6: linear_rgb is only used by rate-control loop; pass empty.
         let linear_rgb = alloc::vec::Vec::new();
@@ -2029,7 +2017,7 @@ impl<R: Runtime> GpuEncoder<R> {
     ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
         use jxl_encoder::__pre_quantized::{
             AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, compute_cfl_map,
-            compute_quant_field_float_free, quantize_quant_field,
+            quantize_quant_field,
         };
 
         let (width, height) = lossy.dimensions();
@@ -2149,20 +2137,13 @@ impl<R: Runtime> GpuEncoder<R> {
             10,   // newton_max_iters
         );
 
-        // Step 5: real quant_field_float + masking from XYB.
-        let (quant_field_float, masking) = compute_quant_field_float_free(
-            &xyb_x,
-            &xyb_y,
-            &xyb_b,
-            cpu_pw,
-            cpu_ph,
-            xsize_blocks,
-            ysize_blocks,
-            distance,
-            crate::lossy_encoder::K_AC_QUANT,
-        )
-        .map_err(jxl_encoder::api::EncodeError::from)?;
-        let _ = num_blocks;
+        // Step 5: GPU-computed quant_field_float + masking from
+        // `prepare_strategy_search_plan_from_u8` (compute_quant_field_full_persistent).
+        // See the f32 variant above for parity-test reference.
+        let quant_field_float = plan.quant_field_float.clone();
+        let masking = plan.masking.clone();
+        debug_assert_eq!(quant_field_float.len(), num_blocks, "qf len");
+        debug_assert_eq!(masking.len(), num_blocks, "mask len");
 
         // Step 6: linear_rgb only used by rate-control loop; pass empty.
         let linear_rgb = alloc::vec::Vec::new();
@@ -2226,7 +2207,7 @@ impl<R: Runtime> GpuEncoder<R> {
     ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
         use jxl_encoder::__pre_quantized::{
             AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, compute_cfl_map,
-            compute_quant_field_float_free, quantize_quant_field,
+            quantize_quant_field,
         };
 
         let (width, height) = lossy.dimensions();
@@ -2293,18 +2274,12 @@ impl<R: Runtime> GpuEncoder<R> {
         let xyb_x_cpu = repack_first(&xyb_x_dl);
         let xyb_y_cpu = repack_first(&xyb_y_dl);
         let xyb_b_cpu = repack_first(&xyb_b_dl);
-        let (adaptive_initial_cpu, _) = compute_quant_field_float_free(
-            &xyb_x_cpu,
-            &xyb_y_cpu,
-            &xyb_b_cpu,
-            cpu_pw,
-            cpu_ph,
-            xsize_blocks,
-            ysize_blocks,
-            distance,
-            crate::lossy_encoder::K_AC_QUANT,
-        )
-        .map_err(jxl_encoder::api::EncodeError::from)?;
+        let _ = (&xyb_x_cpu, &xyb_y_cpu, &xyb_b_cpu); // kept for downstream scope
+        // Reuse the GPU-computed quant_field from the strategy-search
+        // plan instead of re-running compute_quant_field_float_free
+        // on the post-fix-up CPU buffers — they're bit-equivalent
+        // post-quantization (see test_compute_quant_field_production_flow_divergence).
+        let adaptive_initial_cpu = plan.quant_field_float.clone();
 
         // Upsample CPU-grid (xsize_blocks × ysize_blocks) → GPU-grid
         // (gpu_xsize_blocks × gpu_ysize_blocks): copy row by row,
@@ -2406,18 +2381,10 @@ impl<R: Runtime> GpuEncoder<R> {
         // We still need masking from compute_quant_field_float_free,
         // but use the BUTTERAUGLI-REFINED aq_field as quant_field_float
         // (overrides the initial from compute_quant_field_float_free).
-        let (_initial_qff, masking) = compute_quant_field_float_free(
-            &xyb_x,
-            &xyb_y,
-            &xyb_b,
-            cpu_pw,
-            cpu_ph,
-            xsize_blocks,
-            ysize_blocks,
-            distance,
-            crate::lossy_encoder::K_AC_QUANT,
-        )
-        .map_err(jxl_encoder::api::EncodeError::from)?;
+        // Pull masking from the GPU plan (compute_quant_field_full_persistent)
+        // — the matching `quant_field_float` is replaced below by `refined_aq`,
+        // so we only need the masking field here.
+        let masking = plan.masking.clone();
         let quant_field_float = refined_aq;
 
         let precomputed = EncoderPrecomputed::from_parts(
