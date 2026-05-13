@@ -22,10 +22,10 @@ fn main() {
 
     use jxl_encoder::__pre_quantized::{
         AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, compute_cfl_map,
-        compute_quant_field_float_free, quantize_quant_field,
+        quantize_quant_field,
     };
     use jxl_encoder_gpu::encoder::GpuEncoder;
-    use jxl_encoder_gpu::lossy_encoder::{K_AC_QUANT, LossyEncoder};
+    use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 
     type B = cubecl::cuda::CudaRuntime;
 
@@ -201,18 +201,13 @@ fn main() {
         let t_cfl = t4.elapsed().as_secs_f64() * 1000.0;
         let t5 = Instant::now();
 
-        let (quant_field_float, masking) = compute_quant_field_float_free(
-            &xyb_x,
-            &xyb_y,
-            &xyb_b,
-            cpu_pw,
-            cpu_ph,
-            xsize_blocks,
-            ysize_blocks,
-            distance,
-            K_AC_QUANT,
-        )
-        .expect("compute_quant_field");
+        // Production now reads quant_field/masking from the strategy
+        // plan (compute_quant_field_full_persistent ran in prepare).
+        // The CPU compute_quant_field_float_free path is dead — kept
+        // imported below for non-prod harnesses but not exercised
+        // here.
+        let quant_field_float = plan.quant_field_float.clone();
+        let masking = plan.masking.clone();
         let t_qfield = t5.elapsed().as_secs_f64() * 1000.0;
         let t6 = Instant::now();
 
