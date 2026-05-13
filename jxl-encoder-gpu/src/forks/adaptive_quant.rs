@@ -29,6 +29,7 @@
 use alloc::vec::Vec;
 
 use cubecl::Runtime;
+use cubecl::prelude::*;
 
 use crate::encoder::GpuEncoder;
 
@@ -168,6 +169,128 @@ pub fn per_block_modulations_gpu<R: Runtime>(
     );
 }
 
+/// GPU full-pipeline `compute_quant_field` against persistent xyb
+/// `GpuPlane`s. Mirrors the CPU
+/// `jxl_encoder::vardct::adaptive_quant::compute_quant_field_float`
+/// chain (`pre_erosion → fuzzy_erosion → mask_for_ac_strategy →
+/// per_block_modulations`) and downloads `(quant_field_float, masking)`
+/// in a single batched `read`.
+///
+/// Bridges the `gpu_pw` (16-multiple) input stride and the cpu-aligned
+/// `(xsize_blocks, ysize_blocks)` output dims by sizing each
+/// intermediate buffer to the cpu-aligned width and passing the gpu
+/// stride to the per-pixel kernels. Edge-replicated padding past the
+/// real image (preserved by both pipelines) makes the math identical
+/// for the first `xsize_blocks * ysize_blocks` outputs.
+///
+/// `xx_g`/`xy_g`/`xb_g` are the gaborished XYB planes from
+/// `LossyEncoder::prepare_strategy_search_plan`. They share dims
+/// `(gpu_pw, gpu_ph)`. `cpu_pw` / `cpu_ph` are the 8-multiple-padded
+/// dims used by the CPU consumers (`xsize_blocks = cpu_pw / 8`).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_quant_field_full_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xx_g: &crate::persistent::GpuPlane<R>,
+    xy_g: &crate::persistent::GpuPlane<R>,
+    xb_g: &crate::persistent::GpuPlane<R>,
+    cpu_pw: usize,
+    cpu_ph: usize,
+    distance: f32,
+    k_ac_quant: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    use cubecl::server::Handle;
+
+    let gpu_pw = xy_g.width() as usize;
+    let gpu_ph = xy_g.height() as usize;
+    debug_assert_eq!(xx_g.width() as usize, gpu_pw);
+    debug_assert_eq!(xb_g.width() as usize, gpu_pw);
+    debug_assert_eq!(xx_g.height() as usize, gpu_ph);
+    debug_assert_eq!(xb_g.height() as usize, gpu_ph);
+    debug_assert!(cpu_pw <= gpu_pw, "cpu_pw must fit in gpu_pw");
+    debug_assert!(cpu_ph <= gpu_ph, "cpu_ph must fit in gpu_ph");
+
+    let xsize_blocks = cpu_pw / 8;
+    let ysize_blocks = cpu_ph / 8;
+    let pre_erosion_w = cpu_pw.div_ceil(4);
+    let pre_erosion_h = cpu_ph.div_ceil(4);
+    let n_pre = pre_erosion_w * pre_erosion_h;
+    let n_blocks = xsize_blocks * ysize_blocks;
+
+    let client = enc.client_ref();
+
+    // Stage 1: pre_erosion (Y only, 4× downsample).
+    let h_pre: Handle = client.empty(n_pre * core::mem::size_of::<f32>());
+    crate::launch::adaptive_quant::compute_pre_erosion::<R>(
+        client,
+        xy_g.handle().clone(),
+        h_pre.clone(),
+        gpu_pw * gpu_ph,
+        gpu_pw as u32,
+        gpu_ph as u32,
+        0,
+        0,
+        pre_erosion_w as u32,
+        pre_erosion_h as u32,
+    );
+
+    // Stage 2: fuzzy_erosion (2× downsample → per-8x8-block aq_map).
+    let h_aq: Handle = client.empty(n_blocks * core::mem::size_of::<f32>());
+    let k_mul = crate::launch::fuzzy_erosion::fuzzy_erosion_kmul(distance);
+    crate::launch::fuzzy_erosion::fuzzy_erosion::<R>(
+        client,
+        h_pre,
+        h_aq.clone(),
+        pre_erosion_w as u32,
+        pre_erosion_h as u32,
+        0,
+        0,
+        xsize_blocks as u32,
+        ysize_blocks as u32,
+        k_mul,
+    );
+
+    // Stage 2.5: snapshot aq_map → masking (`1 / (aq_map + 0.001)`).
+    // Order matters: this MUST run before per_block_modulations
+    // mutates aq_map in-place — masking captures the pre-modulation
+    // values (matches CPU compute_quant_field_float Step 2.5).
+    let h_mask: Handle = client.empty(n_blocks * core::mem::size_of::<f32>());
+    crate::launch::mask_for_ac_strategy::mask_for_ac_strategy::<R>(
+        client,
+        h_aq.clone(),
+        h_mask.clone(),
+        n_blocks as u32,
+    );
+
+    // Stage 3: per_block_modulations (mutates aq_map in-place).
+    let scale = k_ac_quant / distance;
+    crate::launch::adaptive_quant::per_block_modulations::<R>(
+        client,
+        xx_g.handle().clone(),
+        xy_g.handle().clone(),
+        xb_g.handle().clone(),
+        h_aq.clone(),
+        gpu_pw * gpu_ph,
+        n_blocks,
+        gpu_pw as u32,
+        xsize_blocks as u32,
+        0,
+        0,
+        xsize_blocks as u32,
+        ysize_blocks as u32,
+        distance,
+        scale,
+    );
+
+    // Stage 4: batched download (1 sync barrier for both planes).
+    let mut bytes = client.read(alloc::vec![h_aq, h_mask]);
+    let mask_bytes = bytes.pop().expect("read[1]");
+    let aq_bytes = bytes.pop().expect("read[0]");
+    (
+        f32::from_bytes(&aq_bytes).to_vec(),
+        f32::from_bytes(&mask_bytes).to_vec(),
+    )
+}
+
 /// Convert float quant field to u8 raw_quant — bit-for-bit copy of
 /// upstream `quantize_quant_field` (no GPU substitution; pure scalar
 /// loop, runs in microseconds).
@@ -269,6 +392,137 @@ mod tests {
         assert_eq!(fw, 8);
         assert_eq!(fh, 8);
         assert!(fuzz.iter().all(|v| v.is_finite()));
+    }
+
+    /// GPU `compute_quant_field_full_persistent` matches the CPU
+    /// `compute_quant_field_float_free` end-to-end on identical inputs.
+    ///
+    /// Critical case: gpu_pw > cpu_pw (the 16-vs-8 padding mismatch).
+    /// 95×97 image: cpu_pw = ceil(95,8)*8 = 96, gpu_pw = ceil(95,16)*16 = 96 — same.
+    /// 99×97 image: cpu_pw = 104, gpu_pw = 112 — differs by 8.
+    /// Test the divergent case explicitly so the stride math is exercised.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_compute_quant_field_full_persistent_matches_cpu() {
+        type B = cubecl::cuda::CudaRuntime;
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+
+        let cases = [(99usize, 97usize), (96usize, 96usize), (137usize, 91usize)];
+        for &(w, h) in &cases {
+            let cpu_pw = w.div_ceil(8) * 8;
+            let cpu_ph = h.div_ceil(8) * 8;
+            let gpu_pw = w.div_ceil(16) * 16;
+            let gpu_ph = h.div_ceil(16) * 16;
+
+            // Pseudo-random xyb planes — non-degenerate values that
+            // exercise gamma/HF/blue modulations.
+            let make = |seed: usize| -> Vec<f32> {
+                (0..gpu_pw * gpu_ph)
+                    .map(|i| {
+                        let s = ((i + seed) as f32) * 0.0173;
+                        0.05 + 0.10 * s.sin() + 0.07 * (s * 1.7).cos()
+                    })
+                    .collect()
+            };
+            let mut xx_data = make(11);
+            let mut xy_data = make(101);
+            let mut xb_data = make(1009);
+
+            // Edge-replicate gpu_pw padding past width w (matches what
+            // pad_plane_with_replication does upstream).
+            for plane in [&mut xx_data, &mut xy_data, &mut xb_data] {
+                for y in 0..gpu_ph.min(h) {
+                    let off = y * gpu_pw;
+                    let last = plane[off + w - 1];
+                    for x in w..gpu_pw {
+                        plane[off + x] = last;
+                    }
+                }
+                if h < gpu_ph {
+                    let last_off = (h - 1) * gpu_pw;
+                    for y in h..gpu_ph {
+                        let off = y * gpu_pw;
+                        for x in 0..gpu_pw {
+                            plane[off + x] = plane[last_off + x];
+                        }
+                    }
+                }
+            }
+
+            // Repack into cpu_pw × cpu_ph (same edge-replication policy)
+            // so the CPU reference sees the same boundary values.
+            let mut cpu_xx = vec![0.0f32; cpu_pw * cpu_ph];
+            let mut cpu_xy = vec![0.0f32; cpu_pw * cpu_ph];
+            let mut cpu_xb = vec![0.0f32; cpu_pw * cpu_ph];
+            for (gpu, cpu) in [
+                (&xx_data, &mut cpu_xx),
+                (&xy_data, &mut cpu_xy),
+                (&xb_data, &mut cpu_xb),
+            ] {
+                for y in 0..cpu_ph {
+                    let g_off = y * gpu_pw;
+                    let c_off = y * cpu_pw;
+                    cpu[c_off..c_off + cpu_pw]
+                        .copy_from_slice(&gpu[g_off..g_off + cpu_pw]);
+                }
+            }
+
+            let xx_g = enc.upload_plane(&xx_data, gpu_pw as u32, gpu_ph as u32);
+            let xy_g = enc.upload_plane(&xy_data, gpu_pw as u32, gpu_ph as u32);
+            let xb_g = enc.upload_plane(&xb_data, gpu_pw as u32, gpu_ph as u32);
+
+            let distance = 1.0_f32;
+            let k_ac_quant = 0.765_f32;
+
+            let (gpu_qf, gpu_mask) = compute_quant_field_full_persistent(
+                &enc, &xx_g, &xy_g, &xb_g, cpu_pw, cpu_ph, distance, k_ac_quant,
+            );
+
+            let (cpu_qf, cpu_mask) =
+                jxl_encoder::__pre_quantized::compute_quant_field_float_free(
+                    &cpu_xx,
+                    &cpu_xy,
+                    &cpu_xb,
+                    cpu_pw,
+                    cpu_ph,
+                    cpu_pw / 8,
+                    cpu_ph / 8,
+                    distance,
+                    k_ac_quant,
+                )
+                .expect("cpu compute");
+
+            assert_eq!(gpu_qf.len(), cpu_qf.len(), "qf len {w}x{h}");
+            assert_eq!(gpu_mask.len(), cpu_mask.len(), "mask len {w}x{h}");
+
+            // Tolerance: GPU uses f32, CPU uses f32. Differences come
+            // from kernel ordering of fuzzy_erosion's reductions and
+            // cubecl's fast-math (fast_log2f / fast_pow2f) vs upstream
+            // libjxl's intrinsics. Bound below empirically; tighter
+            // would force exact-match between AT&T and CUDA libm.
+            let qf_tol = 5e-3_f32;
+            let mask_tol = 5e-3_f32;
+            for i in 0..gpu_qf.len() {
+                let g = gpu_qf[i];
+                let c = cpu_qf[i];
+                let abs = (g - c).abs();
+                let rel = abs / c.abs().max(1e-6);
+                assert!(
+                    abs < qf_tol || rel < qf_tol,
+                    "qf[{i}] {g} vs {c} (abs {abs}, rel {rel}) at {w}x{h}",
+                );
+            }
+            for i in 0..gpu_mask.len() {
+                let g = gpu_mask[i];
+                let c = cpu_mask[i];
+                let abs = (g - c).abs();
+                let rel = abs / c.abs().max(1e-6);
+                assert!(
+                    abs < mask_tol || rel < mask_tol,
+                    "mask[{i}] {g} vs {c} (abs {abs}, rel {rel}) at {w}x{h}",
+                );
+            }
+        }
     }
 
     #[test]
