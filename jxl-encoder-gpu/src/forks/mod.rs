@@ -55,6 +55,7 @@ pub mod epf;
 pub mod gaborish;
 pub mod noise;
 pub mod pad;
+pub mod pre_quantized_ac;
 pub mod quantize;
 pub mod reconstruct;
 pub mod transform;

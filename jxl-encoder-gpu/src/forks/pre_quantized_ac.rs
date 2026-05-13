@@ -1,0 +1,346 @@
+// Copyright (c) Imazen LLC and the JPEG XL Project Authors.
+// Licensed under AGPL-3.0-or-later. Commercial licenses at https://www.imazen.io/pricing
+
+//! GPU producer for pre-quantized AC coefficients (DCT8 only).
+//!
+//! Mirrors the per-block sequence in
+//! `jxl_encoder::vardct::transform::transform_blocks_into` for the
+//! DCT8 strategy:
+//!
+//! 1. Gather pixel blocks from each XYB plane (8×8 tiles)
+//! 2. Forward DCT8 each channel
+//! 3. Quantize Y AC (with thresholds)
+//! 4. CfL-subtract + quantize X AC and B AC (one fused kernel each;
+//!    re-uses Y's already-quantized AC dequant'd via AdjustQuantBias)
+//! 5. Quantize DC for Y, then for X / B with DC-side CfL
+//! 6. Count non-zero AC coefficients per block
+//! 7. Batched download of all per-block buffers
+//!
+//! All-DCT8 contract: this producer assumes every block uses
+//! DCT8. Caller must verify before calling. Mixed-strategy support
+//! is incremental future work — DCT8 already covers the "uniform"
+//! image case and provides a parity-tested baseline.
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+use cubecl::prelude::*;
+use cubecl::Runtime;
+
+use crate::encoder::GpuEncoder;
+use crate::persistent::GpuPlane;
+
+/// Per-channel pre-quantized AC + DC outputs in flat layout. Caller
+/// reshapes into `[Vec<Vec<...>>; 3]` for the jxl-encoder
+/// `encode_from_pre_quantized_ac` consumer (see [`reshape_to_transform_output`]).
+pub struct PreQuantizedDct8 {
+    /// `quant_dc[c]`: per-block i16 quantized DC (length `n_blocks`).
+    pub quant_dc: [Vec<i16>; 3],
+    /// `quant_ac[c]`: per-block 64 i32 quantized AC coefficients
+    /// (length `n_blocks * 64`). Position 0 of each block is the
+    /// DC slot and is set to 0 (DC is in `quant_dc`).
+    pub quant_ac: [Vec<i32>; 3],
+    /// `nzeros[c]`: per-block u8 non-zero AC count (length `n_blocks`).
+    pub nzeros: [Vec<u8>; 3],
+    /// `raw_nzeros[c]`: per-block u16 pre-clamp non-zero AC count.
+    /// For DCT8 this equals `nzeros[c]` (max 63, no clamping needed).
+    pub raw_nzeros: [Vec<u16>; 3],
+    /// `float_dc[c]`: per-block raw DC value (length `n_blocks`).
+    pub float_dc: [Vec<f32>; 3],
+}
+
+/// Per-block CfL factors + per-channel scalars, expanded by the
+/// host from the per-tile `CflMap` and `DistanceParams`.
+pub struct PreQuantizedDct8Params {
+    /// Per-block scale `qac = params.scale * raw_quant`. Same value
+    /// for all 3 channels' AC quantizer (the channel-specific
+    /// `qm_multiplier` is folded into per-channel `qac_qm_*` below).
+    pub qac_per_block: Vec<f32>,
+    /// Per-block X-channel CfL factor (`x_factor = ytox * x_factor_scale`),
+    /// expanded from the per-tile `CflMap.x_factor` to per-block.
+    pub x_factor_per_block: Vec<f32>,
+    /// Per-block B-channel CfL factor.
+    pub b_factor_per_block: Vec<f32>,
+    /// Per-channel `qac * qm_multiplier`:
+    ///   `qac_qm_x = qac * x_qm_mul`
+    ///   `qac_qm_y = qac` (qm_multiplier == 1)
+    ///   `qac_qm_b = qac * b_qm_mul`
+    /// Length `n_blocks` each.
+    pub qac_qm_x: Vec<f32>,
+    pub qac_qm_y: Vec<f32>,
+    pub qac_qm_b: Vec<f32>,
+    /// DC scale per channel: `INV_DC_QUANT[c] * params.scale_dc`.
+    pub inv_dc_factor_x: f32,
+    pub inv_dc_factor_y: f32,
+    pub inv_dc_factor_b: f32,
+    /// Dead-zone thresholds (all 4 quadrants) per channel.
+    pub thresholds_x: [f32; 4],
+    pub thresholds_y: [f32; 4],
+    pub thresholds_b: [f32; 4],
+}
+
+/// All-DCT8 producer. See module docs for the per-block algorithm.
+///
+/// `xx_g` / `xy_g` / `xb_g`: gaborished XYB planes (post-mask1x1,
+/// pre-quant). Padded to multiples of 8 — caller verifies dims.
+/// `xsize_blocks` × `ysize_blocks`: cpu-aligned per-block grid
+/// dimensions. `padded_width` is the gpu plane stride.
+pub fn compute_pre_quantized_ac_dct8_persistent<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    xx_g: &GpuPlane<R>,
+    xy_g: &GpuPlane<R>,
+    xb_g: &GpuPlane<R>,
+    xsize_blocks: usize,
+    ysize_blocks: usize,
+    weights_x_template: &[f32; 64],
+    weights_y_template: &[f32; 64],
+    weights_b_template: &[f32; 64],
+    params: &PreQuantizedDct8Params,
+) -> PreQuantizedDct8 {
+    let n_blocks = xsize_blocks * ysize_blocks;
+    debug_assert_eq!(params.qac_qm_x.len(), n_blocks);
+    debug_assert_eq!(params.qac_qm_y.len(), n_blocks);
+    debug_assert_eq!(params.qac_qm_b.len(), n_blocks);
+    debug_assert_eq!(params.x_factor_per_block.len(), n_blocks);
+    debug_assert_eq!(params.b_factor_per_block.len(), n_blocks);
+    let _ = params.qac_per_block; // not directly used; folded into qac_qm_*
+
+    let client = enc.client_ref();
+
+    // Step 1: gather pixel blocks (8×8) per channel.
+    let g_8x = enc.gather_blocks_persistent(xx_g, 8, 8);
+    let g_8y = enc.gather_blocks_persistent(xy_g, 8, 8);
+    let g_8b = enc.gather_blocks_persistent(xb_g, 8, 8);
+
+    // Step 2: forward DCT8 per channel.
+    let dct_x = enc.dct_8x8_persistent(&g_8x);
+    let dct_y = enc.dct_8x8_persistent(&g_8y);
+    let dct_b = enc.dct_8x8_persistent(&g_8b);
+
+    // Upload per-channel weights as 64-coef GpuBlocks (broadcast).
+    let weights_x_gpu = enc.upload_blocks(weights_x_template, 1, 64);
+    let weights_y_gpu = enc.upload_blocks(weights_y_template, 1, 64);
+    let weights_b_gpu = enc.upload_blocks(weights_b_template, 1, 64);
+
+    // Step 3: quantize Y AC (uses existing fast-path persistent kernel).
+    let quant_y = enc.quantize_dct8_persistent_broadcast_w(
+        &dct_y,
+        &weights_y_gpu,
+        &params.qac_qm_y,
+        &params.thresholds_y,
+    );
+
+    // Step 4: CfL-subtract + quantize X / B. Each call pulls in the
+    // per-block weights (broadcast) and per-block scalars + Y's
+    // already-quantized AC.
+    let h_dct_x = dct_x.handle().clone();
+    let h_dct_b = dct_b.handle().clone();
+    let h_q_y = quant_y.handle().clone();
+    let h_w_x = weights_x_gpu.handle().clone();
+    let h_w_y = weights_y_gpu.handle().clone();
+    let h_w_b = weights_b_gpu.handle().clone();
+    let h_qmx = client.create_from_slice(f32::as_bytes(&params.qac_qm_x));
+    let h_qmy = client.create_from_slice(f32::as_bytes(&params.qac_qm_y));
+    let h_qmb = client.create_from_slice(f32::as_bytes(&params.qac_qm_b));
+    let h_xfac = client.create_from_slice(f32::as_bytes(&params.x_factor_per_block));
+    let h_bfac = client.create_from_slice(f32::as_bytes(&params.b_factor_per_block));
+    let h_thr_x = client.create_from_slice(f32::as_bytes(&params.thresholds_x[..]));
+    let h_thr_b = client.create_from_slice(f32::as_bytes(&params.thresholds_b[..]));
+
+    let h_q_x = client.empty(n_blocks * 64 * core::mem::size_of::<i32>());
+    let h_q_b = client.empty(n_blocks * 64 * core::mem::size_of::<i32>());
+
+    crate::launch::cfl_quantize::cfl_quantize_dct8::<R>(
+        client,
+        h_dct_x,
+        h_q_y.clone(),
+        h_w_x,
+        h_w_y.clone(),
+        h_qmx.clone(),
+        h_qmy.clone(),
+        h_xfac,
+        h_thr_x,
+        h_q_x.clone(),
+        n_blocks as u32,
+    );
+    crate::launch::cfl_quantize::cfl_quantize_dct8::<R>(
+        client,
+        h_dct_b,
+        h_q_y.clone(),
+        h_w_b,
+        h_w_y,
+        h_qmb,
+        h_qmy,
+        h_bfac,
+        h_thr_b,
+        h_q_b.clone(),
+        n_blocks as u32,
+    );
+
+    // Step 5: DC quantize. Y first (since chroma reads Y's quant_dc).
+    let h_qdc_y = client.empty(n_blocks * core::mem::size_of::<i16>());
+    let h_fdc_y = client.empty(n_blocks * core::mem::size_of::<f32>());
+    crate::launch::quantize_dc::quantize_dc_y_dct8::<R>(
+        client,
+        dct_y.handle().clone(),
+        h_qdc_y.clone(),
+        h_fdc_y.clone(),
+        params.inv_dc_factor_y,
+        n_blocks as u32,
+    );
+    let h_qdc_x = client.empty(n_blocks * core::mem::size_of::<i16>());
+    let h_fdc_x = client.empty(n_blocks * core::mem::size_of::<f32>());
+    crate::launch::quantize_dc::quantize_dc_chroma_dct8::<R>(
+        client,
+        dct_x.handle().clone(),
+        h_qdc_y.clone(),
+        h_qdc_x.clone(),
+        h_fdc_x.clone(),
+        params.inv_dc_factor_x,
+        0.0, // dc_cfl_factor for X
+        n_blocks as u32,
+    );
+    let h_qdc_b = client.empty(n_blocks * core::mem::size_of::<i16>());
+    let h_fdc_b = client.empty(n_blocks * core::mem::size_of::<f32>());
+    crate::launch::quantize_dc::quantize_dc_chroma_dct8::<R>(
+        client,
+        dct_b.handle().clone(),
+        h_qdc_y.clone(),
+        h_qdc_b.clone(),
+        h_fdc_b.clone(),
+        params.inv_dc_factor_b,
+        0.5, // dc_cfl_factor for B
+        n_blocks as u32,
+    );
+
+    // Step 6: nzeros count per channel.
+    let h_nz_x = client.empty(n_blocks * core::mem::size_of::<u32>());
+    let h_nz_y = client.empty(n_blocks * core::mem::size_of::<u32>());
+    let h_nz_b = client.empty(n_blocks * core::mem::size_of::<u32>());
+    crate::launch::nzeros_count::nzeros_count_dct8::<R>(
+        client,
+        h_q_x.clone(),
+        h_nz_x.clone(),
+        n_blocks as u32,
+    );
+    crate::launch::nzeros_count::nzeros_count_dct8::<R>(
+        client,
+        h_q_y.clone(),
+        h_nz_y.clone(),
+        n_blocks as u32,
+    );
+    crate::launch::nzeros_count::nzeros_count_dct8::<R>(
+        client,
+        h_q_b.clone(),
+        h_nz_b.clone(),
+        n_blocks as u32,
+    );
+
+    // Step 7: batched download (15 buffers — one sync barrier).
+    let mut all_bytes = client.read(alloc::vec![
+        h_q_x.clone(), h_q_y.clone(), h_q_b.clone(),       // quant_ac × 3
+        h_qdc_x, h_qdc_y, h_qdc_b,                          // quant_dc × 3
+        h_fdc_x, h_fdc_y, h_fdc_b,                          // float_dc × 3
+        h_nz_x, h_nz_y, h_nz_b,                             // nzeros × 3
+    ]);
+    // Drain in reverse to match push order.
+    let nz_b_b = all_bytes.pop().expect("nz_b");
+    let nz_y_b = all_bytes.pop().expect("nz_y");
+    let nz_x_b = all_bytes.pop().expect("nz_x");
+    let fdc_b_b = all_bytes.pop().expect("fdc_b");
+    let fdc_y_b = all_bytes.pop().expect("fdc_y");
+    let fdc_x_b = all_bytes.pop().expect("fdc_x");
+    let qdc_b_b = all_bytes.pop().expect("qdc_b");
+    let qdc_y_b = all_bytes.pop().expect("qdc_y");
+    let qdc_x_b = all_bytes.pop().expect("qdc_x");
+    let q_b_b = all_bytes.pop().expect("q_b");
+    let q_y_b = all_bytes.pop().expect("q_y");
+    let q_x_b = all_bytes.pop().expect("q_x");
+
+    let q_x_v: Vec<i32> = i32::from_bytes(&q_x_b).to_vec();
+    let q_y_v: Vec<i32> = i32::from_bytes(&q_y_b).to_vec();
+    let q_b_v: Vec<i32> = i32::from_bytes(&q_b_b).to_vec();
+    let qdc_x_v: Vec<i16> = i16::from_bytes(&qdc_x_b).to_vec();
+    let qdc_y_v: Vec<i16> = i16::from_bytes(&qdc_y_b).to_vec();
+    let qdc_b_v: Vec<i16> = i16::from_bytes(&qdc_b_b).to_vec();
+    let fdc_x_v: Vec<f32> = f32::from_bytes(&fdc_x_b).to_vec();
+    let fdc_y_v: Vec<f32> = f32::from_bytes(&fdc_y_b).to_vec();
+    let fdc_b_v: Vec<f32> = f32::from_bytes(&fdc_b_b).to_vec();
+    let nz_x_u32: Vec<u32> = u32::from_bytes(&nz_x_b).to_vec();
+    let nz_y_u32: Vec<u32> = u32::from_bytes(&nz_y_b).to_vec();
+    let nz_b_u32: Vec<u32> = u32::from_bytes(&nz_b_b).to_vec();
+
+    // Convert nzeros u32 → u8 (clamp to 255) and u16 (raw).
+    let to_u8 = |v: &[u32]| v.iter().map(|&n| n.min(255) as u8).collect::<Vec<u8>>();
+    let to_u16 = |v: &[u32]| v.iter().map(|&n| n as u16).collect::<Vec<u16>>();
+
+    PreQuantizedDct8 {
+        quant_dc: [qdc_x_v, qdc_y_v, qdc_b_v],
+        quant_ac: [q_x_v, q_y_v, q_b_v],
+        nzeros: [to_u8(&nz_x_u32), to_u8(&nz_y_u32), to_u8(&nz_b_u32)],
+        raw_nzeros: [to_u16(&nz_x_u32), to_u16(&nz_y_u32), to_u16(&nz_b_u32)],
+        float_dc: [fdc_x_v, fdc_y_v, fdc_b_v],
+    }
+}
+
+/// Reshape flat per-channel buffers into the nested `Vec<Vec<...>>`
+/// shape `VarDctEncoder::encode_from_pre_quantized_ac` expects.
+/// Caller passes `cpu_xsize_blocks` × `cpu_ysize_blocks` (the
+/// jxl-encoder's per-block grid; matches `pre_quantized.xsize_blocks
+/// × ysize_blocks`).
+pub fn reshape_to_transform_output(
+    pq: PreQuantizedDct8,
+    xsize_blocks: usize,
+    ysize_blocks: usize,
+) -> ReshapedTransformOutput {
+    let n_blocks = xsize_blocks * ysize_blocks;
+    debug_assert_eq!(pq.quant_dc[0].len(), n_blocks);
+
+    let mut quant_dc: [Vec<Vec<i16>>; 3] = core::array::from_fn(|_| Vec::new());
+    let mut quant_ac: [Vec<Vec<[i32; 64]>>; 3] = core::array::from_fn(|_| Vec::new());
+    let mut nzeros: [Vec<Vec<u8>>; 3] = core::array::from_fn(|_| Vec::new());
+    let mut raw_nzeros: [Vec<Vec<u16>>; 3] = core::array::from_fn(|_| Vec::new());
+
+    for c in 0..3 {
+        quant_dc[c].reserve_exact(ysize_blocks);
+        quant_ac[c].reserve_exact(ysize_blocks);
+        nzeros[c].reserve_exact(ysize_blocks);
+        raw_nzeros[c].reserve_exact(ysize_blocks);
+        for by in 0..ysize_blocks {
+            let row_off = by * xsize_blocks;
+            quant_dc[c].push(pq.quant_dc[c][row_off..row_off + xsize_blocks].to_vec());
+            nzeros[c].push(pq.nzeros[c][row_off..row_off + xsize_blocks].to_vec());
+            raw_nzeros[c].push(pq.raw_nzeros[c][row_off..row_off + xsize_blocks].to_vec());
+
+            let mut ac_row: Vec<[i32; 64]> = Vec::with_capacity(xsize_blocks);
+            for bx in 0..xsize_blocks {
+                let off = (row_off + bx) * 64;
+                let mut blk = [0i32; 64];
+                blk.copy_from_slice(&pq.quant_ac[c][off..off + 64]);
+                ac_row.push(blk);
+            }
+            quant_ac[c].push(ac_row);
+        }
+    }
+    ReshapedTransformOutput {
+        quant_dc,
+        quant_ac,
+        nzeros,
+        raw_nzeros,
+        float_dc: pq.float_dc, // already flat per-block
+    }
+}
+
+/// Output of [`reshape_to_transform_output`]: shape matches what the
+/// jxl-encoder `encode_from_pre_quantized_ac` consumer expects.
+pub struct ReshapedTransformOutput {
+    pub quant_dc: [Vec<Vec<i16>>; 3],
+    pub quant_ac: [Vec<Vec<[i32; 64]>>; 3],
+    pub nzeros: [Vec<Vec<u8>>; 3],
+    pub raw_nzeros: [Vec<Vec<u16>>; 3],
+    pub float_dc: [Vec<f32>; 3],
+}
+
+// Suppress an unused-import warning when no tests are compiled.
+#[allow(dead_code)]
+fn _box_marker(_: Box<u8>) {}
