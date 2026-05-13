@@ -26,25 +26,14 @@
 
 use cubecl::prelude::*;
 
-/// Round-half-to-even (banker's rounding) for f32 → i16.
-/// Same shim as in cfl_quantize.rs since cubecl's f32::round is
-/// ties-away-from-zero, not what libjxl uses.
+/// Round-half-away-from-zero for f32 → i16 (matches Rust's
+/// `f32::round() as i16` exactly). This is what
+/// `transform_blocks_into` uses for DC quant on the CPU side
+/// (`(dct_coeffs[c][0] * inv_factor).round() as i16` — no
+/// `round_ties_even` here, unlike the AC path).
 #[cube]
-fn round_ties_even_to_i16(x: f32) -> i16 {
-    let r = f32::round(x);
-    let frac = f32::abs(x - f32::floor(x));
-    let r_int = r as i32;
-    let is_tie = f32::abs(frac - 0.5f32) < 1e-7f32;
-    let is_odd = (r_int.abs() & 1i32) == 1i32;
-    let mut out = r_int;
-    if is_tie && is_odd {
-        if r_int > 0i32 {
-            out = r_int - 1i32;
-        } else {
-            out = r_int + 1i32;
-        }
-    }
-    out as i16
+fn round_dc_to_i16(x: f32) -> i16 {
+    (f32::round(x)) as i16
 }
 
 /// Y channel DC quantize (per block). Reads `coeffs[block_idx * 64]`
@@ -64,7 +53,7 @@ pub fn quantize_dc_y_dct8_kernel(
     }
     let dc = coeffs[block_idx * 64usize];
     float_dc[block_idx] = dc;
-    quant_dc[block_idx] = round_ties_even_to_i16(dc * inv_factor);
+    quant_dc[block_idx] = round_dc_to_i16(dc * inv_factor);
 }
 
 /// X or B channel DC quantize (per block) with DC-side CfL.
@@ -89,7 +78,7 @@ pub fn quantize_dc_chroma_dct8_kernel(
     float_dc_chroma[block_idx] = dc;
     let y_dc_f = quant_dc_y[block_idx] as f32;
     quant_dc_chroma[block_idx] =
-        round_ties_even_to_i16(dc * inv_factor - y_dc_f * dc_cfl_factor);
+        round_dc_to_i16(dc * inv_factor - y_dc_f * dc_cfl_factor);
 }
 
 #[cfg(all(test, feature = "cuda"))]
@@ -118,7 +107,7 @@ mod tests {
         let inv_factor = 0.2547_f32;
 
         let cpu: Vec<i16> = (0..n_blocks)
-            .map(|b| (coeffs[b * 64] * inv_factor).round_ties_even() as i16)
+            .map(|b| (coeffs[b * 64] * inv_factor).round() as i16)
             .collect();
 
         let h_c = client.create_from_slice(f32::as_bytes(&coeffs));
@@ -152,7 +141,7 @@ mod tests {
                 let dc = coeffs_x[b * 64];
                 let yd = quant_dc_y[b] as f32;
                 (dc * inv_factor_x - yd * dc_cfl_factor_x)
-                    .round_ties_even() as i16
+                    .round() as i16
             })
             .collect();
 
@@ -183,7 +172,7 @@ mod tests {
                 let dc = coeffs_b[b * 64];
                 let yd = quant_dc_y[b] as f32;
                 (dc * inv_factor_b - yd * dc_cfl_factor_b)
-                    .round_ties_even() as i16
+                    .round() as i16
             })
             .collect();
 
