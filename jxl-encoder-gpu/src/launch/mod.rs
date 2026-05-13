@@ -35,6 +35,7 @@ pub mod identity;
 pub mod indexed_gather;
 pub mod indexed_scatter;
 pub mod mask1x1;
+pub mod mask_for_ac_strategy;
 pub mod pixel_loss;
 pub mod quantize;
 pub mod set_dc;
