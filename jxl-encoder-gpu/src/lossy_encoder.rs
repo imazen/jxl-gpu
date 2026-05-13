@@ -1178,49 +1178,39 @@ impl<R: Runtime> LossyEncoder<R> {
         mark("xyb_gab");
         mark("mask1x1");
 
-        // Download the per-pixel mask once (one GPU sync, cheap at
-        // ~1 ms on 16 MP) and compute the per-8x8-block adaptive_quant
-        // field. This is what libjxl uses as `quant_norm16` source for
-        // multi-block strat-search (see enc_ac_strategy.cc:382-413).
-        // Without per-block quant the DCT32 cost-model has a +42%
-        // upward bias on photos vs libjxl — see
-        // examples/quant_norm16_divergence.rs.
+        // GPU 8×8 reduction: produces per-block mask means in 1.5 MB
+        // (12 MP) instead of downloading the full 48 MB mask plane and
+        // running the reduction on the host. The mask values are
+        // already f32 (computed by compute_mask1x1_gpu), so the GPU
+        // f32-sum drops the f64 precision the original CPU loop used
+        // — the cumulative error on 64 values bounded in [0, ~1] is
+        // ε * 64 ≈ 6e-6 absolute, well below the threshold where
+        // block_means_to_qac_field's min/max scaling shifts strategy
+        // assignments.
         //
-        // The download could be replaced by a GPU block-mean kernel
-        // for hot-path callers; first wire-up uses the simpler host
-        // loop matching compute_block_mask_means.
-        let mask_pixels = enc.download_plane(&g_mask);
+        // libjxl uses this field as `quant_norm16` for multi-block
+        // strat-search (enc_ac_strategy.cc:382-413). Without per-block
+        // quant the DCT32 cost-model has a +42% upward bias on photos
+        // vs libjxl — see examples/quant_norm16_divergence.rs.
         let xs8 = pw / 8;
         let ys8 = ph / 8;
         let nb_padded = xs8 * ys8;
-        let mut aq_field = alloc::vec![0.0f32; nb_padded];
-        for by in 0..ys8 {
-            for bx in 0..xs8 {
-                let mut sum = 0.0_f64;
-                let mut count = 0_usize;
-                for dy in 0..8 {
-                    let y = by * 8 + dy;
-                    if y >= h {
-                        break;
-                    }
-                    for dx in 0..8 {
-                        let x = bx * 8 + dx;
-                        if x >= w {
-                            break;
-                        }
-                        sum += mask_pixels[y * pw + x] as f64;
-                        count += 1;
-                    }
-                }
-                aq_field[by * xs8 + bx] = if count > 0 {
-                    (sum / count as f64) as f32
-                } else {
-                    1.0
-                };
-            }
-        }
+        let block_means_bytes = nb_padded * 4;
+        let h_means = enc.client_ref().empty(block_means_bytes);
+        crate::launch::aq_field::block_mask_mean::<R>(
+            enc.client_ref(),
+            g_mask.handle().clone(),
+            h_means.clone(),
+            w as u32,
+            h as u32,
+            pw as u32,
+            ph as u32,
+        );
+        let mut aq_means_bytes = enc.client_ref().read(alloc::vec![h_means]);
+        let aq_bytes = aq_means_bytes.pop().expect("read[0]");
+        let aq_field_means: Vec<f32> = f32::from_bytes(&aq_bytes).to_vec();
         // Convert mean → adaptive qac per block.
-        let aq_field = block_means_to_qac_field(&aq_field, distance);
+        let aq_field = block_means_to_qac_field(&aq_field_means, distance);
         mark("aq_field");
 
         // Stage 4: cost grids — DCT8, DCT16x16, DCT16x8, DCT8x16
