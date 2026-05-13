@@ -68,3 +68,11 @@ opt-level = 3
 lto = "fat"
 debug = false
 codegen-units = 1
+
+# Local fork of cubecl-cuda 0.10.0 with the pinned-memory threshold
+# bumped from 100 MB to 1 GB. Our 144 MB xyb plane downloads were
+# falling back to pageable bounce-buffer host allocations; pinned
+# memory is 5-10× faster at this size per perf_raw_cuda_upload.
+# See local-cubecl-cuda/src/compute/command.rs (FORK PATCH comment).
+[patch.crates-io]
+cubecl-cuda = { path = "local-cubecl-cuda" }
