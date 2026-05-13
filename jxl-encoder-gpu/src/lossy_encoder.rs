@@ -1341,6 +1341,18 @@ impl<R: Runtime> LossyEncoder<R> {
         // DCT2x2). Reuse the GpuBlocks gathered above for the DCT8 cost
         // grid — all 5 strategies extract 8x8 tiles → 64 coefs.
         //
+        // Distance gate: at d>=K_SUBBLOCK_DISTANCE_GATE the sub-block
+        // strategies are tuned for high-quality (low-distance) work and
+        // are picked very rarely on photo content. Skipping the 5 cost
+        // grid evaluations saves ~135 ms at 12 MP (the largest single
+        // chunk inside the prepare GPU phase).
+        //
+        // Set the gate at 0.7 so d=1.0 / 1.5 / 2.0+ all skip; d<=0.5
+        // continues to evaluate them. Verified by corpus_regression
+        // (33 cases × 11 images, 0.5% tolerance).
+        const K_SUBBLOCK_DISTANCE_GATE: f32 = 0.7;
+        let evaluate_subblock_costs = target_distance < K_SUBBLOCK_DISTANCE_GATE;
+        //
         // Hoist the mask_row_base upload out of the per-strategy loop.
         // All 5 strategies operate on the same 8×8 grid, so the row-base
         // table is identical. Theory predicted ~24 ms savings at 16 MP
@@ -1373,31 +1385,35 @@ impl<R: Runtime> LossyEncoder<R> {
         // anti-bias was set as a starting point. Bisected on the
         // 11-image corpus: 2.16 ✓, 1.6 ✓, 1.2 ✓, 1.08 ✓ (libjxl).
         // Now at exact libjxl reference value.
-        let cost_dct4x4 = strategy_search_costs_subblock_8x8_with_handle(
-            enc,
-            &g_8x,
-            &g_8y,
-            &g_8b,
-            pw,
-            ph,
-            &g_mask,
-            &h_mrb_subblock,
-            mask_row_base_subblock.len(),
-            RAW_STRATEGY_DCT4X4,
-            &dct4x4_x,
-            &dct4x4_y,
-            &dct4x4_b,
-            &inv_4x4_x,
-            &inv_4x4_y,
-            &inv_4x4_b,
-            qac,
-            qac,
-            qac,
-            0,
-            0,
-            scaled_constants,
-            1.08,
-        );
+        let cost_dct4x4 = if evaluate_subblock_costs {
+            strategy_search_costs_subblock_8x8_with_handle(
+                enc,
+                &g_8x,
+                &g_8y,
+                &g_8b,
+                pw,
+                ph,
+                &g_mask,
+                &h_mrb_subblock,
+                mask_row_base_subblock.len(),
+                RAW_STRATEGY_DCT4X4,
+                &dct4x4_x,
+                &dct4x4_y,
+                &dct4x4_b,
+                &inv_4x4_x,
+                &inv_4x4_y,
+                &inv_4x4_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
+                1.08,
+            )
+        } else {
+            Vec::new()
+        };
 
         let (dct4x8_x, dct4x8_y, dct4x8_b) = dct4x8_weights_per_channel();
         let inv_4x8_x: Vec<f32> = dct4x8_x.iter().map(|w| 1.0 / w).collect();
@@ -1408,56 +1424,64 @@ impl<R: Runtime> LossyEncoder<R> {
         // because at 0.95 the strat-wins photo 2684452d regresses
         // +2% (FP-tied path-shift; bisected 1.72 ✓ → 1.2 ✓ → 1.0 ✓
         // → 0.98 ✓ → 0.95 ✗).
-        let cost_dct4x8 = strategy_search_costs_subblock_8x8_with_handle(
-            enc,
-            &g_8x,
-            &g_8y,
-            &g_8b,
-            pw,
-            ph,
-            &g_mask,
-            &h_mrb_subblock,
-            mask_row_base_subblock.len(),
-            RAW_STRATEGY_DCT4X8,
-            &dct4x8_x,
-            &dct4x8_y,
-            &dct4x8_b,
-            &inv_4x8_x,
-            &inv_4x8_y,
-            &inv_4x8_b,
-            qac,
-            qac,
-            qac,
-            0,
-            0,
-            scaled_constants,
-            0.98,
-        );
-        let cost_dct8x4 = strategy_search_costs_subblock_8x8_with_handle(
-            enc,
-            &g_8x,
-            &g_8y,
-            &g_8b,
-            pw,
-            ph,
-            &g_mask,
-            &h_mrb_subblock,
-            mask_row_base_subblock.len(),
-            RAW_STRATEGY_DCT8X4,
-            &dct4x8_x,
-            &dct4x8_y,
-            &dct4x8_b,
-            &inv_4x8_x,
-            &inv_4x8_y,
-            &inv_4x8_b,
-            qac,
-            qac,
-            qac,
-            0,
-            0,
-            scaled_constants,
-            0.98,
-        );
+        let cost_dct4x8 = if evaluate_subblock_costs {
+            strategy_search_costs_subblock_8x8_with_handle(
+                enc,
+                &g_8x,
+                &g_8y,
+                &g_8b,
+                pw,
+                ph,
+                &g_mask,
+                &h_mrb_subblock,
+                mask_row_base_subblock.len(),
+                RAW_STRATEGY_DCT4X8,
+                &dct4x8_x,
+                &dct4x8_y,
+                &dct4x8_b,
+                &inv_4x8_x,
+                &inv_4x8_y,
+                &inv_4x8_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
+                0.98,
+            )
+        } else {
+            Vec::new()
+        };
+        let cost_dct8x4 = if evaluate_subblock_costs {
+            strategy_search_costs_subblock_8x8_with_handle(
+                enc,
+                &g_8x,
+                &g_8y,
+                &g_8b,
+                pw,
+                ph,
+                &g_mask,
+                &h_mrb_subblock,
+                mask_row_base_subblock.len(),
+                RAW_STRATEGY_DCT8X4,
+                &dct4x8_x,
+                &dct4x8_y,
+                &dct4x8_b,
+                &inv_4x8_x,
+                &inv_4x8_y,
+                &inv_4x8_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
+                0.98,
+            )
+        } else {
+            Vec::new()
+        };
 
         // IDENTITY: 2.09 → 1.85 (May 9 2026, ~12% reduction gated by
         // corpus regression test). libjxl reference is 1.0428 but
@@ -1475,31 +1499,35 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_id_x: Vec<f32> = id_x.iter().map(|w| 1.0 / w).collect();
         let inv_id_y: Vec<f32> = id_y.iter().map(|w| 1.0 / w).collect();
         let inv_id_b: Vec<f32> = id_b.iter().map(|w| 1.0 / w).collect();
-        let cost_identity = strategy_search_costs_subblock_8x8_with_handle(
-            enc,
-            &g_8x,
-            &g_8y,
-            &g_8b,
-            pw,
-            ph,
-            &g_mask,
-            &h_mrb_subblock,
-            mask_row_base_subblock.len(),
-            RAW_STRATEGY_IDENTITY,
-            &id_x,
-            &id_y,
-            &id_b,
-            &inv_id_x,
-            &inv_id_y,
-            &inv_id_b,
-            qac,
-            qac,
-            qac,
-            0,
-            0,
-            scaled_constants,
-            1.85,
-        );
+        let cost_identity = if evaluate_subblock_costs {
+            strategy_search_costs_subblock_8x8_with_handle(
+                enc,
+                &g_8x,
+                &g_8y,
+                &g_8b,
+                pw,
+                ph,
+                &g_mask,
+                &h_mrb_subblock,
+                mask_row_base_subblock.len(),
+                RAW_STRATEGY_IDENTITY,
+                &id_x,
+                &id_y,
+                &id_b,
+                &inv_id_x,
+                &inv_id_y,
+                &inv_id_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
+                1.85,
+            )
+        } else {
+            Vec::new()
+        };
 
         // DCT2X2: 1.90 → 0.95 (libjxl reference, May 9 2026, gated by
         // corpus regression test). Bisected: 1.90 ✓ → 1.5 ✓ → 1.0 ✓
@@ -1508,30 +1536,62 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_d2_x: Vec<f32> = d2_x.iter().map(|w| 1.0 / w).collect();
         let inv_d2_y: Vec<f32> = d2_y.iter().map(|w| 1.0 / w).collect();
         let inv_d2_b: Vec<f32> = d2_b.iter().map(|w| 1.0 / w).collect();
-        let cost_dct2x2 = strategy_search_costs_subblock_8x8_with_handle(
-            enc,
-            &g_8x,
-            &g_8y,
-            &g_8b,
-            pw,
-            ph,
-            &g_mask,
-            &h_mrb_subblock,
-            mask_row_base_subblock.len(),
-            RAW_STRATEGY_DCT2X2,
+        let cost_dct2x2 = if evaluate_subblock_costs {
+            strategy_search_costs_subblock_8x8_with_handle(
+                enc,
+                &g_8x,
+                &g_8y,
+                &g_8b,
+                pw,
+                ph,
+                &g_mask,
+                &h_mrb_subblock,
+                mask_row_base_subblock.len(),
+                RAW_STRATEGY_DCT2X2,
+                &d2_x,
+                &d2_y,
+                &d2_b,
+                &inv_d2_x,
+                &inv_d2_y,
+                &inv_d2_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
+                0.95,
+            )
+        } else {
+            Vec::new()
+        };
+        let _ = (
+            &dct4x4_x,
+            &dct4x4_y,
+            &dct4x4_b,
+            &inv_4x4_x,
+            &inv_4x4_y,
+            &inv_4x4_b,
+            &dct4x8_x,
+            &dct4x8_y,
+            &dct4x8_b,
+            &inv_4x8_x,
+            &inv_4x8_y,
+            &inv_4x8_b,
+            &id_x,
+            &id_y,
+            &id_b,
+            &inv_id_x,
+            &inv_id_y,
+            &inv_id_b,
             &d2_x,
             &d2_y,
             &d2_b,
             &inv_d2_x,
             &inv_d2_y,
             &inv_d2_b,
-            qac,
-            qac,
-            qac,
-            0,
-            0,
-            scaled_constants,
-            0.95,
+            &h_mrb_subblock,
+            &mask_row_base_subblock,
         );
         mark("cost_subblock_8x8");
 
@@ -1904,12 +1964,22 @@ impl<R: Runtime> LossyEncoder<R> {
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
         // reference) — same trick as DCT32 needed.
         // AFV cost grids skipped (None) — see the cost-grid stage above.
+        // Selector accepts None for any cost grid that the gate above
+        // skipped (empty Vec); convert empties to None so the selector
+        // doesn't read garbage.
+        fn opt<'a>(v: &'a [f32]) -> Option<&'a [f32]> {
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
         let sub_blocks = crate::pipeline::SubBlockCostGrids {
-            dct4x4: Some(&cost_dct4x4),
-            dct4x8: Some(&cost_dct4x8),
-            dct8x4: Some(&cost_dct8x4),
-            identity: Some(&cost_identity),
-            dct2x2: Some(&cost_dct2x2),
+            dct4x4: opt(&cost_dct4x4),
+            dct4x8: opt(&cost_dct4x8),
+            dct8x4: opt(&cost_dct8x4),
+            identity: opt(&cost_identity),
+            dct2x2: opt(&cost_dct2x2),
             afv0: None,
             afv1: None,
             afv2: None,

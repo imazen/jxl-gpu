@@ -131,6 +131,30 @@ fn main() {
         .encode_lossy_to_bitstream_via_precomputed_from_u8(&lossy, &pixels_u8, distance)
         .expect("warm");
 
+    // Report per-prepare-stage marks once on a warm run so we can see
+    // where the 250+ ms goes inside `prepare_strategy_search_plan`.
+    {
+        use std::time::Instant as I;
+        let mut last = I::now();
+        let mut marks: Vec<(&'static str, f64)> = Vec::new();
+        let mut on_mark = |name: &'static str| {
+            let now = I::now();
+            marks.push((name, now.duration_since(last).as_secs_f64() * 1000.0));
+            last = now;
+        };
+        let _plan = lossy.prepare_strategy_search_plan_traced_from_u8(
+            &enc,
+            &pixels_u8,
+            distance,
+            &mut on_mark,
+        );
+        eprintln!("--- prepare per-stage (one warm run) ---");
+        for (name, ms) in &marks {
+            eprintln!("  {name:30} {ms:7.2} ms");
+        }
+        eprintln!("----------------------------------------");
+    }
+
     let mut tot = vec![0.0f64; 8];
     for _ in 0..runs {
         let t0 = Instant::now();
