@@ -344,3 +344,118 @@ pub struct ReshapedTransformOutput {
 // Suppress an unused-import warning when no tests are compiled.
 #[allow(dead_code)]
 fn _box_marker(_: Box<u8>) {}
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use super::*;
+    use cubecl::cuda::CudaRuntime;
+
+    /// Smoke test: run the full DCT8 GPU producer on a tiny
+    /// synthetic image and verify the output buffer shapes /
+    /// non-trivial content. Real bitstream parity vs CPU
+    /// transform_and_quantize is the next chunk (needs encode_from_precomputed
+    /// + encode_from_pre_quantized_ac comparison).
+    #[test]
+    fn pre_quantized_dct8_orchestrator_smoke() {
+        let enc: GpuEncoder<CudaRuntime> = GpuEncoder::new();
+        let xsize_blocks = 4usize;
+        let ysize_blocks = 4usize;
+        let n_blocks = xsize_blocks * ysize_blocks;
+        let pw = xsize_blocks * 8;
+        let ph = ysize_blocks * 8;
+
+        // Pseudo-random XYB planes (post-gaborish-equivalent values).
+        let make_plane = |seed: usize| -> Vec<f32> {
+            (0..pw * ph)
+                .map(|i| {
+                    let s = ((i + seed * 17) as f32) * 0.0123;
+                    0.05 + 0.04 * s.sin()
+                })
+                .collect()
+        };
+        let xx = make_plane(1);
+        let xy = make_plane(7);
+        let xb = make_plane(13);
+
+        let xx_g = enc.upload_plane(&xx, pw as u32, ph as u32);
+        let xy_g = enc.upload_plane(&xy, pw as u32, ph as u32);
+        let xb_g = enc.upload_plane(&xb, pw as u32, ph as u32);
+
+        // Synthetic non-uniform DCT8 weights / qac / cfl_map.
+        let weights_x: [f32; 64] = core::array::from_fn(|i| 0.5 + i as f32 * 0.05);
+        let weights_y: [f32; 64] = core::array::from_fn(|i| 0.7 + i as f32 * 0.03);
+        let weights_b: [f32; 64] = core::array::from_fn(|i| 0.6 + i as f32 * 0.04);
+        let qac_per_block: Vec<f32> = (0..n_blocks).map(|i| 1.5 + i as f32 * 0.02).collect();
+        // qm_multiplier: X = 1.05, Y = 1.0, B = 0.95 (synthetic).
+        let qac_qm_x: Vec<f32> = qac_per_block.iter().map(|&q| q * 1.05).collect();
+        let qac_qm_y: Vec<f32> = qac_per_block.clone();
+        let qac_qm_b: Vec<f32> = qac_per_block.iter().map(|&q| q * 0.95).collect();
+        let x_factor_per_block: Vec<f32> = (0..n_blocks).map(|i| 0.1 + i as f32 * 0.005).collect();
+        let b_factor_per_block: Vec<f32> = (0..n_blocks).map(|i| -0.2 + i as f32 * 0.003).collect();
+
+        let params = PreQuantizedDct8Params {
+            qac_per_block,
+            x_factor_per_block,
+            b_factor_per_block,
+            qac_qm_x,
+            qac_qm_y,
+            qac_qm_b,
+            inv_dc_factor_x: 4096.0 / 1024.0,
+            inv_dc_factor_y: 512.0 / 1024.0,
+            inv_dc_factor_b: 256.0 / 1024.0,
+            thresholds_x: [0.58, 0.62, 0.62, 0.62],
+            thresholds_y: [0.56, 0.62, 0.62, 0.62],
+            thresholds_b: [0.58, 0.62, 0.62, 0.62],
+        };
+
+        let out = compute_pre_quantized_ac_dct8_persistent(
+            &enc, &xx_g, &xy_g, &xb_g,
+            xsize_blocks, ysize_blocks,
+            &weights_x, &weights_y, &weights_b,
+            &params,
+        );
+
+        // Shape checks.
+        for c in 0..3 {
+            assert_eq!(out.quant_dc[c].len(), n_blocks, "quant_dc[{c}]");
+            assert_eq!(out.quant_ac[c].len(), n_blocks * 64, "quant_ac[{c}]");
+            assert_eq!(out.nzeros[c].len(), n_blocks, "nzeros[{c}]");
+            assert_eq!(out.raw_nzeros[c].len(), n_blocks, "raw_nzeros[{c}]");
+            assert_eq!(out.float_dc[c].len(), n_blocks, "float_dc[{c}]");
+        }
+
+        // DC slot of every quant_ac block must be 0 (DC is in quant_dc).
+        for c in 0..3 {
+            for b in 0..n_blocks {
+                assert_eq!(out.quant_ac[c][b * 64], 0,
+                    "quant_ac[{c}] block {b} DC slot must be 0");
+            }
+        }
+        // float_dc must be finite + non-trivially varied.
+        for c in 0..3 {
+            let mut all_eq = true;
+            let v0 = out.float_dc[c][0];
+            for &v in &out.float_dc[c] {
+                assert!(v.is_finite(), "float_dc[{c}] non-finite");
+                if (v - v0).abs() > 1e-9 { all_eq = false; }
+            }
+            assert!(!all_eq, "float_dc[{c}] should vary across blocks");
+        }
+        // nzeros must be in [0, 63] for DCT8.
+        for c in 0..3 {
+            for &n in &out.nzeros[c] {
+                assert!(n <= 63, "nzeros[{c}] exceeded 63");
+            }
+        }
+
+        // Reshape smoke: dims match.
+        let r = reshape_to_transform_output(out, xsize_blocks, ysize_blocks);
+        for c in 0..3 {
+            assert_eq!(r.quant_dc[c].len(), ysize_blocks);
+            assert_eq!(r.quant_dc[c][0].len(), xsize_blocks);
+            assert_eq!(r.quant_ac[c].len(), ysize_blocks);
+            assert_eq!(r.quant_ac[c][0].len(), xsize_blocks);
+            assert_eq!(r.quant_ac[c][0][0].len(), 64);
+        }
+    }
+}
