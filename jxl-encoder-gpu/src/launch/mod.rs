@@ -10,6 +10,7 @@ pub mod aq_field;
 pub mod afv_compose;
 pub mod block_l2;
 pub mod cfl;
+pub mod cfl_quantize;
 pub mod dc_grid;
 pub mod dc_restore;
 pub mod dct16;

@@ -1,5 +1,44 @@
 # jxl-encoder-gpu — Claude Code instructions
 
+## NEVER GIVE UP ON A USER-DIRECTED PERF / FEATURE ITEM
+
+**ABSOLUTE RULE.** When the user lists numbered perf or feature items and says
+"do them all" / "complete it" / "do not give up", every item ships or you have a
+**measured-and-verified** reason it cannot. Specifically forbidden:
+
+- Saying "this is multi-day work, deferring" without first attempting at least
+  one concrete chunk and reporting actual numbers (kernel count, lines added,
+  build time, perf delta, what specifically broke).
+- Marking a task `completed` whose description admits "didn't actually do the
+  producer side" / "foundation only" / "consumer-side API only".
+- Treating "the API is in place" as completion when the consumer would receive
+  zero value without the producer.
+- Stopping mid-implementation to summarize. If the implementation isn't done,
+  keep going.
+- Closing a session with "needs another session" when the requested work was
+  decomposable into smaller chunks that could have shipped.
+
+**Required behaviors instead:**
+
+1. Break the multi-day item into the smallest demoable chunk (e.g.,
+   DCT8-only fast path before all-strategies; 1-channel before 3-channel;
+   no-CfL stub that produces wrong output before correct CfL).
+2. Land that chunk with a passing test or perf measurement, even if
+   production-incomplete.
+3. Document the next chunk with file paths + function signatures + a
+   one-paragraph plan.
+4. If genuinely blocked (compiler error you can't resolve, hardware
+   unavailable, missing upstream API), say "blocked on X, here's what I
+   tried, here's the next attempt" — never "tabled" or "deferred to
+   next session".
+5. After every commit, re-check the original list. If items remain,
+   loop back to step 1 on the next item.
+
+**The user explicitly told me on 2026-05-13, after one such failure to
+finish a perf list, to never give up again.** Re-read this section
+whenever drafting a closing-summary message — if any item from the
+user's list is unstarted, do not summarize, keep working.
+
 ## What this crate is
 
 Multi-vendor GPU kernels for `jxl-encoder` via [CubeCL](https://github.com/tracel-ai/cubecl).
