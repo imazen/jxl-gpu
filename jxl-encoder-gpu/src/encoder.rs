@@ -2185,26 +2185,35 @@ impl<R: Runtime> GpuEncoder<R> {
         // cubecl-vs-jxl_simd DCT FP precision (~2% of borderline
         // chroma AC coefs flip by 1 near rounding ties). corpus
         // regression at 0.5% score tolerance covers this.
-        // Pre-conditions for the GPU fast path:
-        //   1. Every block uses DCT8 (raw_strategy == 0).
-        //   2. cpu_pw == gpu_pw (image width is a multiple of 16, so
-        //      the GPU's 16-multiple padding matches the CPU's
-        //      8-multiple padding). When they differ the GPU has an
-        //      extra column of blocks past cpu_xsize_blocks; the
-        //      DCT8 producer's per-block arrays would mismatch the
-        //      gathered block count and panic in
-        //      quantize_dct8_persistent_broadcast_w. Future work:
-        //      crop-to-cpu-aligned in the GPU producer or a per-block
-        //      mask. For now CPU fallback handles non-aligned widths.
-        let all_dct8 = (0..ysize_blocks).all(|by| {
-            (0..xsize_blocks).all(|bx| precomputed.ac_strategy.raw_strategy(bx, by) == 0)
-        });
-        let dims_aligned = cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize;
-        if all_dct8 && dims_aligned {
-            return run_gpu_dct8_pre_quantized_path(
-                self, &plan, &precomputed, &vardct, &quant_field_u8,
-                &params, distance, xsize_blocks, ysize_blocks,
-            );
+        // GPU pre-quantized AC fast path: DISABLED in production.
+        //
+        // The producer (forks::pre_quantized_ac::compute_pre_quantized_ac_dct8_persistent)
+        // is correct (passes kernel parity tests + corpus regression
+        // when fired) but the chain of ~15 small cubecl kernel launches
+        // (gather × 3, DCT × 3, quantize Y, cfl_quantize × 2, DC × 3,
+        // nzeros × 3, batched download) carries enough per-launch
+        // overhead that wall-clock is WORSE than CPU transform_and_quantize
+        // (~545 ms vs ~397 ms at 12 MP / d=4.0 on the test image).
+        //
+        // To turn this on as a real perf win, the kernels need to be
+        // FUSED — single kernel per channel doing gather+DCT+quant+CfL
+        // → 3 kernel launches total instead of ~15. cubecl 0.10's
+        // per-launch overhead is the bottleneck.
+        //
+        // Producer remains accessible via the public
+        // `forks::pre_quantized_ac` module for benchmarking and as the
+        // foundation for the future fused implementation.
+        const ENABLE_GPU_DCT8_FAST_PATH: bool = false;
+        if ENABLE_GPU_DCT8_FAST_PATH {
+            let all_dct8 = (0..ysize_blocks).all(|by| {
+                (0..xsize_blocks).all(|bx| precomputed.ac_strategy.raw_strategy(bx, by) == 0)
+            });
+            if all_dct8 {
+                return run_gpu_dct8_pre_quantized_path(
+                    self, &plan, &precomputed, &vardct, &quant_field_u8,
+                    &params, distance, xsize_blocks, ysize_blocks,
+                );
+            }
         }
 
         vardct

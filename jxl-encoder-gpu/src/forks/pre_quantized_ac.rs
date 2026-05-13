@@ -108,9 +108,42 @@ pub fn compute_pre_quantized_ac_dct8_persistent<R: Runtime>(
     let client = enc.client_ref();
 
     // Step 1: gather pixel blocks (8×8) per channel.
-    let g_8x = enc.gather_blocks_persistent(xx_g, 8, 8);
-    let g_8y = enc.gather_blocks_persistent(xy_g, 8, 8);
-    let g_8b = enc.gather_blocks_persistent(xb_g, 8, 8);
+    //
+    // SUB-RECT gather: `xsize_blocks` may be smaller than `gpu_pw / 8`
+    // when the GPU pads to 16-multiple while the CPU encoder only
+    // pads to 8-multiple (e.g., width=2823 → cpu_pw=2824, gpu_pw=2832,
+    // cpu_xsize_blocks=353, gpu_xsize_blocks=354). We gather only the
+    // first `xsize_blocks` columns of blocks per row so the per-block
+    // arrays' lengths match throughout the pipeline. The plane stride
+    // stays at gpu_pw (since the gpu plane is laid out at gpu_pw
+    // stride and we just read fewer columns).
+    fn gather_subrect<R: cubecl::Runtime>(
+        enc: &GpuEncoder<R>,
+        plane: &GpuPlane<R>,
+        xsize_blocks: usize,
+        ysize_blocks: usize,
+    ) -> crate::persistent::GpuBlocks<R> {
+        let plane_w = plane.width();
+        let n_blocks = (xsize_blocks * ysize_blocks) as u32;
+        let coeffs_per_block = 64u32;
+        let n_out = (n_blocks as usize) * (coeffs_per_block as usize);
+        let h_out = enc.client_ref().empty(n_out * 4);
+        crate::launch::gather::gather_blocks::<R>(
+            enc.client_ref(),
+            plane.handle().clone(),
+            h_out.clone(),
+            (plane.width() as usize) * (plane.height() as usize),
+            n_out,
+            plane_w,
+            xsize_blocks as u32,
+            8,
+            8,
+        );
+        crate::persistent::GpuBlocks::from_handle(h_out, n_blocks, coeffs_per_block)
+    }
+    let g_8x = gather_subrect(enc, xx_g, xsize_blocks, ysize_blocks);
+    let g_8y = gather_subrect(enc, xy_g, xsize_blocks, ysize_blocks);
+    let g_8b = gather_subrect(enc, xb_g, xsize_blocks, ysize_blocks);
 
     // Step 2: forward DCT8 per channel.
     let dct_x = enc.dct_8x8_persistent(&g_8x);
