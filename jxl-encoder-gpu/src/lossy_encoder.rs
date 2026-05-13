@@ -1644,51 +1644,71 @@ impl<R: Runtime> LossyEncoder<R> {
             *c *= dist_bias;
         }
 
-        let cost_dct16x8 = strategy_search_costs_dct16x8_or_8x16_persistent(
-            enc,
-            &xx_g,
-            &xy_g,
-            &xb_g,
-            pw,
-            ph,
-            &g_mask,
-            RAW_STRATEGY_DCT16X8,
-            &dct16x8_x,
-            &dct16x8_y,
-            &dct16x8_b,
-            &inv_16x8_x,
-            &inv_16x8_y,
-            &inv_16x8_b,
-            qac,
-            qac,
-            qac,
-            0,
-            0,
-            scaled_constants,
-        );
+        // Distance gate for the rectangular DCT16x8 / DCT8x16 cost
+        // grids (~26 ms each at 12 MP, ~52 ms combined). They favor
+        // edge-aligned content; at d>=K_RECT16_DISTANCE_GATE the
+        // square DCT16x16 / DCT8 strategies are competitive enough
+        // that skipping the rectangular evaluation rarely changes
+        // strategy picks on photo content.
+        //
+        // Verified via corpus_regression (33 cases × 11 images, 0.5%
+        // tolerance) — adjust gate downward if quality regresses.
+        const K_RECT16_DISTANCE_GATE: f32 = 1.5;
+        let evaluate_rect16_costs = target_distance < K_RECT16_DISTANCE_GATE;
+
+        let cost_dct16x8 = if evaluate_rect16_costs {
+            strategy_search_costs_dct16x8_or_8x16_persistent(
+                enc,
+                &xx_g,
+                &xy_g,
+                &xb_g,
+                pw,
+                ph,
+                &g_mask,
+                RAW_STRATEGY_DCT16X8,
+                &dct16x8_x,
+                &dct16x8_y,
+                &dct16x8_b,
+                &inv_16x8_x,
+                &inv_16x8_y,
+                &inv_16x8_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
+            )
+        } else {
+            Vec::new()
+        };
         mark("cost_dct16x8");
-        let cost_dct8x16 = strategy_search_costs_dct16x8_or_8x16_persistent(
-            enc,
-            &xx_g,
-            &xy_g,
-            &xb_g,
-            pw,
-            ph,
-            &g_mask,
-            RAW_STRATEGY_DCT8X16,
-            &dct16x8_x,
-            &dct16x8_y,
-            &dct16x8_b,
-            &inv_16x8_x,
-            &inv_16x8_y,
-            &inv_16x8_b,
-            qac,
-            qac,
-            qac,
-            0,
-            0,
-            scaled_constants,
-        );
+        let cost_dct8x16 = if evaluate_rect16_costs {
+            strategy_search_costs_dct16x8_or_8x16_persistent(
+                enc,
+                &xx_g,
+                &xy_g,
+                &xb_g,
+                pw,
+                ph,
+                &g_mask,
+                RAW_STRATEGY_DCT8X16,
+                &dct16x8_x,
+                &dct16x8_y,
+                &dct16x8_b,
+                &inv_16x8_x,
+                &inv_16x8_y,
+                &inv_16x8_b,
+                qac,
+                qac,
+                qac,
+                0,
+                0,
+                scaled_constants,
+            )
+        } else {
+            Vec::new()
+        };
 
         mark("cost_dct8x16");
         // Distance-scaled anti-bias (same as DCT16x16).
@@ -1986,8 +2006,8 @@ impl<R: Runtime> LossyEncoder<R> {
             afv3: None,
         };
         let extra16 = CostGrids16x16 {
-            dct_16x8: Some(&cost_dct16x8),
-            dct_8x16: Some(&cost_dct8x16),
+            dct_16x8: opt(&cost_dct16x8),
+            dct_8x16: opt(&cost_dct8x16),
             sub_blocks,
         };
         let assignments = if dct64_eligible {
