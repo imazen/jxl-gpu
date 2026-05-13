@@ -2185,10 +2185,22 @@ impl<R: Runtime> GpuEncoder<R> {
         // cubecl-vs-jxl_simd DCT FP precision (~2% of borderline
         // chroma AC coefs flip by 1 near rounding ties). corpus
         // regression at 0.5% score tolerance covers this.
+        // Pre-conditions for the GPU fast path:
+        //   1. Every block uses DCT8 (raw_strategy == 0).
+        //   2. cpu_pw == gpu_pw (image width is a multiple of 16, so
+        //      the GPU's 16-multiple padding matches the CPU's
+        //      8-multiple padding). When they differ the GPU has an
+        //      extra column of blocks past cpu_xsize_blocks; the
+        //      DCT8 producer's per-block arrays would mismatch the
+        //      gathered block count and panic in
+        //      quantize_dct8_persistent_broadcast_w. Future work:
+        //      crop-to-cpu-aligned in the GPU producer or a per-block
+        //      mask. For now CPU fallback handles non-aligned widths.
         let all_dct8 = (0..ysize_blocks).all(|by| {
             (0..xsize_blocks).all(|bx| precomputed.ac_strategy.raw_strategy(bx, by) == 0)
         });
-        if all_dct8 {
+        let dims_aligned = cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize;
+        if all_dct8 && dims_aligned {
             return run_gpu_dct8_pre_quantized_path(
                 self, &plan, &precomputed, &vardct, &quant_field_u8,
                 &params, distance, xsize_blocks, ysize_blocks,
