@@ -113,7 +113,12 @@ fn main() {
     }
 
     let enc: GpuEncoder<B> = GpuEncoder::new();
-    let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, w, h);
+    let effort: u8 = std::env::var("EFFORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7);
+    let lossy: LossyEncoder<B> = LossyEncoder::new(&enc, w, h).with_effort(effort);
+    eprintln!("encoder effort = {effort}");
 
     // ── Warm both paths (cubecl pool) ─────────────────────────────
     let _ = enc

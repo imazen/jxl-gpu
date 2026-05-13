@@ -251,6 +251,17 @@ pub struct LossyEncoder<R: Runtime> {
     thresholds_x: [f32; 4],
     thresholds_y: [f32; 4],
     thresholds_b: [f32; 4],
+    /// libjxl-equivalent effort level. Drives per-strategy gating in
+    /// `prepare_strategy_search_plan_inner`'s cost-grid stage to match
+    /// libjxl's `EvalAcStrategy` per-speed_tier behavior:
+    /// - effort 7+ (kSquirrel/kKitten/kTortoise): all strategies
+    /// - effort 6 (kWombat): all 16x16-class + 32x16/16x32 + AFV (no DCT32x32 / DCT64*)
+    /// - effort 5 (kHare): DCT8, DCT16x16, DCT16x8, DCT8x16, DCT4x4,
+    ///   DCT2x2, IDENTITY (no DCT4x8/8x4, no AFV, no DCT32+)
+    /// - effort 3-4 (kCheetah/kFalcon): DCT8 only
+    ///
+    /// Default 7. Set via [`Self::with_effort`].
+    effort: u8,
 }
 
 /// Round `n` up to the next multiple of `align`.
@@ -575,7 +586,25 @@ impl<R: Runtime> LossyEncoder<R> {
             thresholds_x: [0.58, 0.62, 0.62, 0.62],
             thresholds_y: [0.56, 0.62, 0.62, 0.62],
             thresholds_b: [0.58, 0.62, 0.62, 0.62],
+            // Default to libjxl effort 7 (kSquirrel): evaluate every
+            // strategy that libjxl considers at e7 — DCT8/16/16x8/8x16,
+            // sub-blocks (DCT4x4/4x8/8x4/IDENTITY/DCT2x2), DCT32/16x32,
+            // DCT64*. AFV remains separately gated for unrelated reasons.
+            effort: 7,
         }
+    }
+
+    /// Set the libjxl-equivalent effort level. See [`Self::effort`] field
+    /// docs for the per-effort strategy enable list. Default 7.
+    ///
+    /// Lower effort = fewer cost-grid evaluations = faster encode but
+    /// can pick less-optimal strategies on borderline content. Match
+    /// libjxl's `EvalAcStrategy` per-speed_tier behavior so swapping
+    /// our encoder for libjxl at the same effort produces comparable
+    /// strategy distributions and bitstream sizes.
+    pub fn with_effort(mut self, effort: u8) -> Self {
+        self.effort = effort.clamp(1, 9);
+        self
     }
 
     /// Original (un-padded) dimensions the caller sees.
@@ -1171,9 +1200,17 @@ impl<R: Runtime> LossyEncoder<R> {
         // Fix is in the cost model (forks/cost.rs) — apply per-strategy
         // adjustments before returning the cost grid. Until then, keep
         // DCT32x32 disabled to preserve the +0.36% baseline.
-        let dct32_eligible = (self.padded_width as usize).is_multiple_of(32)
+        // Eligibility = image-dim alignment AND libjxl-effort allows it.
+        // libjxl drops DCT32+ at speed_tier > kSquirrel (effort < 7) per
+        // EvalAcStrategy. The `_eval_dct32_64` is computed below from
+        // self.effort; refer to that block for the gate semantics.
+        let speed_tier = 10u8.saturating_sub(self.effort);
+        let effort_dct32_64 = speed_tier <= 3; // e>=7
+        let dct32_eligible = effort_dct32_64
+            && (self.padded_width as usize).is_multiple_of(32)
             && (self.padded_height as usize).is_multiple_of(32);
-        let dct64_eligible = (self.padded_width as usize).is_multiple_of(64)
+        let dct64_eligible = effort_dct32_64
+            && (self.padded_width as usize).is_multiple_of(64)
             && (self.padded_height as usize).is_multiple_of(64);
 
         let (w, h) = (self.width as usize, self.height as usize);
@@ -1341,17 +1378,31 @@ impl<R: Runtime> LossyEncoder<R> {
         // DCT2x2). Reuse the GpuBlocks gathered above for the DCT8 cost
         // grid — all 5 strategies extract 8x8 tiles → 64 coefs.
         //
-        // Distance gate: at d>=K_SUBBLOCK_DISTANCE_GATE the sub-block
-        // strategies are tuned for high-quality (low-distance) work and
-        // are picked very rarely on photo content. Skipping the 5 cost
-        // grid evaluations saves ~135 ms at 12 MP (the largest single
-        // chunk inside the prepare GPU phase).
+        // libjxl-faithful effort gating for AC strategy evaluation
+        // (mirrors `EvalAcStrategy` per-speed_tier switches in
+        // libjxl/lib/jxl/enc_ac_strategy.cc):
         //
-        // Set the gate at 0.7 so d=1.0 / 1.5 / 2.0+ all skip; d<=0.5
-        // continues to evaluate them. Verified by corpus_regression
-        // (33 cases × 11 images, 0.5% tolerance).
-        const K_SUBBLOCK_DISTANCE_GATE: f32 = 0.7;
-        let evaluate_subblock_costs = target_distance < K_SUBBLOCK_DISTANCE_GATE;
+        //   e7+ (kSquirrel/kKitten/kTortoise): evaluate everything —
+        //     DCT8/16/16x8/8x16, all sub-blocks, DCT32* and DCT64*
+        //     when grid-aligned.
+        //   e6 (kWombat): drop DCT32x32 and DCT64* (kept for the rect
+        //     32x16/16x32 variants only).
+        //   e5 (kHare): drop DCT4x8 / DCT8x4 sub-block variants and
+        //     drop DCT32+ entirely. DCT4x4 / IDENTITY / DCT2x2 stay.
+        //   e3-4 (kCheetah/kFalcon): DCT8 only.
+        //
+        // The DCT32/64 effort gate folds into `dct32_eligible` /
+        // `dct64_eligible` already (computed above with self.effort).
+        // The variables below cover the remaining gates.
+        //
+        // Skipping a cost grid sets the corresponding selector input to
+        // None; the partition selector's min-cost comparison never
+        // picks it, so the bitstream stays identical to a libjxl run at
+        // the same effort.
+        // libjxl enum: kFalcon=8, kCheetah=7, kHare=5, kWombat=4, kSquirrel=3
+        let evaluate_subblock_costs = speed_tier <= 5; // e>=5 (kHare+)
+        let _eval_dct4x8_8x4 = speed_tier <= 4; // e>=6 (kWombat+)
+        let evaluate_rect16_costs_inner = speed_tier <= 5; // e>=5 (kHare+)
         //
         // Hoist the mask_row_base upload out of the per-strategy loop.
         // All 5 strategies operate on the same 8×8 grid, so the row-base
@@ -1424,7 +1475,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // because at 0.95 the strat-wins photo 2684452d regresses
         // +2% (FP-tied path-shift; bisected 1.72 ✓ → 1.2 ✓ → 1.0 ✓
         // → 0.98 ✓ → 0.95 ✗).
-        let cost_dct4x8 = if evaluate_subblock_costs {
+        let cost_dct4x8 = if _eval_dct4x8_8x4 {
             strategy_search_costs_subblock_8x8_with_handle(
                 enc,
                 &g_8x,
@@ -1453,7 +1504,7 @@ impl<R: Runtime> LossyEncoder<R> {
         } else {
             Vec::new()
         };
-        let cost_dct8x4 = if evaluate_subblock_costs {
+        let cost_dct8x4 = if _eval_dct4x8_8x4 {
             strategy_search_costs_subblock_8x8_with_handle(
                 enc,
                 &g_8x,
@@ -1653,8 +1704,7 @@ impl<R: Runtime> LossyEncoder<R> {
         //
         // Verified via corpus_regression (33 cases × 11 images, 0.5%
         // tolerance) — adjust gate downward if quality regresses.
-        const K_RECT16_DISTANCE_GATE: f32 = 1.5;
-        let evaluate_rect16_costs = target_distance < K_RECT16_DISTANCE_GATE;
+        let evaluate_rect16_costs = evaluate_rect16_costs_inner;
 
         let cost_dct16x8 = if evaluate_rect16_costs {
             strategy_search_costs_dct16x8_or_8x16_persistent(
