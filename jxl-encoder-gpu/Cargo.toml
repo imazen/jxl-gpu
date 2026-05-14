@@ -53,6 +53,10 @@ image = { workspace = true }
 jxl = { workspace = true }
 fast-ssim2 = { workspace = true }
 imgref = { workspace = true }
+# CPU butteraugli — for buttloop_parity diagnostic comparing GPU vs CPU
+# per-tile distance maps. Per-image dev-dep, not part of the runtime.
+butteraugli = { workspace = true }
+rgb = { workspace = true }
 # Raw CUDA driver bindings — used only by examples/perf_raw_cuda_upload.rs
 # to benchmark cuMemcpyHtoD directly, bypassing cubecl. Matches the
 # version cubecl-cuda already pulls in transitively (0.19.x), so no

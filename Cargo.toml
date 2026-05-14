@@ -44,6 +44,13 @@ imgref = "1"
 # `feat/internals-from-linear-planes` branch on imazen/zenmetrics).
 butteraugli-gpu = { path = "../zenmetrics/crates/butteraugli-gpu", default-features = false, features = ["internals"] }
 
+# CPU butteraugli — used by examples/buttloop_parity to compare per-tile
+# distance against the GPU implementation. Path dep on the local checkout
+# (workspace-style: ../../butteraugli/butteraugli) so we always test
+# against the latest reference. Default features include rayon + AVX-512.
+butteraugli = { path = "../../butteraugli/butteraugli", version = "0.9.2" }
+rgb = "0.8"
+
 [profile.dev]
 # Compile at opt-level=3 even in debug builds — GPU kernels and
 # DCT inner loops are too slow at -O0 to be useful during iteration.

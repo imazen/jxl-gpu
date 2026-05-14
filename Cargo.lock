@@ -228,6 +228,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
+name = "butteraugli"
+version = "0.9.2"
+dependencies = [
+ "archmage",
+ "imgref",
+ "magetypes",
+ "rayon",
+ "rgb",
+]
+
+[[package]]
 name = "butteraugli-gpu"
 version = "0.0.1"
 dependencies = [
@@ -1882,6 +1893,7 @@ dependencies = [
 name = "jxl-encoder-gpu"
 version = "0.0.1"
 dependencies = [
+ "butteraugli",
  "butteraugli-gpu",
  "bytemuck",
  "cubecl",
@@ -1893,6 +1905,7 @@ dependencies = [
  "jxl-encoder",
  "jxl-encoder-simd",
  "rayon",
+ "rgb",
 ]
 
 [[package]]
@@ -2839,6 +2852,15 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "webpki-roots",
+]
+
+[[package]]
+name = "rgb"
+version = "0.8.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
+dependencies = [
+ "bytemuck",
 ]
 
 [[package]]
