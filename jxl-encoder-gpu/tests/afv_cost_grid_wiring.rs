@@ -117,10 +117,20 @@ fn test_afv_off_by_default_no_picks() {
 
 /// Opt-in path: AFV stage RUNS. Asserts the cost-grid plumbing works
 /// end-to-end without panic, the per-stage tracing fires `cost_afv`,
-/// and assignments are returned (with or without AFV picks; the picker
-/// behavior under the calibration scaffold isn't load-bearing).
+/// and assignments are returned. With chunk 2's libjxl-faithful
+/// formula in production, the picker now compares AFV costs on the
+/// same scale as DCT8 / DCT4x4 / etc., so picks reflect a real
+/// cost-model decision.
+///
+/// Picks are LOGGED but not strongly asserted — the picker may still
+/// favor DCT8 on a 16-block synthetic test even when AFV would win on
+/// a real image. The strong assertion is "no panic, finite costs,
+/// non-empty plan".
 #[test]
 fn test_afv_opt_in_runs_without_panic() {
+    use jxl_encoder_gpu::forks::transform::{
+        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
+    };
     let enc: GpuEncoder<Backend> = GpuEncoder::new();
     let (r, g, b) = diagonal_pattern();
     let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, W, H).with_evaluate_afv(true);
@@ -143,6 +153,30 @@ fn test_afv_opt_in_runs_without_panic() {
     assert!(
         !plan.assignments.is_empty(),
         "plan.assignments must be non-empty"
+    );
+
+    // Pick distribution log: how many of each strategy did the
+    // selector pick? Useful for chunk 2c diagnosis (does the new
+    // formula produce AFV picks at all?).
+    let mut counts = std::collections::BTreeMap::<u8, usize>::new();
+    for a in &plan.assignments {
+        *counts.entry(a.raw_strategy).or_insert(0) += 1;
+    }
+    let n_afv = plan
+        .assignments
+        .iter()
+        .filter(|a| {
+            a.raw_strategy == RAW_STRATEGY_AFV0
+                || a.raw_strategy == RAW_STRATEGY_AFV1
+                || a.raw_strategy == RAW_STRATEGY_AFV2
+                || a.raw_strategy == RAW_STRATEGY_AFV3
+        })
+        .count();
+    std::println!(
+        "[afv-pick-dist] diagonal 32×32 with AFV ON: {} total, {} AFV; counts={:?}",
+        plan.assignments.len(),
+        n_afv,
+        counts
     );
 }
 
