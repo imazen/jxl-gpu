@@ -1282,9 +1282,17 @@ impl<R: Runtime> LossyEncoder<R> {
         // any caller that indexes them will panic — the existing
         // debug_assert checking len was removed.
         let g_mask = enc.mask1x1_persistent(&xy_g);
-        let xyb_x: Vec<f32> = Vec::new();
-        let xyb_y: Vec<f32> = Vec::new();
-        let xyb_b: Vec<f32> = Vec::new();
+        // Lazy host download of post-gaborish XYB planes — needed by
+        // the AFV branch in encode_and_reconstruct_mixed_strategy_single_channel
+        // (forks/reconstruct.rs:601 reads xyb_channel[src_off..src_off+tile_w]
+        // per AFV-selected block). When AFV evaluation is OFF (production
+        // default), we skip the download to avoid the 170 ms PCIe stall
+        // at 16 MP that download_planes_3ch would force.
+        let (xyb_x, xyb_y, xyb_b): (Vec<f32>, Vec<f32>, Vec<f32>) = if self.evaluate_afv {
+            enc.download_planes_3ch(&xx_g, &xy_g, &xb_g)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
         mark("xyb_gab");
         mark("mask1x1");
 
@@ -2245,9 +2253,33 @@ impl<R: Runtime> LossyEncoder<R> {
         let g_dc_x = enc.dc_grid_8x8_persistent(&xx_g);
         let g_dc_y = enc.dc_grid_8x8_persistent(&xy_g);
         let g_dc_b = enc.dc_grid_8x8_persistent(&xb_g);
-        let dc_grid_x: Vec<f32> = Vec::new();
-        let dc_grid_y: Vec<f32> = Vec::new();
-        let dc_grid_b: Vec<f32> = Vec::new();
+        // Lazy host download of DC grids — needed by the AFV branch
+        // in encode_and_reconstruct_mixed_strategy_single_channel
+        // (forks/reconstruct.rs:639 reads dc_grid_per_8x8_block[by *
+        // xsize_blocks_8 + bx] per AFV-selected block to restore the
+        // packed-DC mean position). Skip the download in production
+        // (evaluate_afv = false) — the GPU LLF fast paths (DCT8 /
+        // DCT16x16 / DCT16x8 / DCT8x16) use g_dc_*_gpu directly via
+        // set_llf_*_indexed_persistent, so the host slice is unused.
+        let (dc_grid_x, dc_grid_y, dc_grid_b): (Vec<f32>, Vec<f32>, Vec<f32>) =
+            if self.evaluate_afv {
+                let mut bytes = enc.client_ref().read(alloc::vec![
+                    g_dc_x.handle().clone(),
+                    g_dc_y.handle().clone(),
+                    g_dc_b.handle().clone(),
+                ]);
+                use cubecl::prelude::*;
+                let b_bytes = bytes.pop().expect("read[2]");
+                let y_bytes = bytes.pop().expect("read[1]");
+                let x_bytes = bytes.pop().expect("read[0]");
+                (
+                    f32::from_bytes(&x_bytes).to_vec(),
+                    f32::from_bytes(&y_bytes).to_vec(),
+                    f32::from_bytes(&b_bytes).to_vec(),
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
         // Keep the GPU dc_grid handles too — encode_with_strategy_plan_adaptive
         // threads them into encode_and_reconstruct_* via the
         // `dc_grid_*_gpu` Option params, skipping the per-iter
