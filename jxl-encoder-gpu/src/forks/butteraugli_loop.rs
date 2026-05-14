@@ -1229,10 +1229,32 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
             &cfg.info,
         );
         if iter < iters {
+            // Symmetric AQ adjustment matching the CPU butteraugli_loop
+            // (which mirrors libjxl enc_adaptive_quantization.cc:1066-1110).
+            //
+            // cur_pow = 0.2 for iter < 2: reduce qf for "good blocks"
+            //   (diff <= 1.0) via factor = diff^0.2 — this is what
+            //   reclaims bits when butteraugli says distance is below
+            //   target. Without this, the loop is a one-way ratchet
+            //   that only INCREASES bytes vs e7 (e8/e9 grow the file
+            //   instead of shrinking it like cjxl does).
+            //
+            // cur_pow = 0.0 for iter >= 2: only fix bad blocks (the
+            //   prior behavior). diff^0 = 1 → factor = 1 → no change
+            //   to good blocks.
+            let cur_pow: f32 = if iter < 2 { 0.2 } else { 0.0 };
             for bi in 0..aq_field.len() {
-                let diff = (tile_dist[bi] / target_distance).min(1.5);
+                let diff_raw = tile_dist[bi] / target_distance;
+                let diff = diff_raw.min(1.5);
                 if diff > 1.0 {
                     aq_field[bi] *= diff;
+                } else if cur_pow > 0.0 {
+                    // Good block: scale down by diff^cur_pow.
+                    let safe_diff = diff.max(0.0);
+                    let factor = (safe_diff as f64).powf(cur_pow as f64) as f32;
+                    if factor.is_finite() {
+                        aq_field[bi] *= factor;
+                    }
                 }
                 if aq_field[bi] > cfg.bounds.qf_higher {
                     aq_field[bi] = cfg.bounds.qf_higher;
