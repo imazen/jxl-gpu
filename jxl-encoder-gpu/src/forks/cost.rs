@@ -1056,44 +1056,58 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
     let g_pix_err_y = enc.idct_8x8_persistent(&g_y_err);
     let g_pix_err_b = enc.idct_8x8_persistent(&g_b_err);
 
-    // Step 4: per-channel masked 8th-power pixel loss (no sync).
-    // Upload mask_row_base ONCE and reuse the handle across the 3
-    // channel pixel_loss calls — saves 2 cudaMallocs.
+    // Step 4: fused 3-channel masked 8th-power pixel loss (1 launch
+    // instead of 3). Upload mask_row_base ONCE.
     let h_mrb = enc
         .client_ref()
         .create_from_slice(u32::as_bytes(mask_row_base));
-    let g_loss_x = enc.pixel_loss_blocks_with_handle_persistent(
-        &g_pix_err_x,
-        mask_plane,
-        &h_mrb,
+    let h_loss_x = enc.client_ref().empty(n_blocks * 8); // f64
+    let h_loss_y = enc.client_ref().empty(n_blocks * 8);
+    let h_loss_b = enc.client_ref().empty(n_blocks * 8);
+    let err_floats = (g_pix_err_x.num_blocks() as usize) * 64;
+    let mask_floats = (mask_plane.width() as usize) * (mask_plane.height() as usize);
+    crate::launch::pixel_loss_3ch::pixel_loss_3ch::<R>(
+        enc.client_ref(),
+        g_pix_err_x.handle().clone(),
+        g_pix_err_y.handle().clone(),
+        g_pix_err_b.handle().clone(),
+        mask_plane.handle().clone(),
+        h_mrb,
+        h_loss_x.clone(),
+        h_loss_y.clone(),
+        h_loss_b.clone(),
+        err_floats,
+        mask_floats,
+        n_blocks as u32,
+        mask_plane.width(),
         MASK_CHANNEL_OFFSET[0],
-        8,
-        8,
-    );
-    let g_loss_y = enc.pixel_loss_blocks_with_handle_persistent(
-        &g_pix_err_y,
-        mask_plane,
-        &h_mrb,
         MASK_CHANNEL_OFFSET[1],
-        8,
-        8,
-    );
-    let g_loss_b = enc.pixel_loss_blocks_with_handle_persistent(
-        &g_pix_err_b,
-        mask_plane,
-        &h_mrb,
         MASK_CHANNEL_OFFSET[2],
         8,
         8,
     );
 
-    // Step 5: now download stats + losses (only the small final
-    // outputs — no intermediate downloads). One batched
-    // client.read instead of six sequential read_one syncs —
-    // saves 5 queue-drain stalls.
-    let ((x_stats, y_stats, b_stats), (loss_x, loss_y, loss_b)) = enc.download_3stats_3losses(
-        &g_x_stats, &g_y_stats, &g_b_stats, &g_loss_x, &g_loss_y, &g_loss_b,
-    );
+    // Step 5: ONE batched read (3 stats + 3 losses, single sync).
+    let mut bytes = enc.client_ref().read(alloc::vec![
+        g_x_stats.handle().clone(),
+        g_y_stats.handle().clone(),
+        g_b_stats.handle().clone(),
+        h_loss_x,
+        h_loss_y,
+        h_loss_b,
+    ]);
+    let bl_b = bytes.pop().expect("read[5]");
+    let yl_b = bytes.pop().expect("read[4]");
+    let xl_b = bytes.pop().expect("read[3]");
+    let bs_b = bytes.pop().expect("read[2]");
+    let ys_b = bytes.pop().expect("read[1]");
+    let xs_b = bytes.pop().expect("read[0]");
+    let x_stats = f32::from_bytes(&xs_b).to_vec();
+    let y_stats = f32::from_bytes(&ys_b).to_vec();
+    let b_stats = f32::from_bytes(&bs_b).to_vec();
+    let loss_x = f64::from_bytes(&xl_b).to_vec();
+    let loss_y = f64::from_bytes(&yl_b).to_vec();
+    let loss_b = f64::from_bytes(&bl_b).to_vec();
 
     // Step 6: combine per-channel losses via CHANNEL_MUL (host).
     let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
@@ -1565,42 +1579,59 @@ pub fn estimate_entropy_full_strategy_batch_persistent_with_handle<R: Runtime>(
     let g_pix_err_y = apply_idct_batch_persistent(enc, &g_y_err, raw_strategy);
     let g_pix_err_b = apply_idct_batch_persistent(enc, &g_b_err, raw_strategy);
 
-    // Step 4: per-channel masked 8th-power pixel loss (no sync). The
-    // mask_row_base handle is supplied by the caller — multi-strategy
-    // callers (e.g. the 5 sub-block 8×8 cost grids) hoist a single
-    // upload out of this fn and pass the same handle 5 times.
-    let g_loss_x = enc.pixel_loss_blocks_with_handle_persistent(
-        &g_pix_err_x,
-        mask_plane,
-        mask_row_base_handle,
+    // Step 4: fused 3-channel masked 8th-power pixel loss (1 launch
+    // instead of 3 — same loop body, X/Y/B mask_offsets and error
+    // inputs varied). The mask_row_base handle is supplied by the
+    // caller; multi-strategy callers hoist a single upload across
+    // strategies.
+    let h_loss_x = enc.client_ref().empty(n_blocks * 8); // f64
+    let h_loss_y = enc.client_ref().empty(n_blocks * 8);
+    let h_loss_b = enc.client_ref().empty(n_blocks * 8);
+    let err_floats = (g_pix_err_x.num_blocks() as usize) * (block_w * block_h);
+    let mask_floats = (mask_plane.width() as usize) * (mask_plane.height() as usize);
+    crate::launch::pixel_loss_3ch::pixel_loss_3ch::<R>(
+        enc.client_ref(),
+        g_pix_err_x.handle().clone(),
+        g_pix_err_y.handle().clone(),
+        g_pix_err_b.handle().clone(),
+        mask_plane.handle().clone(),
+        mask_row_base_handle.clone(),
+        h_loss_x.clone(),
+        h_loss_y.clone(),
+        h_loss_b.clone(),
+        err_floats,
+        mask_floats,
+        n_blocks as u32,
+        mask_plane.width(),
         MASK_CHANNEL_OFFSET[0],
-        block_w as u32,
-        block_h as u32,
-    );
-    let g_loss_y = enc.pixel_loss_blocks_with_handle_persistent(
-        &g_pix_err_y,
-        mask_plane,
-        mask_row_base_handle,
         MASK_CHANNEL_OFFSET[1],
-        block_w as u32,
-        block_h as u32,
-    );
-    let g_loss_b = enc.pixel_loss_blocks_with_handle_persistent(
-        &g_pix_err_b,
-        mask_plane,
-        mask_row_base_handle,
         MASK_CHANNEL_OFFSET[2],
         block_w as u32,
         block_h as u32,
     );
 
-    // Step 5: download only the small final stats and losses. One
-    // batched client.read instead of six sequential read_one
-    // syncs (saves 5 queue-drain stalls).
-    let ((x_stats, y_stats, b_stats), (loss_x_init, loss_y, loss_b)) = enc.download_3stats_3losses(
-        &g_x_stats, &g_y_stats, &g_b_stats, &g_loss_x, &g_loss_y, &g_loss_b,
-    );
-    let mut loss_x = loss_x_init;
+    // Step 5: ONE batched read of stats + losses (6 handles, single
+    // queue-drain sync barrier).
+    let mut bytes = enc.client_ref().read(alloc::vec![
+        g_x_stats.handle().clone(),
+        g_y_stats.handle().clone(),
+        g_b_stats.handle().clone(),
+        h_loss_x,
+        h_loss_y,
+        h_loss_b,
+    ]);
+    let bl_b = bytes.pop().expect("read[5]");
+    let yl_b = bytes.pop().expect("read[4]");
+    let xl_b = bytes.pop().expect("read[3]");
+    let bs_b = bytes.pop().expect("read[2]");
+    let ys_b = bytes.pop().expect("read[1]");
+    let xs_b = bytes.pop().expect("read[0]");
+    let x_stats = f32::from_bytes(&xs_b).to_vec();
+    let y_stats = f32::from_bytes(&ys_b).to_vec();
+    let b_stats = f32::from_bytes(&bs_b).to_vec();
+    let mut loss_x = f64::from_bytes(&xl_b).to_vec();
+    let loss_y = f64::from_bytes(&yl_b).to_vec();
+    let loss_b = f64::from_bytes(&bl_b).to_vec();
 
     // Step 6: extract per-block entropy + apply X-channel multi-block weight.
     let entropy_x = extract_per_block_entropy(&x_stats, n_blocks);
