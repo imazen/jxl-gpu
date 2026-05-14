@@ -2411,13 +2411,16 @@ pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
     }
 
     // Phase A: launch every strategy's full pipeline. NO sync.
+    // Loss handles are raw f64 cubecl handles (fused 3-channel
+    // pixel_loss kernel writes them directly without a GpuBlocks
+    // wrapper).
     let mut handle_sets: alloc::vec::Vec<(
         crate::persistent::GpuBlocks<R>, // x_stats
         crate::persistent::GpuBlocks<R>, // y_stats
         crate::persistent::GpuBlocks<R>, // b_stats
-        crate::persistent::GpuBlocks<R>, // x_loss
-        crate::persistent::GpuBlocks<R>, // y_loss
-        crate::persistent::GpuBlocks<R>, // b_loss
+        (cubecl::server::Handle, usize), // x_loss (f64), n_blocks
+        (cubecl::server::Handle, usize), // y_loss (f64), n_blocks
+        (cubecl::server::Handle, usize), // b_loss (f64), n_blocks
         usize,                            // block_pixels
     )> = alloc::vec::Vec::with_capacity(specs.len());
     for spec in specs {
@@ -2467,33 +2470,41 @@ pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
         let g_pix_err_y = apply_idct_batch_persistent(enc, &g_y_err, spec.raw_strategy);
         let g_pix_err_b = apply_idct_batch_persistent(enc, &g_b_err, spec.raw_strategy);
 
-        let g_loss_x = enc.pixel_loss_blocks_with_handle_persistent(
-            &g_pix_err_x,
-            mask1x1,
-            mask_row_base_handle,
+        // Fused 3-channel pixel_loss: replaces 3 launches with 1.
+        // X / Y / B share the mask plane, mask_row_base, block dims;
+        // only mask_offset and the per-channel error inputs differ.
+        let h_loss_x = enc.client_ref().empty(n_blocks * 8); // f64
+        let h_loss_y = enc.client_ref().empty(n_blocks * 8);
+        let h_loss_b = enc.client_ref().empty(n_blocks * 8);
+        let err_floats = (g_pix_err_x.num_blocks() as usize) * (block_w * block_h);
+        let mask_floats = (mask1x1.width() as usize) * (mask1x1.height() as usize);
+        crate::launch::pixel_loss_3ch::pixel_loss_3ch::<R>(
+            enc.client_ref(),
+            g_pix_err_x.handle().clone(),
+            g_pix_err_y.handle().clone(),
+            g_pix_err_b.handle().clone(),
+            mask1x1.handle().clone(),
+            mask_row_base_handle.clone(),
+            h_loss_x.clone(),
+            h_loss_y.clone(),
+            h_loss_b.clone(),
+            err_floats,
+            mask_floats,
+            n_blocks as u32,
+            mask1x1.width(),
             MASK_CHANNEL_OFFSET[0],
-            block_w as u32,
-            block_h as u32,
-        );
-        let g_loss_y = enc.pixel_loss_blocks_with_handle_persistent(
-            &g_pix_err_y,
-            mask1x1,
-            mask_row_base_handle,
             MASK_CHANNEL_OFFSET[1],
-            block_w as u32,
-            block_h as u32,
-        );
-        let g_loss_b = enc.pixel_loss_blocks_with_handle_persistent(
-            &g_pix_err_b,
-            mask1x1,
-            mask_row_base_handle,
             MASK_CHANNEL_OFFSET[2],
             block_w as u32,
             block_h as u32,
         );
 
         handle_sets.push((
-            g_x_stats, g_y_stats, g_b_stats, g_loss_x, g_loss_y, g_loss_b, block_pixels,
+            g_x_stats, g_y_stats, g_b_stats,
+            (h_loss_x, n_blocks),
+            (h_loss_y, n_blocks),
+            (h_loss_b, n_blocks),
+            block_pixels,
         ));
     }
 
@@ -2505,9 +2516,9 @@ pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
         all_handles.push(set.0.handle().clone());
         all_handles.push(set.1.handle().clone());
         all_handles.push(set.2.handle().clone());
-        all_handles.push(set.3.handle().clone());
-        all_handles.push(set.4.handle().clone());
-        all_handles.push(set.5.handle().clone());
+        all_handles.push(set.3.0.clone());
+        all_handles.push(set.4.0.clone());
+        all_handles.push(set.5.0.clone());
     }
     let mut bytes = enc.client_ref().read(all_handles);
 

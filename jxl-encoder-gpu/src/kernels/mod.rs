@@ -42,6 +42,7 @@ pub mod indexed_scatter;
 pub mod mask1x1;
 pub mod mask_for_ac_strategy;
 pub mod pixel_loss;
+pub mod pixel_loss_3ch;
 pub mod quantize;
 pub mod set_dc;
 pub mod set_llf;
