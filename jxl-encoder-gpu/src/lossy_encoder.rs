@@ -1601,103 +1601,82 @@ impl<R: Runtime> LossyEncoder<R> {
         let _ = (&h_mrb_subblock, &mask_row_base_subblock);
         mark("cost_subblock_8x8");
 
-        // AFV0-3 cost grid: STILL SKIPPED (May 9 2026).
-        //
-        // Task #38 (persistent AFV transforms) is now COMPLETE — the
-        // cost grid measures ~52 ms on 1024×1024 (down from ~243 ms),
-        // close to the original ~35 ms target. So the perf objection
-        // to running it is gone.
-        //
-        // What's NOT done: lowering the 100× anti-bias mul. With the
-        // current mul, AFV would essentially never win even if we
-        // computed the cost — adding 52 ms for no quality change is
-        // a net regression. Re-enabling needs to be paired with an
-        // anti-bias retune (libjxl reference is 0.818; we'd need to
-        // sweep on a corpus to find a safe mul that doesn't catastrophic-
-        // regress on textured content the way kFavor2X2AtHighQuality
-        // did — see the May 9 commit `180b4fab` doc-warning for
-        // context). Risky without a corpus regression test as safety
-        // net (tracked as deferred work).
-        //
-        // For now, smart turnkey best-of-3 covers the cases where AFV
-        // picks would have helped (sharp-edge content) by falling
-        // back to uniform-DCT8 — so users aren't losing quality from
-        // this skip in production paths.
-        // AFV cost grids: opt-in via `self.evaluate_afv` (see
+        // AFV0-3 cost grid: opt-in via `self.evaluate_afv` (see
         // `LossyEncoder::with_evaluate_afv`). Default OFF — production
         // bitstream stays byte-identical with `corpus_regression`.
         //
-        // When ON, this stage:
-        //  1. Downloads block-major XYB (3 channels × n_blocks × 64
-        //     f32) from the persistent gather above (`g_8x/y/b`).
-        //  2. Gathers + downloads `g_mask` as block-major.
-        //  3. Calls `afv_cost_grid_xyb_host` (4 AFV kinds × 3 channels)
-        //     to produce a single Vec of length 4 × n_blocks.
-        //  4. Splits into 4 per-kind slices and (after dist_bias) feeds
-        //     them into `SubBlockCostGrids.afv0..3` for the selector.
+        // Uses libjxl's per-block cost formula
+        // (`entropy_mul × entropy + k_info_loss × loss_scalar`) — the
+        // same shape every other 8x8-class sub-block strategy uses.
+        // Output sits on the same scale as `cost_dct4x4` /
+        // `cost_dct4x8` / `cost_identity` / `cost_dct2x2` / `cost_dct8`
+        // natively, so the selector can compare them directly without
+        // per-image calibration.
         //
-        // **Cost-model caveat**: `afv_cost_grid_xyb_host` returns pure
-        // SSE × mask values, NOT entropy_mul + loss_scalar (which the
-        // 8x8 sub-block kernels fold internally). They are therefore
-        // **not yet on the same scale** as the other cost grids. The
-        // selector compares them directly, so AFV picks would currently
-        // dominate inappropriately when raw. Until a comparable cost-
-        // model scaling is dialed in (TODO: port libjxl's
-        // `afv_entropy_mul × loss_scalar` formula here), apply a
-        // conservative **per-cell scaling** that brings AFV grid costs
-        // into the right order of magnitude vs DCT8 costs at the same
-        // distance — empirically `dct8_mean / afv_mean` per image,
-        // computed below. This is a calibration scaffold, NOT the
-        // final cost model — the real fix needs the same
-        // `entropy_mul × entropy + k_info_loss × loss_scalar` formula
-        // the other strategies use, applied to AFV transform output.
+        // Pipeline (per AFV kind 0..3, fully on GPU):
+        //  1. Forward AFV via `afv_transform_batch_persistent`.
+        //  2. 3-channel entropy + nzeros + per-coef error fused launch.
+        //  3. Inverse AFV on per-coef errors → pixel-domain error blocks.
+        //  4. Fused 3-channel pixel_loss kernel.
+        // After all 4 kinds finish their pipelines (no syncs), ONE
+        // batched read pulls all 24 result handles. Per-kind CPU-side
+        // finalize via `per_block_upstream_cost_per_block` (per-block
+        // `quant_for_coeffs` from `aq_field`, same as DCT8 sub-blocks).
         //
-        // For now, opt-in is only used for integration / regression
-        // testing of the cost-grid plumbing end-to-end, NOT for
-        // production picks. See `tests/afv_cost_grid_wiring.rs`.
+        // For chunk 2c (corpus retune): once turned ON in production,
+        // the AFV `entropy_mul` may need a small anti-bias bump from
+        // libjxl reference (0.818 / 0.8 ≈ 1.022) to match the
+        // empirical bias other 8x8 sub-blocks carry in this encoder.
+        // Sweep first; the corpus_regression test catches drift.
         let afv_costs_full: Vec<f32> = if self.evaluate_afv {
-            use crate::forks::afv::afv_cost_grid_xyb_host;
+            use crate::forks::afv::afv_per_block_upstream_cost_xyb_host;
+            use crate::forks::cost::{afv_entropy_mul, EntropyMulTable};
             use crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE;
             use crate::quant_weights::afv_weights_per_channel;
-
-            // Block-major XYB pixels (n_blocks * 64 floats per channel).
-            let pixel_blocks_x = enc.download_blocks(&g_8x);
-            let pixel_blocks_y = enc.download_blocks(&g_8y);
-            let pixel_blocks_b = enc.download_blocks(&g_8b);
-
-            // Block-major mask (n_blocks * 64 floats). Reuse the
-            // 8x8 gather op on `g_mask` so layout matches the
-            // pixel blocks above. mask is per-pixel, same plane shape
-            // as XYB, so `gather_blocks_persistent(&g_mask, 8, 8)`
-            // yields the same block-major layout.
-            let g_mask_blocks = enc.gather_blocks_persistent(&g_mask, 8, 8);
-            let mask_block_major = enc.download_blocks(&g_mask_blocks);
-
-            // Per-block qac_qm: use `aq_field` (already adaptive per
-            // 8x8 block). All 3 channels share the same per-block qac.
-            let qac_qm: &[f32] = &aq_field;
 
             // Per-channel weights (one [f32; 64] per channel) — these
             // are the AFV-specific quant weight templates; the cost
             // grid broadcast-applies them across all blocks.
             let (afv_wx, afv_wy, afv_wb) = afv_weights_per_channel();
+            let inv_afv_wx: [f32; 64] = core::array::from_fn(|i| 1.0 / afv_wx[i]);
+            let inv_afv_wy: [f32; 64] = core::array::from_fn(|i| 1.0 / afv_wy[i]);
+            let inv_afv_wb: [f32; 64] = core::array::from_fn(|i| 1.0 / afv_wb[i]);
 
-            afv_cost_grid_xyb_host(
+            // Per-strategy entropy_mul — libjxl reference (0.817795 /
+            // 0.8 ≈ 1.022). Re-tune in chunk 2c if corpus regression
+            // shifts.
+            let entropy_mul = afv_entropy_mul(&EntropyMulTable::reference());
+
+            // Per-block quant: same as the other 8x8 sub-blocks (aq_field
+            // for adaptive, qac for uniform). For AFV (covered_blocks=1),
+            // this is the per-8x8-block adaptive_quant value directly.
+            let quant_for_coeffs_per_block: &[f32] = &aq_field;
+
+            // mask_row_base_subblock + h_mrb_subblock are already
+            // computed above for the DCT8 sub-block batch — reuse.
+            afv_per_block_upstream_cost_xyb_host(
                 enc,
                 &AFV4X4_BASIS_TRANSPOSE,
-                &pixel_blocks_x,
-                &pixel_blocks_y,
-                &pixel_blocks_b,
+                &g_8x,
+                &g_8y,
+                &g_8b,
                 &afv_wx,
                 &afv_wy,
                 &afv_wb,
-                qac_qm,
-                qac_qm,
-                qac_qm,
-                &self.thresholds_x,
-                &self.thresholds_y,
-                &self.thresholds_b,
-                &mask_block_major,
+                &inv_afv_wx,
+                &inv_afv_wy,
+                &inv_afv_wb,
+                &g_mask,
+                &h_mrb_subblock,
+                mask_row_base_subblock.len(),
+                qac,
+                qac,
+                qac,
+                0.0, // cmap_factor_x (no CfL refinement at strat-search time)
+                0.0, // cmap_factor_b
+                entropy_mul,
+                scaled_constants,
+                quant_for_coeffs_per_block,
             )
         } else {
             Vec::new()
@@ -2064,19 +2043,22 @@ impl<R: Runtime> LossyEncoder<R> {
         // Stage 5: host-side selector + assignments. All 5 sub-block
         // strategies feed in with anti-bias entropy_muls (2× the libjxl
         // reference) — same trick as DCT32 needed.
-        // AFV cost grids: when `evaluate_afv` is on, split
-        // `afv_costs_full` into per-kind slices and apply a calibration
-        // scaling so AFV costs sit in the same order of magnitude as
-        // DCT8 costs at the same distance. This is a SCAFFOLD — the
-        // real fix is to port the entropy_mul + loss_scalar formula to
-        // AFV (see "Cost-model caveat" comment at the cost grid stage).
-        // Without scaling, raw SSE values would either dominate
-        // (always picked) or be ignored (always lost) depending on
-        // dynamic range — neither is a valid demo.
         //
-        // Calibration: scale AFV costs by `dct8_mean / afv_mean` so
-        // they have the same global mean as DCT8. This is per-image
-        // and only meaningful while opt-in (not for production picks).
+        // AFV cost grids: when `evaluate_afv` is on, split
+        // `afv_costs_full` into per-kind slices and apply the same
+        // distance-scaled anti-bias the other 8x8 sub-blocks already
+        // get above. The cost grid producer
+        // (`afv_per_block_upstream_cost_xyb_host`) emits costs on the
+        // same scale as `cost_dct4x4` / `cost_identity` / `cost_dct2x2`
+        // natively (uses libjxl's `entropy_mul × entropy +
+        // k_info_loss × loss_scalar` formula), so no per-image
+        // calibration is needed — just a uniform `dist_bias` to match
+        // the rest of the sub-block tier.
+        //
+        // Earlier scaffold versions of this path applied a per-image
+        // `dct8_mean / afv_mean` re-scaling to bring placeholder
+        // SSE×mask costs into the right magnitude; that's gone now
+        // that the formula matches.
         let n_blocks_8x8 = cost_dct8.len();
         let (afv0_scaled, afv1_scaled, afv2_scaled, afv3_scaled): (
             Vec<f32>,
@@ -2085,31 +2067,11 @@ impl<R: Runtime> LossyEncoder<R> {
             Vec<f32>,
         ) = if !afv_costs_full.is_empty() {
             debug_assert_eq!(afv_costs_full.len(), 4 * n_blocks_8x8);
-            let dct8_mean: f64 = if n_blocks_8x8 > 0 {
-                cost_dct8.iter().map(|&v| v as f64).sum::<f64>() / n_blocks_8x8 as f64
-            } else {
-                0.0
-            };
-            let afv_mean: f64 = if !afv_costs_full.is_empty() {
-                afv_costs_full.iter().map(|&v| v as f64).sum::<f64>()
-                    / afv_costs_full.len() as f64
-            } else {
-                0.0
-            };
-            let scale: f32 = if afv_mean > 0.0 {
-                (dct8_mean / afv_mean) as f32
-            } else {
-                1.0
-            };
-            // Mild anti-bias: even with calibration, keep AFV at
-            // dist_bias × (DCT8 mean) so it doesn't dominate the
-            // existing dist_bias-anti-biased sub-blocks.
-            let scale = scale * dist_bias;
             let split = |kind: usize| -> Vec<f32> {
                 let r0 = kind * n_blocks_8x8;
                 afv_costs_full[r0..r0 + n_blocks_8x8]
                     .iter()
-                    .map(|&v| v * scale)
+                    .map(|&v| v * dist_bias)
                     .collect()
             };
             (split(0), split(1), split(2), split(3))

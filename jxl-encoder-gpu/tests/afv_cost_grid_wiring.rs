@@ -4,35 +4,32 @@
 //! Integration test for the AFV cost-grid wiring in
 //! [`jxl_encoder_gpu::lossy_encoder::LossyEncoder::prepare_strategy_search_plan`].
 //!
-//! Proves Layer 1 of AFV restoration in the GPU strat-search:
-//! the [`crate::forks::afv::afv_cost_grid_xyb_host`] producer can be invoked
-//! end-to-end inside the prepare pipeline and feed its 4 per-kind grids
-//! through to the partition selector.
+//! Proves Layer 2 of AFV restoration in the GPU strat-search:
+//! the libjxl-faithful per-block cost producer
+//! [`crate::forks::afv::afv_per_block_upstream_cost_xyb_host`] is invoked
+//! end-to-end inside the prepare pipeline and feeds its 4 per-kind grids
+//! through to the partition selector. Layer 1 was the placeholder
+//! `afv_cost_grid_xyb_host`; the calibration scaffold (per-image
+//! `dct8_mean / afv_mean` scaling) is gone.
 //!
 //! ## Demoable behavior
 //!
 //! With `LossyEncoder::with_evaluate_afv(true)`:
-//! - The AFV cost-grid stage runs (downloads block-major XYB + mask, calls
-//!   `afv_cost_grid_xyb_host` for all 4 AFV kinds).
-//! - `SubBlockCostGrids.afv0..3` are populated with finite, non-zero values.
-//! - Partition assignments may include AFV picks (RAW_STRATEGY_AFV0..3) on
-//!   diagonal-frequency content where AFV's per-cell cost beats DCT8 / sub-blocks.
+//! - The AFV cost-grid stage runs (uses GPU-resident `g_8x/y/b` blocks
+//!   and `g_mask` plane directly, calls
+//!   `afv_per_block_upstream_cost_xyb_host` for all 4 AFV kinds).
+//! - `SubBlockCostGrids.afv0..3` are populated with finite, non-zero
+//!   values on the same scale as `cost_dct4x4`/`cost_identity` — the
+//!   selector compares them directly.
+//! - Partition assignments may include AFV picks (RAW_STRATEGY_AFV0..3)
+//!   on diagonal-frequency content where AFV's per-cell cost beats
+//!   DCT8 / sub-blocks.
 //!
 //! With the default (`evaluate_afv = false`):
 //! - The AFV stage is skipped (returns empty Vec).
 //! - `SubBlockCostGrids.afv0..3 = None` — no AFV picks possible.
-//! - Behavior is byte-identical to before this commit (covered by
-//!   `corpus_regression`).
-//!
-//! ## Cost-model caveat
-//!
-//! `afv_cost_grid_xyb_host` returns pure SSE × mask values, NOT the
-//! `entropy_mul × entropy + k_info_loss × loss_scalar` formula the other
-//! 8x8-class strategies use. The opt-in path applies a per-image
-//! `dct8_mean / afv_mean` calibration scaling to bring AFV grid costs into
-//! the same order of magnitude as DCT8 — this is a SCAFFOLD, NOT the final
-//! cost model. AFV picks under this scaffolding are a property of the
-//! cost-grid plumbing being live, not a production-quality decision.
+//! - Behavior is byte-identical to before chunk 1's wiring landed
+//!   (covered by `corpus_regression`).
 //!
 //! ## Test harness
 //!
