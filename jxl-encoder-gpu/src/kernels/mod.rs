@@ -27,6 +27,7 @@ pub mod denoise;
 pub mod dequant;
 pub mod dequant_simple;
 pub mod entropy;
+pub mod entropy_3ch;
 pub mod epf;
 pub mod fused_dct8_3ch;
 pub mod fused_dct_quant;

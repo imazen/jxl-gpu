@@ -1311,6 +1311,133 @@ impl<R: Runtime> GpuEncoder<R> {
         )
     }
 
+    /// 3-channel fused variant of [`Self::entropy_coeffs_pixel_blocks_broadcast_w_persistent`].
+    /// Computes X / Y / B entropy + nzeros + per-coef error in one
+    /// kernel launch (saves 2 launches per cost-grid call). All
+    /// channels share `block_y` (luma); `block_x` / `block_b` are
+    /// per-channel inputs. cmap_factor_x is `ytox_ratio(ytox)` and
+    /// cmap_factor_b is `ytob_ratio(ytob)`; Y always uses 0.
+    ///
+    /// Returns `(x_stats, y_stats, b_stats, x_err, y_err, b_err)`.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn entropy_coeffs_pixel_blocks_3ch_persistent(
+        &self,
+        block_x: &GpuBlocks<R>,
+        block_y: &GpuBlocks<R>,
+        block_b: &GpuBlocks<R>,
+        weights_x: &[f32],
+        weights_y: &[f32],
+        weights_b: &[f32],
+        inv_weights_x: &[f32],
+        inv_weights_y: &[f32],
+        inv_weights_b: &[f32],
+        cmap_factor_x: f32,
+        cmap_factor_b: f32,
+        quant_x: f32,
+        quant_y: f32,
+        quant_b: f32,
+        k_cost_delta: f32,
+    ) -> (
+        GpuBlocks<R>,
+        GpuBlocks<R>,
+        GpuBlocks<R>,
+        GpuBlocks<R>,
+        GpuBlocks<R>,
+        GpuBlocks<R>,
+    ) {
+        assert_eq!(block_x.num_blocks, block_y.num_blocks);
+        assert_eq!(block_b.num_blocks, block_y.num_blocks);
+        let n = block_y.coeffs_per_block;
+        assert_eq!(weights_x.len() as u32, n);
+        assert_eq!(weights_y.len() as u32, n);
+        assert_eq!(weights_b.len() as u32, n);
+        let total = block_y.total_floats();
+        let num_blocks = block_y.num_blocks;
+
+        // Batched 6-way upload of broadcast weight templates.
+        let descs = alloc::vec![
+            (
+                MemoryLayoutDescriptor::contiguous([n as usize * 4].into(), 1),
+                f32::as_bytes(weights_x),
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([n as usize * 4].into(), 1),
+                f32::as_bytes(weights_y),
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([n as usize * 4].into(), 1),
+                f32::as_bytes(weights_b),
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([n as usize * 4].into(), 1),
+                f32::as_bytes(inv_weights_x),
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([n as usize * 4].into(), 1),
+                f32::as_bytes(inv_weights_y),
+            ),
+            (
+                MemoryLayoutDescriptor::contiguous([n as usize * 4].into(), 1),
+                f32::as_bytes(inv_weights_b),
+            ),
+        ];
+        let mut layouts = self.client_ref().create_tensors_from_slices(descs);
+        let h_iwb = layouts.pop().expect("layouts[5]").memory;
+        let h_iwy = layouts.pop().expect("layouts[4]").memory;
+        let h_iwx = layouts.pop().expect("layouts[3]").memory;
+        let h_wb = layouts.pop().expect("layouts[2]").memory;
+        let h_wy = layouts.pop().expect("layouts[1]").memory;
+        let h_wx = layouts.pop().expect("layouts[0]").memory;
+        let h_err_x = self.client_ref().empty(total * 4);
+        let h_err_y = self.client_ref().empty(total * 4);
+        let h_err_b = self.client_ref().empty(total * 4);
+        let h_out_x = self.client_ref().empty((num_blocks as usize) * 4 * 4);
+        let h_out_y = self.client_ref().empty((num_blocks as usize) * 4 * 4);
+        let h_out_b = self.client_ref().empty((num_blocks as usize) * 4 * 4);
+
+        crate::launch::entropy_3ch::entropy_coeffs_pixel_3ch::<R>(
+            self.client_ref(),
+            block_x.handle.clone(),
+            block_y.handle.clone(),
+            block_b.handle.clone(),
+            h_wx,
+            h_wy,
+            h_wb,
+            h_iwx,
+            h_iwy,
+            h_iwb,
+            h_err_x.clone(),
+            h_err_y.clone(),
+            h_err_b.clone(),
+            h_out_x.clone(),
+            h_out_y.clone(),
+            h_out_b.clone(),
+            num_blocks,
+            n,
+            cmap_factor_x,
+            cmap_factor_b,
+            quant_x,
+            quant_y,
+            quant_b,
+            k_cost_delta,
+        );
+
+        let mk = |handle, coeffs| GpuBlocks {
+            handle,
+            num_blocks,
+            coeffs_per_block: coeffs,
+            _r: core::marker::PhantomData,
+        };
+        (
+            mk(h_out_x, 4),
+            mk(h_out_y, 4),
+            mk(h_out_b, 4),
+            mk(h_err_x, n),
+            mk(h_err_y, n),
+            mk(h_err_b, n),
+        )
+    }
+
     /// Persistent-API per-block 8th-power masked pixel loss. Same
     /// semantics as [`Self::pixel_loss_blocks`] but keeps inputs/outputs
     /// on GPU.

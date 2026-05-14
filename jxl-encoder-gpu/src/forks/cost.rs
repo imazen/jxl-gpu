@@ -1022,34 +1022,25 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
     let inv_y_t: &[f32] = inv_weights_y_per_block.as_slice();
     let inv_b_t: &[f32] = inv_weights_b_per_block.as_slice();
 
-    // Step 2: per-channel entropy + error-coef writeback (no sync).
-    let (g_y_stats, g_y_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-        &dct_y,
-        &dct_y,
-        weights_y_t,
-        inv_y_t,
-        0.0,
-        quant_y,
-        cost_delta,
-    );
-    let (g_x_stats, g_x_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-        &dct_x,
-        &dct_y,
-        weights_x_t,
-        inv_x_t,
-        ytox_ratio(ytox),
-        quant_x,
-        cost_delta,
-    );
-    let (g_b_stats, g_b_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-        &dct_b,
-        &dct_y,
-        weights_b_t,
-        inv_b_t,
-        ytob_ratio(ytob),
-        quant_b,
-        cost_delta,
-    );
+    // Step 2: fused 3-channel entropy + error-coef writeback (1 launch).
+    let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) =
+        enc.entropy_coeffs_pixel_blocks_3ch_persistent(
+            &dct_x,
+            &dct_y,
+            &dct_b,
+            weights_x_t,
+            weights_y_t,
+            weights_b_t,
+            inv_x_t,
+            inv_y_t,
+            inv_b_t,
+            ytox_ratio(ytox),
+            ytob_ratio(ytob),
+            quant_x,
+            quant_y,
+            quant_b,
+            cost_delta,
+        );
 
     // Step 3: IDCT of error coefficients per channel (no sync).
     let g_pix_err_x = enc.idct_8x8_persistent(&g_x_err);
@@ -1545,34 +1536,25 @@ pub fn estimate_entropy_full_strategy_batch_persistent_with_handle<R: Runtime>(
     let dct_y = apply_dct_batch_persistent(enc, pixel_blocks_y, raw_strategy);
     let dct_b = apply_dct_batch_persistent(enc, pixel_blocks_b, raw_strategy);
 
-    // Step 2: per-channel entropy + error-coef writeback (no sync).
-    let (g_y_stats, g_y_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-        &dct_y,
-        &dct_y,
-        weights_y_per_block,
-        inv_weights_y_per_block,
-        0.0,
-        quant_y,
-        cost_delta,
-    );
-    let (g_x_stats, g_x_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-        &dct_x,
-        &dct_y,
-        weights_x_per_block,
-        inv_weights_x_per_block,
-        ytox_ratio(ytox),
-        quant_x,
-        cost_delta,
-    );
-    let (g_b_stats, g_b_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-        &dct_b,
-        &dct_y,
-        weights_b_per_block,
-        inv_weights_b_per_block,
-        ytob_ratio(ytob),
-        quant_b,
-        cost_delta,
-    );
+    // Step 2: fused 3-channel entropy + error-coef writeback (1 launch).
+    let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) =
+        enc.entropy_coeffs_pixel_blocks_3ch_persistent(
+            &dct_x,
+            &dct_y,
+            &dct_b,
+            weights_x_per_block,
+            weights_y_per_block,
+            weights_b_per_block,
+            inv_weights_x_per_block,
+            inv_weights_y_per_block,
+            inv_weights_b_per_block,
+            ytox_ratio(ytox),
+            ytob_ratio(ytob),
+            quant_x,
+            quant_y,
+            quant_b,
+            cost_delta,
+        );
 
     // Step 3: per-strategy IDCT of error coefficients (no sync).
     let g_pix_err_x = apply_idct_batch_persistent(enc, &g_x_err, raw_strategy);
@@ -2469,33 +2451,24 @@ pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
         let dct_y = apply_dct_batch_persistent(enc, pre_gathered_8x8_y, spec.raw_strategy);
         let dct_b = apply_dct_batch_persistent(enc, pre_gathered_8x8_b, spec.raw_strategy);
 
-        let (g_y_stats, g_y_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-            &dct_y,
-            &dct_y,
-            spec.weights_y,
-            spec.inv_weights_y,
-            0.0,
-            quant_y,
-            cost_delta,
-        );
-        let (g_x_stats, g_x_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-            &dct_x,
-            &dct_y,
-            spec.weights_x,
-            spec.inv_weights_x,
-            ytox_ratio(ytox),
-            quant_x,
-            cost_delta,
-        );
-        let (g_b_stats, g_b_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
-            &dct_b,
-            &dct_y,
-            spec.weights_b,
-            spec.inv_weights_b,
-            ytob_ratio(ytob),
-            quant_b,
-            cost_delta,
-        );
+        let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) =
+            enc.entropy_coeffs_pixel_blocks_3ch_persistent(
+                &dct_x,
+                &dct_y,
+                &dct_b,
+                spec.weights_x,
+                spec.weights_y,
+                spec.weights_b,
+                spec.inv_weights_x,
+                spec.inv_weights_y,
+                spec.inv_weights_b,
+                ytox_ratio(ytox),
+                ytob_ratio(ytob),
+                quant_x,
+                quant_y,
+                quant_b,
+                cost_delta,
+            );
 
         let g_pix_err_x = apply_idct_batch_persistent(enc, &g_x_err, spec.raw_strategy);
         let g_pix_err_y = apply_idct_batch_persistent(enc, &g_y_err, spec.raw_strategy);
