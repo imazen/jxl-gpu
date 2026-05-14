@@ -2185,25 +2185,21 @@ impl<R: Runtime> GpuEncoder<R> {
         // cubecl-vs-jxl_simd DCT FP precision (~2% of borderline
         // chroma AC coefs flip by 1 near rounding ties). corpus
         // regression at 0.5% score tolerance covers this.
-        // GPU pre-quantized AC fast path: DISABLED in production.
+        // GPU pre-quantized AC fast path: ENABLED. Backed by the
+        // fully-fused 3-channel DCT8 producer
+        // (kernels::fused_dct8_3ch::fused_dct8_3ch_kernel) — collapses
+        // the previous ~10-launch chain (gather × 3, DCT × 3, quantize
+        // Y, cfl_quantize × 2, nzeros × 3) into ONE mega-kernel that
+        // keeps all intermediates in shared memory.
         //
-        // The producer (forks::pre_quantized_ac::compute_pre_quantized_ac_dct8_persistent)
-        // is correct (passes kernel parity tests + corpus regression
-        // when fired) but the chain of ~15 small cubecl kernel launches
-        // (gather × 3, DCT × 3, quantize Y, cfl_quantize × 2, DC × 3,
-        // nzeros × 3, batched download) carries enough per-launch
-        // overhead that wall-clock is WORSE than CPU transform_and_quantize
-        // (~545 ms vs ~397 ms at 12 MP / d=4.0 on the test image).
+        // DC quant remains separate (3 small launches reading the
+        // re-computed DCT float coefs) — future chunk extends the
+        // fused kernel to also write DC.
         //
-        // To turn this on as a real perf win, the kernels need to be
-        // FUSED — single kernel per channel doing gather+DCT+quant+CfL
-        // → 3 kernel launches total instead of ~15. cubecl 0.10's
-        // per-launch overhead is the bottleneck.
-        //
-        // Producer remains accessible via the public
-        // `forks::pre_quantized_ac` module for benchmarking and as the
-        // foundation for the future fused implementation.
-        const ENABLE_GPU_DCT8_FAST_PATH: bool = false;
+        // Bitstream is NOT byte-identical to CPU due to cubecl-vs-jxl_simd
+        // DCT FP precision (~2% chroma AC coefs flip by 1 near rounding
+        // ties); corpus_regression at 0.5% score tolerance covers it.
+        const ENABLE_GPU_DCT8_FAST_PATH: bool = true;
         if ENABLE_GPU_DCT8_FAST_PATH {
             let all_dct8 = (0..ysize_blocks).all(|by| {
                 (0..xsize_blocks).all(|bx| precomputed.ac_strategy.raw_strategy(bx, by) == 0)

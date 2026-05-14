@@ -1,0 +1,401 @@
+// Copyright (c) Imazen LLC and the JPEG XL Project Authors.
+// Licensed under AGPL-3.0-or-later. Commercial licenses at https://www.imazen.io/pricing
+
+//! Fully-fused 3-channel DCT8 + Y quantize + CfL + chroma quantize +
+//! nzeros count, all in shared memory.
+//!
+//! Replaces what was previously ~10 small cubecl kernel launches in
+//! `forks::pre_quantized_ac::compute_pre_quantized_ac_dct8_persistent`:
+//!   gather × 3, DCT8 × 3, quantize Y, cfl_quantize X/B (× 2),
+//!   nzeros_count × 3
+//! with a SINGLE per-block kernel that:
+//!   1. Loads X / Y / B 8×8 pixel tiles from the planes.
+//!   2. Forward DCT8 each channel into private shared-memory scratch.
+//!   3. Quantize Y AC into i32 (write to global quant_ac_y).
+//!   4. AdjustQuantBias dequant Y → y_round_coef.
+//!   5. CfL X = x_orig - x_factor * y_round_coef; quantize → quant_ac_x.
+//!   6. Same for B with b_factor → quant_ac_b.
+//!   7. Count non-zero AC per channel → write nzeros_x/y/b (u32).
+//!
+//! All intermediate float coefs live in shared memory only — no
+//! global write+read between stages. Eliminates the per-launch
+//! overhead that made the unfused producer slower than CPU
+//! transform_and_quantize on cubecl 0.10.
+
+use cubecl::prelude::*;
+
+const ONE_OVER_8: f32 = 0.125;
+const WIDE_CUBE_DIM: u32 = 64;
+const SQRT2: f32 = core::f32::consts::SQRT_2;
+const WC_M4_0: f32 = 0.541_196_1;
+const WC_M4_1: f32 = 1.306_563;
+const WC_M8_0: f32 = 0.509_795_6;
+const WC_M8_1: f32 = 0.601_344_9;
+const WC_M8_2: f32 = 0.899_976_2;
+const WC_M8_3: f32 = 2.562_915_5;
+
+// Y channel AdjustQuantBias.
+const Y_BIAS_PM1: f32 = 0.929_945_5;
+const BIAS_RECIP: f32 = 0.145;
+
+#[cube]
+fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
+    let b0 = base as usize;
+    let m0 = mem[b0];
+    let m1 = mem[b0 + 1usize];
+    let m2 = mem[b0 + 2usize];
+    let m3 = mem[b0 + 3usize];
+    let m4 = mem[b0 + 4usize];
+    let m5 = mem[b0 + 5usize];
+    let m6 = mem[b0 + 6usize];
+    let m7 = mem[b0 + 7usize];
+    let mut t0 = m0 + m7;
+    let mut t1 = m1 + m6;
+    let mut t2 = m2 + m5;
+    let mut t3 = m3 + m4;
+    let mut t4 = m0 - m7;
+    let mut t5 = m1 - m6;
+    let mut t6 = m2 - m5;
+    let mut t7 = m3 - m4;
+    let a0 = t0 + t3;
+    let a1 = t1 + t2;
+    let a2 = t0 - t3;
+    let a3 = t1 - t2;
+    let b0v = a0 + a1;
+    let b1v = a0 - a1;
+    let a2s = a2 * WC_M4_0;
+    let a3s = a3 * WC_M4_1;
+    let c0 = a2s + a3s;
+    let c1 = a2s - a3s;
+    let c0_post = SQRT2 * c0 + c1;
+    t0 = b0v;
+    t2 = b1v;
+    t1 = c0_post;
+    t3 = c1;
+    t4 *= WC_M8_0;
+    t5 *= WC_M8_1;
+    t6 *= WC_M8_2;
+    t7 *= WC_M8_3;
+    let a0 = t4 + t7;
+    let a1 = t5 + t6;
+    let a2 = t4 - t7;
+    let a3 = t5 - t6;
+    let b0v = a0 + a1;
+    let b1v = a0 - a1;
+    let a2s = a2 * WC_M4_0;
+    let a3s = a3 * WC_M4_1;
+    let c0 = a2s + a3s;
+    let c1 = a2s - a3s;
+    let c0_post = SQRT2 * c0 + c1;
+    let r4 = b0v;
+    let r5 = c0_post;
+    let r6 = b1v;
+    let r7 = c1;
+    mem[b0] = t0;
+    mem[b0 + 2usize] = t2;
+    mem[b0 + 4usize] = t1;
+    mem[b0 + 6usize] = t3;
+    mem[b0 + 1usize] = r4;
+    mem[b0 + 3usize] = r5;
+    mem[b0 + 5usize] = r6;
+    mem[b0 + 7usize] = r7;
+}
+
+#[cube]
+fn round_ties_even_to_i32(x: f32) -> i32 {
+    let r = f32::round(x);
+    let frac = f32::abs(x - f32::floor(x));
+    let r_int = r as i32;
+    let is_tie = f32::abs(frac - 0.5f32) < 1e-7f32;
+    let is_odd = (r_int.abs() & 1i32) == 1i32;
+    let mut out = r_int;
+    if is_tie && is_odd {
+        if r_int > 0i32 {
+            out = r_int - 1i32;
+        } else {
+            out = r_int + 1i32;
+        }
+    }
+    out
+}
+
+#[cube]
+fn dequant_y_with_bias(q: i32) -> f32 {
+    let qf = q as f32;
+    let abs_q = f32::abs(qf);
+    let mut out = f32::new(0.0);
+    if q != 0i32 {
+        if abs_q < 1.125f32 {
+            let s = if qf > 0.0f32 { 1.0f32 } else { -1.0f32 };
+            out = s * Y_BIAS_PM1;
+        } else {
+            out = qf - BIAS_RECIP / qf;
+        }
+    }
+    out
+}
+
+#[cube]
+fn dct8_block(scratch: &mut SharedMemory<f32>, transposed: &mut SharedMemory<f32>, base: u32) {
+    let base_us = base as usize;
+    // Row pass.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        dct1d_8(scratch, base + row_off);
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            scratch[base_us + row_off_us + cu] = scratch[base_us + row_off_us + cu] * ONE_OVER_8;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+    // Transpose into `transposed`.
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let ru = r as usize;
+            let cu = c as usize;
+            transposed[base_us + cu * 8usize + ru] = scratch[base_us + ru * 8usize + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+    // Column pass (= row pass on transposed).
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        dct1d_8(transposed, base + row_off);
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            transposed[base_us + row_off_us + cu] =
+                transposed[base_us + row_off_us + cu] * ONE_OVER_8;
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+}
+
+/// Fully-fused 3-channel DCT8 + quantize + CfL + nzeros pipeline.
+/// One thread per output block.
+///
+/// Inputs:
+/// - `plane_x` / `plane_y` / `plane_b`: padded XYB f32 planes, all
+///   sharing stride `plane_stride` and height `plane_h_pixels`.
+/// - `xsize_blocks` / `ysize_blocks`: sub-rect of blocks to process
+///   (cpu-aligned dims; gpu plane may have extra padding columns
+///   past xsize_blocks * 8 — those are simply not touched).
+/// - `weights_x` / `weights_y` / `weights_b`: 64-coef quant matrix
+///   templates (broadcast across all blocks).
+/// - `qac_qm_x` / `qac_qm_y` / `qac_qm_b`: per-block scale (`qac *
+///   qm_multiplier`), length `n_blocks`.
+/// - `x_factor_per_block` / `b_factor_per_block`: per-block CfL
+///   factors (host expanded from per-tile cfl_map).
+/// - `thresholds_x` / `thresholds_y` / `thresholds_b`: 4 floats each.
+///
+/// Outputs:
+/// - `quant_ac_x` / `quant_ac_y` / `quant_ac_b`: per-block 64 i32
+///   each (DC slot at position 0 set to 0).
+/// - `nzeros_x` / `nzeros_y` / `nzeros_b`: per-block u32 non-zero
+///   AC count (caller converts to u8 / u16).
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn fused_dct8_3ch_kernel(
+    plane_x: &Array<f32>,
+    plane_y: &Array<f32>,
+    plane_b: &Array<f32>,
+    weights_x: &Array<f32>,
+    weights_y: &Array<f32>,
+    weights_b: &Array<f32>,
+    qac_qm_x: &Array<f32>,
+    qac_qm_y: &Array<f32>,
+    qac_qm_b: &Array<f32>,
+    x_factor_per_block: &Array<f32>,
+    b_factor_per_block: &Array<f32>,
+    thresholds_x: &Array<f32>,
+    thresholds_y: &Array<f32>,
+    thresholds_b: &Array<f32>,
+    quant_ac_x: &mut Array<i32>,
+    quant_ac_y: &mut Array<i32>,
+    quant_ac_b: &mut Array<i32>,
+    nzeros_x: &mut Array<u32>,
+    nzeros_y: &mut Array<u32>,
+    nzeros_b: &mut Array<u32>,
+    plane_stride: u32,
+    xsize_blocks: u32,
+) {
+    let block_idx = ABSOLUTE_POS;
+    let n_blocks = qac_qm_y.len();
+    if block_idx >= n_blocks {
+        terminate!();
+    }
+    let bpr = xsize_blocks as usize;
+    let by = block_idx / bpr;
+    let bx = block_idx - by * bpr;
+    let stride = plane_stride as usize;
+    let off = block_idx * 64usize;
+    let unit = UNIT_POS;
+    let private_base = unit * 64u32;
+    let private_base_us = private_base as usize;
+
+    // Three pairs of (scratch, transposed) shared-memory buffers,
+    // one pair per channel. Per-thread private slice via UNIT_POS.
+    let mut scratch_x = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut transposed_x = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut scratch_y = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut transposed_y = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut scratch_b = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+    let mut transposed_b = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
+
+    // Step 1: gather 8×8 pixel tile per channel into scratch.
+    let y0 = by * 8usize;
+    let x0 = bx * 8usize;
+    let mut r: u32 = 0u32;
+    while r < 8u32 {
+        let row_off = r * 8u32;
+        let row_off_us = row_off as usize;
+        let src_row_off = (y0 + r as usize) * stride + x0;
+        let mut c: u32 = 0u32;
+        while c < 8u32 {
+            let cu = c as usize;
+            scratch_x[private_base_us + row_off_us + cu] = plane_x[src_row_off + cu];
+            scratch_y[private_base_us + row_off_us + cu] = plane_y[src_row_off + cu];
+            scratch_b[private_base_us + row_off_us + cu] = plane_b[src_row_off + cu];
+            c += 1u32;
+        }
+        r += 1u32;
+    }
+
+    // Step 2: forward DCT8 per channel.
+    dct8_block(&mut scratch_x, &mut transposed_x, private_base);
+    dct8_block(&mut scratch_y, &mut transposed_y, private_base);
+    dct8_block(&mut scratch_b, &mut transposed_b, private_base);
+
+    // Step 3: quantize Y AC into i32 + count nzeros.
+    let qac_y = qac_qm_y[block_idx];
+    let inv_qac_y = 1.0f32 / qac_y;
+    let ty0 = thresholds_y[0usize];
+    let ty1 = thresholds_y[1usize];
+    let ty2 = thresholds_y[2usize];
+    let ty3 = thresholds_y[3usize];
+    quant_ac_y[off] = 0i32;
+    let mut nz_y: u32 = 0u32;
+    let mut idx: u32 = 1u32;
+    while idx < 64u32 {
+        let iu = idx as usize;
+        let y = idx / 8u32;
+        let x = idx - y * 8u32;
+        let row_hi = y >= 4u32;
+        let col_hi = x >= 4u32;
+        let thr = if row_hi {
+            if col_hi { ty3 } else { ty2 }
+        } else if col_hi {
+            ty1
+        } else {
+            ty0
+        };
+        let coef = transposed_y[private_base_us + iu];
+        let val = coef * (1.0f32 / weights_y[iu]) * qac_y;
+        let absv = f32::abs(val);
+        let q = if absv < thr {
+            i32::new(0)
+        } else {
+            round_ties_even_to_i32(val)
+        };
+        quant_ac_y[off + iu] = q;
+        if q != 0i32 {
+            nz_y += 1u32;
+        }
+        idx += 1u32;
+    }
+    nzeros_y[block_idx] = nz_y;
+
+    // Step 4-5: CfL + quantize X AC.
+    let qac_x = qac_qm_x[block_idx];
+    let xfac = x_factor_per_block[block_idx];
+    let tx0 = thresholds_x[0usize];
+    let tx1 = thresholds_x[1usize];
+    let tx2 = thresholds_x[2usize];
+    let tx3 = thresholds_x[3usize];
+    quant_ac_x[off] = 0i32;
+    let mut nz_x: u32 = 0u32;
+    let mut idx: u32 = 1u32;
+    while idx < 64u32 {
+        let iu = idx as usize;
+        let y = idx / 8u32;
+        let x = idx - y * 8u32;
+        let row_hi = y >= 4u32;
+        let col_hi = x >= 4u32;
+        let thr = if row_hi {
+            if col_hi { tx3 } else { tx2 }
+        } else if col_hi {
+            tx1
+        } else {
+            tx0
+        };
+        let y_round = dequant_y_with_bias(quant_ac_y[off + iu]);
+        let y_round_coef = y_round * weights_y[iu] * inv_qac_y;
+        let x_orig = transposed_x[private_base_us + iu];
+        let x_cfl = x_orig - xfac * y_round_coef;
+        let val = x_cfl * (1.0f32 / weights_x[iu]) * qac_x;
+        let absv = f32::abs(val);
+        let q = if absv < thr {
+            i32::new(0)
+        } else {
+            round_ties_even_to_i32(val)
+        };
+        quant_ac_x[off + iu] = q;
+        if q != 0i32 {
+            nz_x += 1u32;
+        }
+        idx += 1u32;
+    }
+    nzeros_x[block_idx] = nz_x;
+
+    // Step 6: CfL + quantize B AC.
+    let qac_b = qac_qm_b[block_idx];
+    let bfac = b_factor_per_block[block_idx];
+    let tb0 = thresholds_b[0usize];
+    let tb1 = thresholds_b[1usize];
+    let tb2 = thresholds_b[2usize];
+    let tb3 = thresholds_b[3usize];
+    quant_ac_b[off] = 0i32;
+    let mut nz_b: u32 = 0u32;
+    let mut idx: u32 = 1u32;
+    while idx < 64u32 {
+        let iu = idx as usize;
+        let y = idx / 8u32;
+        let x = idx - y * 8u32;
+        let row_hi = y >= 4u32;
+        let col_hi = x >= 4u32;
+        let thr = if row_hi {
+            if col_hi { tb3 } else { tb2 }
+        } else if col_hi {
+            tb1
+        } else {
+            tb0
+        };
+        let y_round = dequant_y_with_bias(quant_ac_y[off + iu]);
+        let y_round_coef = y_round * weights_y[iu] * inv_qac_y;
+        let b_orig = transposed_b[private_base_us + iu];
+        let b_cfl = b_orig - bfac * y_round_coef;
+        let val = b_cfl * (1.0f32 / weights_b[iu]) * qac_b;
+        let absv = f32::abs(val);
+        let q = if absv < thr {
+            i32::new(0)
+        } else {
+            round_ties_even_to_i32(val)
+        };
+        quant_ac_b[off + iu] = q;
+        if q != 0i32 {
+            nz_b += 1u32;
+        }
+        idx += 1u32;
+    }
+    nzeros_b[block_idx] = nz_b;
+}

@@ -98,6 +98,8 @@ pub fn compute_pre_quantized_ac_dct8_persistent<R: Runtime>(
     params: &PreQuantizedDct8Params,
 ) -> PreQuantizedDct8 {
     let n_blocks = xsize_blocks * ysize_blocks;
+    let gpu_pw = xy_g.width() as usize;
+    let gpu_ph = xy_g.height() as usize;
     debug_assert_eq!(params.qac_qm_x.len(), n_blocks);
     debug_assert_eq!(params.qac_qm_y.len(), n_blocks);
     debug_assert_eq!(params.qac_qm_b.len(), n_blocks);
@@ -107,110 +109,78 @@ pub fn compute_pre_quantized_ac_dct8_persistent<R: Runtime>(
 
     let client = enc.client_ref();
 
-    // Step 1: gather pixel blocks (8×8) per channel.
+    // FUSED PIPELINE: single mega-kernel does gather + DCT × 3 +
+    // Y quantize + CfL X/B + chroma quantize + nzeros × 3 — all in
+    // shared memory. Replaces ~10 separate kernel launches with 1.
+    // Cubecl 0.10's per-launch overhead is the bottleneck on small
+    // kernels; collapsing the chain is what makes the GPU producer
+    // faster than CPU transform_and_quantize.
     //
-    // SUB-RECT gather: `xsize_blocks` may be smaller than `gpu_pw / 8`
-    // when the GPU pads to 16-multiple while the CPU encoder only
-    // pads to 8-multiple (e.g., width=2823 → cpu_pw=2824, gpu_pw=2832,
-    // cpu_xsize_blocks=353, gpu_xsize_blocks=354). We gather only the
-    // first `xsize_blocks` columns of blocks per row so the per-block
-    // arrays' lengths match throughout the pipeline. The plane stride
-    // stays at gpu_pw (since the gpu plane is laid out at gpu_pw
-    // stride and we just read fewer columns).
-    fn gather_subrect<R: cubecl::Runtime>(
-        enc: &GpuEncoder<R>,
-        plane: &GpuPlane<R>,
-        xsize_blocks: usize,
-        ysize_blocks: usize,
-    ) -> crate::persistent::GpuBlocks<R> {
-        let plane_w = plane.width();
-        let n_blocks = (xsize_blocks * ysize_blocks) as u32;
-        let coeffs_per_block = 64u32;
-        let n_out = (n_blocks as usize) * (coeffs_per_block as usize);
-        let h_out = enc.client_ref().empty(n_out * 4);
-        crate::launch::gather::gather_blocks::<R>(
-            enc.client_ref(),
-            plane.handle().clone(),
-            h_out.clone(),
-            (plane.width() as usize) * (plane.height() as usize),
-            n_out,
-            plane_w,
-            xsize_blocks as u32,
-            8,
-            8,
-        );
-        crate::persistent::GpuBlocks::from_handle(h_out, n_blocks, coeffs_per_block)
-    }
-    let g_8x = gather_subrect(enc, xx_g, xsize_blocks, ysize_blocks);
-    let g_8y = gather_subrect(enc, xy_g, xsize_blocks, ysize_blocks);
-    let g_8b = gather_subrect(enc, xb_g, xsize_blocks, ysize_blocks);
+    // DC quant remains separate (3 launches) because DC reads from
+    // the DCT float coefs which the fused kernel doesn't expose
+    // (they live in shared memory). Future optimization: do DC in
+    // the same fused kernel by writing DC to a separate output
+    // before the loop — saves another 2 launches.
 
-    // Step 2: forward DCT8 per channel.
-    let dct_x = enc.dct_8x8_persistent(&g_8x);
-    let dct_y = enc.dct_8x8_persistent(&g_8y);
-    let dct_b = enc.dct_8x8_persistent(&g_8b);
-
-    // Upload per-channel weights as 64-coef GpuBlocks (broadcast).
-    let weights_x_gpu = enc.upload_blocks(weights_x_template, 1, 64);
-    let weights_y_gpu = enc.upload_blocks(weights_y_template, 1, 64);
-    let weights_b_gpu = enc.upload_blocks(weights_b_template, 1, 64);
-
-    // Step 3: quantize Y AC (uses existing fast-path persistent kernel).
-    let quant_y = enc.quantize_dct8_persistent_broadcast_w(
-        &dct_y,
-        &weights_y_gpu,
-        &params.qac_qm_y,
-        &params.thresholds_y,
-    );
-
-    // Step 4: CfL-subtract + quantize X / B. Each call pulls in the
-    // per-block weights (broadcast) and per-block scalars + Y's
-    // already-quantized AC.
-    let h_dct_x = dct_x.handle().clone();
-    let h_dct_b = dct_b.handle().clone();
-    let h_q_y = quant_y.handle().clone();
-    let h_w_x = weights_x_gpu.handle().clone();
-    let h_w_y = weights_y_gpu.handle().clone();
-    let h_w_b = weights_b_gpu.handle().clone();
+    // Upload per-channel scalars + weights for the fused kernel.
     let h_qmx = client.create_from_slice(f32::as_bytes(&params.qac_qm_x));
     let h_qmy = client.create_from_slice(f32::as_bytes(&params.qac_qm_y));
     let h_qmb = client.create_from_slice(f32::as_bytes(&params.qac_qm_b));
     let h_xfac = client.create_from_slice(f32::as_bytes(&params.x_factor_per_block));
     let h_bfac = client.create_from_slice(f32::as_bytes(&params.b_factor_per_block));
+    let h_wx = client.create_from_slice(f32::as_bytes(weights_x_template));
+    let h_wy = client.create_from_slice(f32::as_bytes(weights_y_template));
+    let h_wb = client.create_from_slice(f32::as_bytes(weights_b_template));
     let h_thr_x = client.create_from_slice(f32::as_bytes(&params.thresholds_x[..]));
+    let h_thr_y = client.create_from_slice(f32::as_bytes(&params.thresholds_y[..]));
     let h_thr_b = client.create_from_slice(f32::as_bytes(&params.thresholds_b[..]));
 
     let h_q_x = client.empty(n_blocks * 64 * core::mem::size_of::<i32>());
+    let h_q_y = client.empty(n_blocks * 64 * core::mem::size_of::<i32>());
     let h_q_b = client.empty(n_blocks * 64 * core::mem::size_of::<i32>());
+    let h_nz_x = client.empty(n_blocks * core::mem::size_of::<u32>());
+    let h_nz_y = client.empty(n_blocks * core::mem::size_of::<u32>());
+    let h_nz_b = client.empty(n_blocks * core::mem::size_of::<u32>());
 
-    crate::launch::cfl_quantize::cfl_quantize_dct8::<R>(
+    let plane_n = gpu_pw * gpu_ph;
+    crate::launch::fused_dct8_3ch::fused_dct8_3ch::<R>(
         client,
-        h_dct_x,
-        h_q_y.clone(),
-        h_w_x,
-        h_w_y.clone(),
-        h_qmx.clone(),
-        h_qmy.clone(),
-        h_xfac,
-        h_thr_x,
-        h_q_x.clone(),
-        n_blocks as u32,
-    );
-    crate::launch::cfl_quantize::cfl_quantize_dct8::<R>(
-        client,
-        h_dct_b,
-        h_q_y.clone(),
-        h_w_b,
-        h_w_y,
-        h_qmb,
+        xx_g.handle().clone(),
+        xy_g.handle().clone(),
+        xb_g.handle().clone(),
+        h_wx,
+        h_wy,
+        h_wb,
+        h_qmx,
         h_qmy,
+        h_qmb,
+        h_xfac,
         h_bfac,
+        h_thr_x,
+        h_thr_y,
         h_thr_b,
+        h_q_x.clone(),
+        h_q_y.clone(),
         h_q_b.clone(),
+        h_nz_x.clone(),
+        h_nz_y.clone(),
+        h_nz_b.clone(),
+        plane_n,
         n_blocks as u32,
+        gpu_pw as u32,
+        xsize_blocks as u32,
     );
 
-    // Step 5: DC quantize. Y first (since chroma reads Y's quant_dc).
+    // DC still needs the float DCT coefs. Run a separate DCT8 for
+    // each channel (3 small kernels) then DC quantize × 3. Future
+    // chunk: extend the fused kernel to also write DC.
+    let g_8y = enc.gather_blocks_persistent(xy_g, 8, 8);
+    let g_8x = enc.gather_blocks_persistent(xx_g, 8, 8);
+    let g_8b = enc.gather_blocks_persistent(xb_g, 8, 8);
+    let dct_x = enc.dct_8x8_persistent(&g_8x);
+    let dct_y = enc.dct_8x8_persistent(&g_8y);
+    let dct_b = enc.dct_8x8_persistent(&g_8b);
+
     let h_qdc_y = client.empty(n_blocks * core::mem::size_of::<i16>());
     let h_fdc_y = client.empty(n_blocks * core::mem::size_of::<f32>());
     crate::launch::quantize_dc::quantize_dc_y_dct8::<R>(
@@ -230,7 +200,7 @@ pub fn compute_pre_quantized_ac_dct8_persistent<R: Runtime>(
         h_qdc_x.clone(),
         h_fdc_x.clone(),
         params.inv_dc_factor_x,
-        0.0, // dc_cfl_factor for X
+        0.0,
         n_blocks as u32,
     );
     let h_qdc_b = client.empty(n_blocks * core::mem::size_of::<i16>());
@@ -242,30 +212,7 @@ pub fn compute_pre_quantized_ac_dct8_persistent<R: Runtime>(
         h_qdc_b.clone(),
         h_fdc_b.clone(),
         params.inv_dc_factor_b,
-        0.5, // dc_cfl_factor for B
-        n_blocks as u32,
-    );
-
-    // Step 6: nzeros count per channel.
-    let h_nz_x = client.empty(n_blocks * core::mem::size_of::<u32>());
-    let h_nz_y = client.empty(n_blocks * core::mem::size_of::<u32>());
-    let h_nz_b = client.empty(n_blocks * core::mem::size_of::<u32>());
-    crate::launch::nzeros_count::nzeros_count_dct8::<R>(
-        client,
-        h_q_x.clone(),
-        h_nz_x.clone(),
-        n_blocks as u32,
-    );
-    crate::launch::nzeros_count::nzeros_count_dct8::<R>(
-        client,
-        h_q_y.clone(),
-        h_nz_y.clone(),
-        n_blocks as u32,
-    );
-    crate::launch::nzeros_count::nzeros_count_dct8::<R>(
-        client,
-        h_q_b.clone(),
-        h_nz_b.clone(),
+        0.5,
         n_blocks as u32,
     );
 
