@@ -1,0 +1,56 @@
+# rd_pareto_2026-05-14.tsv — meta
+
+git_commit:    515540b2 (jxl-encoder-gpu) on top of main 7378da13
+git_repo:      jxl-encoder-gpu
+hostname:      lilith
+generated_utc: 2026-05-14 (sweep started 22:42 UTC, finished ~22:55 UTC)
+
+corpus:
+  - /home/lilith/work/codec-corpus/clic2025/validation/02809272....png  (1360x2048)
+  - /home/lilith/work/codec-corpus/clic2025/validation/0369d229....png  (1024x768)
+  - /home/lilith/work/codec-corpus/clic2025/validation/07b9f93f....png  (2048x1360)
+  - /home/lilith/work/codec-corpus/clic2025/final-test/a365e654....png  (2048x1360)
+  - /home/lilith/work/codec-corpus/gb82-sc/terminal.png                 (1646x1062)
+
+distances: 0.25, 0.5, 1.0, 2.0, 3.0, 5.0  (CLAUDE.md sweep rule: dense low-q web-focused)
+encoders:  gpu_e7, gpu_e8, gpu_e9, cjxl_e7, cjxl_e8
+runs:      1 (timing has variance; bytes + metrics are deterministic)
+
+cmd:
+  cargo run --release -p jxl-encoder-gpu \
+    --features 'cuda encoder butteraugli-loop' \
+    --example rd_pareto_vs_cjxl -- \
+    --image clic2025/validation/02809272....png \
+    --image clic2025/validation/0369d229....png \
+    --image clic2025/validation/07b9f93f....png \
+    --image clic2025/final-test/a365e654....png \
+    --image gb82-sc/terminal.png \
+    --distance 0.25 --distance 0.5 --distance 1.0 \
+    --distance 2.0 --distance 3.0 --distance 5.0 \
+    --encoder gpu_e7 --encoder gpu_e8 --encoder gpu_e9 \
+    --encoder cjxl_e7 --encoder cjxl_e8 \
+    --out benchmarks/rd_pareto_2026-05-14.tsv \
+    --runs 1
+
+decoder:  jxl-oxide 0.12.5 with request_color_encoding(srgb_linear(Relative)),
+          falls back to jxl-rs 0.4 if jxl-oxide rejects (e.g. ANS in
+          multi-group modular). jxl-rs is the project CLAUDE.md PRIMARY
+          decoder for roundtrip validation.
+metric:   butteraugli (Rust crate, butteraugli_linear) on linear sRGB f32
+          + fast-ssim2 0.7 (compute_ssimulacra2) on sRGB u8 with correct
+          1.055/2.4 transfer function (NOT gamma 2.2).
+
+DATA QUALITY NOTES:
+- 15 of 150 (10%) GPU encodes produced bitstreams that BOTH jxl-oxide
+  and jxl-rs reject. djxl also rejects them (verified on terminal d=1.0,
+  exit 1, "DecompressJxlToPackedPixelFile failed"). This is a real GPU
+  encoder bug, NOT a decoder limitation. Failing tuples:
+    a365e654 d=1.0 × {gpu_e7, gpu_e8, gpu_e9}
+    terminal d ∈ {0.25, 0.5, 1.0, 2.0} × {gpu_e7, gpu_e8, gpu_e9}
+- The strategy histogram for terminal d=1.0 includes raw_strategy=16,
+  which is outside the documented range (0..14). Likely related to
+  AC-strategy assignment plumbing on screenshot content.
+- The successful 135 data points are valid. Conclusions below are drawn
+  from those.
+
+See companion analysis: rd_pareto_2026-05-14.analysis.txt

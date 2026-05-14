@@ -70,3 +70,9 @@ cudarc = { version = "0.19.4", default-features = false, features = [
     "fallback-dynamic-loading",
     "fallback-latest",
 ] }
+# jxl-oxide — used by examples/rd_pareto_vs_cjxl.rs for decoding our and
+# cjxl's bitstreams in linear sRGB (request_color_encoding) for metadata-
+# immune butteraugli + SSIM2 comparison. Per project CLAUDE.md, this is
+# the canonical decoder for in-process metric measurement (not jxl-rs)
+# because its `srgb_linear(Relative)` request enforces consistent TF.
+jxl-oxide = { version = "0.12.5", default-features = false }
