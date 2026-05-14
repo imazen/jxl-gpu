@@ -2352,7 +2352,7 @@ impl<R: Runtime> GpuEncoder<R> {
             }
             dst
         };
-        let refined_aq_gpu_grid =
+        let refined_outcome =
             crate::forks::butteraugli_loop::refine_aq_field_gpu_with_strategy_search_persistent(
                 self,
                 lossy,
@@ -2369,6 +2369,16 @@ impl<R: Runtime> GpuEncoder<R> {
             .map_err(|e| jxl_encoder::api::EncodeError::InvalidInput {
                 message: alloc::format!("butteraugli refinement failed: {e:?}"),
             })?;
+        let refined_aq_gpu_grid = refined_outcome.aq_field;
+        // `final_inv_scale` is the recomputed inv_scale from a final
+        // SetQuantField pass on the converged aq_field (matches the
+        // CPU butteraugli loop's final_params; see its return value at
+        // jxl-encoder/src/vardct/butteraugli_loop.rs:469-477). We must
+        // use this — NOT a fresh DistanceParams::compute_for_profile —
+        // when converting to u8 below, otherwise the bitstream's
+        // global_scale mismatches what the loop converged on and bytes
+        // diverge from the in-loop estimates.
+        let refined_inv_scale = refined_outcome.final_inv_scale;
 
         // Reuse the xyb we already downloaded + repacked for the
         // adaptive_initial seed above.
@@ -2464,9 +2474,33 @@ impl<R: Runtime> GpuEncoder<R> {
             0,
         );
 
-        let vardct = VarDctEncoder::new(distance);
-        let params = DistanceParams::compute_for_profile(distance, &vardct.profile);
-        let quant_field_u8 = quantize_quant_field(&quant_field_float, params.inv_scale);
+        let mut vardct = VarDctEncoder::new(distance);
+        let profile_params = DistanceParams::compute_for_profile(distance, &vardct.profile);
+
+        // Thread the per-iter SetQuantField recompute (matching CPU
+        // `vardct/butteraugli_loop.rs`) through to the bitstream:
+        // `encode_from_precomputed` re-derives its `params` from
+        // `compute_for_profile` (a profile-fixed q formula), so without
+        // this rescale the bitstream's `global_scale` would NOT match
+        // the inv_scale we just used to quantize the float field, and
+        // the decoder would dequantize against the wrong scale.
+        //
+        // `quant_ac_rescale = r` makes the encoder rebuild
+        // `params.global_scale = round(profile.global_scale * r)` —
+        // pick `r = refined_scale / profile_scale` so the resulting
+        // global_scale matches the loop's converged
+        // `compute_from_quant_field` result.
+        //
+        // Equal scales (e.g. when median-MAD ≈ profile.initial_q_numerator)
+        // → `r ≈ 1.0` and `apply_quant_ac_rescale` no-ops on its
+        // `(rescale - 1.0).abs() < EPSILON` guard. Mismatched scales
+        // → `r != 1.0` and the encoder rebuilds global_scale to match.
+        let rescale = refined_outcome.final_scale / profile_params.scale;
+        if rescale.is_finite() && rescale > 0.0 {
+            vardct.quant_ac_rescale = Some(rescale);
+        }
+
+        let quant_field_u8 = quantize_quant_field(&quant_field_float, refined_inv_scale);
 
         vardct
             .encode_from_precomputed(&precomputed, &quant_field_u8)

@@ -1133,6 +1133,35 @@ pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
     )
 }
 
+/// Outcome of [`refine_aq_field_gpu_with_strategy_search_persistent`].
+///
+/// Returns the refined per-block float quant field plus the
+/// `inv_scale` from a final `SetQuantField`-equivalent recompute on
+/// that field. Caller MUST use `final_inv_scale` (not a fresh
+/// `DistanceParams::compute_for_profile`) when converting `aq_field` →
+/// `u8` quant field for the bitstream encode — otherwise the
+/// quantization scale assumed during the loop won't match the scale
+/// used when emitting the bitstream, and bytes will diverge.
+///
+/// Mirrors what the CPU butteraugli loop returns implicitly via its
+/// `final_params: DistanceParams` (see jxl-encoder
+/// `vardct/butteraugli_loop.rs:469-477`).
+#[derive(Debug, Clone)]
+pub struct RefinedAqOutcome {
+    /// Refined per-block float quant field (same layout as the input
+    /// `initial_aq_field` — GPU block grid).
+    pub aq_field: Vec<f32>,
+    /// `inv_scale` from `DistanceParams::compute_from_quant_field`
+    /// applied to the final `aq_field`. Use this to convert the
+    /// returned `aq_field` to `u8` for the encoder.
+    pub final_inv_scale: f32,
+    /// `scale` from the same recompute (= `1.0 / final_inv_scale`,
+    /// pre-divided to spare callers the rounding error of recomputing
+    /// it themselves). Mirrors the CPU loop's
+    /// `final_params.scale` field.
+    pub final_scale: f32,
+}
+
 /// GPU-resident variant of [`refine_aq_field_gpu_with_strategy_search`]
 /// — uses the persistent encode path that returns recon planes as
 /// `GpuPlane<R>` triples (skipping the per-iter download + sRGB
@@ -1155,6 +1184,20 @@ pub fn refine_aq_field_gpu_with_strategy_search<R: Runtime>(
 ///
 /// Requires the `butteraugli-gpu/internals` feature (enabled by
 /// default in this crate's `butteraugli-loop` feature).
+///
+/// **Per-iter SetQuantField recompute**: each iteration rebuilds
+/// `inv_global_scale` / `quantizer_scale` from the running `aq_field`
+/// via `jxl_encoder::__pre_quantized::DistanceParams::
+/// compute_from_quant_field` (median/MAD of the float field), mirroring
+/// the CPU butteraugli loop (`jxl-encoder/src/vardct/butteraugli_loop.
+/// rs:161-171, 369-373`) and libjxl `FindBestQuantization`
+/// (`enc_adaptive_quantization.cc:929-1115`). The recomputed scale
+/// drives the per-block min-step bump (lines 404-409 in the CPU loop)
+/// — without it, the bump uses `quantizer_scale=0` (a no-op) and
+/// bad-block adjustments can round to the same integer-quant value
+/// without actually moving. Returns the FINAL recomputed scale so
+/// the caller's `quantize_quant_field` step matches what the loop
+/// converged on.
 #[allow(clippy::too_many_arguments)]
 pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
     enc: &GpuEncoder<R>,
@@ -1168,7 +1211,9 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
     target_distance: f32,
     iters: usize,
     mut trace: impl FnMut(RefineIterTrace),
-) -> butteraugli_gpu::Result<Vec<f32>> {
+) -> butteraugli_gpu::Result<RefinedAqOutcome> {
+    use jxl_encoder::__pre_quantized::DistanceParams;
+
     let (width, height) = lossy.dimensions();
     let n_pixels = (width as usize) * (height as usize);
     debug_assert_eq!(
@@ -1187,6 +1232,13 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
         let (pw, ph) = lossy.padded_dimensions();
         (pw as usize / 8, ph as usize / 8)
     };
+    // Deviation bounds derive from the FLOAT INITIAL field and stay
+    // fixed for the whole loop — matching the CPU loop's behavior
+    // (`vardct/butteraugli_loop.rs:111-127` runs once outside the
+    // for-iter loop). The bounds prevent runaway adjustments from
+    // diverging too far from the initial calibration; recomputing them
+    // per iter would let the bounds drift with the field they're
+    // supposed to constrain.
     let bounds = DeviationBounds::compute(initial_aq_field);
     let (is_first_storage, cx_storage, cy_storage) = dct8_only_storage(xsize_blocks * ysize_blocks);
     let cfg = RefineConfig {
@@ -1241,6 +1293,32 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
             // attempts may want it; cheap to allocate.
             let _ = &initial_aq_field_snapshot;
 
+            // Per-iter SetQuantField equivalent: recompute global_scale
+            // from the CURRENT aq_field (median/MAD), then derive
+            // inv_global_scale + quantizer_scale for the per-block
+            // adjustment below.
+            //
+            // libjxl `enc_adaptive_quantization.cc:992-1011` calls
+            // `quantizer.SetQuantField(...)` at the top of every
+            // iteration; the CPU loop mirrors this at
+            // `jxl-encoder/src/vardct/butteraugli_loop.rs:161-171`.
+            // The recomputed `inv_global_scale` and `quantizer_scale`
+            // feed the per-block "rounded-int min-step" check below
+            // (lines 404-409 in the CPU loop).
+            //
+            // Before this fix, the GPU loop used `inv_global_scale=1`
+            // and `quantizer_scale=0`, which neutered the min-step
+            // check — so a "bad-block" adjustment that nudged the
+            // float qf by less than one integer-quantizer step would
+            // round to the same int and silently lose the adjustment.
+            // Combined with our tightened bounds (cur_pow=0.5,
+            // diff_cap=1.3), this cost real bytes on images where
+            // many blocks need only a small bump.
+            let current_params =
+                DistanceParams::compute_from_quant_field(target_distance, &aq_field);
+            let inv_global_scale: f32 = current_params.inv_scale;
+            let quantizer_scale: f32 = current_params.scale;
+
             // Symmetric AQ adjustment matching the CPU butteraugli_loop
             // (which mirrors libjxl enc_adaptive_quantization.cc:1066-1110).
             //
@@ -1254,9 +1332,7 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
             // GPU tuning: cur_pow=0.5 (more aggressive reclamation
             // for blocks under target), cap diff at 1.3 (limit
             // bad-block growth so they don't ratchet up 50% per
-            // iter). Result: -1.8/+14.5/+9.0% across the same
-            // images — at least one case shrinks (target behavior),
-            // others grow less than CPU-faithful.
+            // iter).
             //
             // Why we deviate from libjxl: our GPU encode path's
             // initial AQ baseline is ~9% smaller bytes than cjxl's
@@ -1265,21 +1341,25 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
             // baseline where blocks have more room to reclaim.
             // For our tighter baseline, we need stronger cur_pow
             // and a cap on bad-block bumps.
-            //
-            // Open issue: even with this tuning, some images grow
-            // bytes. Root cause is likely (a) GPU butteraugli
-            // tile_dist values diverging from CPU (FP precision),
-            // or (b) GPU loop missing kOriginalComparisonRound +
-            // per-iter SetQuantField recompute that the CPU loop
-            // has. See e8_e9_perf_2026-05-14.md for the full
-            // analysis.
             let cur_pow: f32 = if iter < 2 { 0.5 } else { 0.0 };
             let max_increase: f32 = 1.3;
             for bi in 0..aq_field.len() {
                 let diff_raw = tile_dist[bi] / target_distance;
                 let diff = diff_raw.min(max_increase);
                 if diff > 1.0 {
-                    aq_field[bi] *= diff;
+                    let old = aq_field[bi];
+                    aq_field[bi] = old * diff;
+                    // Min-step bump (libjxl `enc_adaptive_quantization.
+                    // cc:1078-1086`, CPU loop lines 404-409). If the
+                    // float adjustment rounds to the same integer
+                    // quantizer value as before, bump by exactly one
+                    // quantizer step so the adjustment isn't a no-op
+                    // after `quantize_quant_field` discretizes it.
+                    let qf_old = (old * inv_global_scale + 0.5).floor() as i32;
+                    let qf_new = (aq_field[bi] * inv_global_scale + 0.5).floor() as i32;
+                    if qf_old == qf_new {
+                        aq_field[bi] = old + quantizer_scale;
+                    }
                 } else if cur_pow > 0.0 {
                     // Good block: scale down by diff^cur_pow.
                     let safe_diff = diff.max(0.0);
@@ -1305,7 +1385,17 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
         });
     }
 
-    Ok(aq_field)
+    // Final SetQuantField recompute on the final aq_field — mirrors the
+    // CPU loop's `vardct/butteraugli_loop.rs:469-477` and libjxl
+    // `enc_adaptive_quantization.cc:1112-1113`. Caller passes
+    // `final_inv_scale` to `quantize_quant_field` so the integer u8
+    // field matches what the loop converged on.
+    let final_params = DistanceParams::compute_from_quant_field(target_distance, &aq_field);
+    Ok(RefinedAqOutcome {
+        aq_field,
+        final_inv_scale: final_params.inv_scale,
+        final_scale: final_params.scale,
+    })
 }
 
 /// Smart-gated combined-mode refinement: strat-search transform picks
