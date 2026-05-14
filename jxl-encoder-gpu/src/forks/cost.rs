@@ -2345,6 +2345,222 @@ pub fn strategy_search_costs_subblock_8x8_with_handle<R: Runtime>(
     )
 }
 
+/// One element of the multi-strategy 8x8-class cost-grid batch.
+///
+/// All entries share the same input pixel blocks, mask, padded
+/// dims, ytox/ytob, and `scaled_constants` — only the strategy and
+/// its constants vary.
+#[derive(Clone, Copy)]
+pub struct SubblockStratSpec<'a> {
+    pub raw_strategy: u8,
+    pub weights_x: &'a [f32],
+    pub weights_y: &'a [f32],
+    pub weights_b: &'a [f32],
+    pub inv_weights_x: &'a [f32],
+    pub inv_weights_y: &'a [f32],
+    pub inv_weights_b: &'a [f32],
+    pub entropy_mul: f32,
+}
+
+/// Batched 8x8-class cost-grid evaluation: launches DCT/entropy/
+/// IDCT/loss for ALL strategies into the cubecl pipeline FIRST
+/// (60 launches for 5 strategies, no intermediate sync), then does
+/// ONE batched download of every result handle.
+///
+/// Replaces N sequential `strategy_search_costs_subblock_8x8_with_handle`
+/// calls — each of which paid an N-th queue-drain sync barrier for a
+/// 6-handle download. With N strategies fused, total sync barriers
+/// drop from N to 1.
+///
+/// Returns one `Vec<f32>` (per-block costs) per spec, in input order.
+#[allow(clippy::too_many_arguments)]
+pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    pre_gathered_8x8_x: &crate::persistent::GpuBlocks<R>,
+    pre_gathered_8x8_y: &crate::persistent::GpuBlocks<R>,
+    pre_gathered_8x8_b: &crate::persistent::GpuBlocks<R>,
+    padded_width: usize,
+    padded_height: usize,
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    mask_row_base_handle: &cubecl::server::Handle,
+    mask_row_base_len: usize,
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    ytox: i8,
+    ytob: i8,
+    scaled_constants: (f32, f32, f32),
+    specs: &[SubblockStratSpec<'_>],
+) -> alloc::vec::Vec<alloc::vec::Vec<f32>> {
+    use crate::forks::cfl::{ytob_ratio, ytox_ratio};
+    use crate::forks::transform::{
+        apply_dct_batch_persistent, apply_idct_batch_persistent, coeff_count_per_strategy,
+        tile_dims_pixels,
+    };
+
+    let xb = padded_width / 8;
+    let yb = padded_height / 8;
+    let n_blocks = xb * yb;
+    debug_assert_eq!(pre_gathered_8x8_x.num_blocks() as usize, n_blocks);
+    debug_assert_eq!(pre_gathered_8x8_x.coeffs_per_block(), 64);
+    debug_assert_eq!(mask_row_base_len, n_blocks);
+    let (_info_loss_mul, cost_delta, _zeros_mul) = scaled_constants;
+
+    if specs.is_empty() {
+        return alloc::vec::Vec::new();
+    }
+
+    // Phase A: launch every strategy's full pipeline. NO sync.
+    let mut handle_sets: alloc::vec::Vec<(
+        crate::persistent::GpuBlocks<R>, // x_stats
+        crate::persistent::GpuBlocks<R>, // y_stats
+        crate::persistent::GpuBlocks<R>, // b_stats
+        crate::persistent::GpuBlocks<R>, // x_loss
+        crate::persistent::GpuBlocks<R>, // y_loss
+        crate::persistent::GpuBlocks<R>, // b_loss
+        usize,                            // block_pixels
+    )> = alloc::vec::Vec::with_capacity(specs.len());
+    for spec in specs {
+        let coeff_count = coeff_count_per_strategy(spec.raw_strategy);
+        let (block_w, block_h) = tile_dims_pixels(spec.raw_strategy);
+        let block_pixels = block_w * block_h;
+        debug_assert_eq!(spec.weights_x.len(), coeff_count);
+        debug_assert_eq!(spec.weights_y.len(), coeff_count);
+        debug_assert_eq!(spec.weights_b.len(), coeff_count);
+        debug_assert_eq!(spec.inv_weights_x.len(), coeff_count);
+        debug_assert_eq!(spec.inv_weights_y.len(), coeff_count);
+        debug_assert_eq!(spec.inv_weights_b.len(), coeff_count);
+
+        let dct_x = apply_dct_batch_persistent(enc, pre_gathered_8x8_x, spec.raw_strategy);
+        let dct_y = apply_dct_batch_persistent(enc, pre_gathered_8x8_y, spec.raw_strategy);
+        let dct_b = apply_dct_batch_persistent(enc, pre_gathered_8x8_b, spec.raw_strategy);
+
+        let (g_y_stats, g_y_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+            &dct_y,
+            &dct_y,
+            spec.weights_y,
+            spec.inv_weights_y,
+            0.0,
+            quant_y,
+            cost_delta,
+        );
+        let (g_x_stats, g_x_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+            &dct_x,
+            &dct_y,
+            spec.weights_x,
+            spec.inv_weights_x,
+            ytox_ratio(ytox),
+            quant_x,
+            cost_delta,
+        );
+        let (g_b_stats, g_b_err) = enc.entropy_coeffs_pixel_blocks_broadcast_w_persistent(
+            &dct_b,
+            &dct_y,
+            spec.weights_b,
+            spec.inv_weights_b,
+            ytob_ratio(ytob),
+            quant_b,
+            cost_delta,
+        );
+
+        let g_pix_err_x = apply_idct_batch_persistent(enc, &g_x_err, spec.raw_strategy);
+        let g_pix_err_y = apply_idct_batch_persistent(enc, &g_y_err, spec.raw_strategy);
+        let g_pix_err_b = apply_idct_batch_persistent(enc, &g_b_err, spec.raw_strategy);
+
+        let g_loss_x = enc.pixel_loss_blocks_with_handle_persistent(
+            &g_pix_err_x,
+            mask1x1,
+            mask_row_base_handle,
+            MASK_CHANNEL_OFFSET[0],
+            block_w as u32,
+            block_h as u32,
+        );
+        let g_loss_y = enc.pixel_loss_blocks_with_handle_persistent(
+            &g_pix_err_y,
+            mask1x1,
+            mask_row_base_handle,
+            MASK_CHANNEL_OFFSET[1],
+            block_w as u32,
+            block_h as u32,
+        );
+        let g_loss_b = enc.pixel_loss_blocks_with_handle_persistent(
+            &g_pix_err_b,
+            mask1x1,
+            mask_row_base_handle,
+            MASK_CHANNEL_OFFSET[2],
+            block_w as u32,
+            block_h as u32,
+        );
+
+        handle_sets.push((
+            g_x_stats, g_y_stats, g_b_stats, g_loss_x, g_loss_y, g_loss_b, block_pixels,
+        ));
+    }
+
+    // Phase B: ONE batched read of every result handle (6 per
+    // strategy). Single queue-drain sync barrier instead of N.
+    let mut all_handles: alloc::vec::Vec<cubecl::server::Handle> =
+        alloc::vec::Vec::with_capacity(handle_sets.len() * 6);
+    for set in &handle_sets {
+        all_handles.push(set.0.handle().clone());
+        all_handles.push(set.1.handle().clone());
+        all_handles.push(set.2.handle().clone());
+        all_handles.push(set.3.handle().clone());
+        all_handles.push(set.4.handle().clone());
+        all_handles.push(set.5.handle().clone());
+    }
+    let mut bytes = enc.client_ref().read(all_handles);
+
+    // Phase C: per-strategy CPU finalize (entropy extraction, X-channel
+    // weight, pixel-loss combine, per-block cost).
+    let mut out: alloc::vec::Vec<alloc::vec::Vec<f32>> =
+        alloc::vec::Vec::with_capacity(specs.len());
+    // bytes are in submission order: [s0_x_stats, s0_y_stats, s0_b_stats, s0_x_loss, s0_y_loss, s0_b_loss, s1_x_stats, ...]
+    let mut idx = 0usize;
+    for (spec, (.., block_pixels)) in specs.iter().zip(handle_sets.iter()) {
+        let xs_b = &bytes[idx]; idx += 1;
+        let ys_b = &bytes[idx]; idx += 1;
+        let bs_b = &bytes[idx]; idx += 1;
+        let xl_b = &bytes[idx]; idx += 1;
+        let yl_b = &bytes[idx]; idx += 1;
+        let bl_b = &bytes[idx]; idx += 1;
+        let x_stats = f32::from_bytes(xs_b);
+        let y_stats = f32::from_bytes(ys_b);
+        let b_stats = f32::from_bytes(bs_b);
+        let mut loss_x = f64::from_bytes(xl_b).to_vec();
+        let loss_y = f64::from_bytes(yl_b).to_vec();
+        let loss_b = f64::from_bytes(bl_b).to_vec();
+
+        let entropy_x = extract_per_block_entropy(x_stats, n_blocks);
+        let entropy_y = extract_per_block_entropy(y_stats, n_blocks);
+        let entropy_b = extract_per_block_entropy(b_stats, n_blocks);
+        let covered_blocks = block_pixels / 64;
+        apply_x_multiblock_weight_to_loss(&mut loss_x, covered_blocks);
+
+        let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
+        let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<alloc::vec::Vec<_>>();
+        let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<alloc::vec::Vec<_>>();
+        let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<alloc::vec::Vec<_>>();
+        let costs = per_block_upstream_cost(
+            &entropy_x,
+            &entropy_y,
+            &entropy_b,
+            &nzeros_x,
+            &nzeros_y,
+            &nzeros_b,
+            &pixel_loss_total,
+            spec.entropy_mul,
+            scaled_constants,
+            quant_y,
+            *block_pixels,
+        );
+        out.push(costs);
+    }
+    // Suppress unused warning for the now-empty bytes vec.
+    let _ = bytes.drain(..);
+    out
+}
+
 /// Cost grid for DCT64x64. Returns empty Vec when image dims aren't
 /// multiples of 64.
 ///

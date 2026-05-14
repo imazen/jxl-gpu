@@ -1414,7 +1414,9 @@ impl<R: Runtime> LossyEncoder<R> {
         // clarity (single explicit upload point) and as setup for
         // future fused-multi-strategy launches; not a production perf
         // win in itself.
-        use crate::forks::cost::strategy_search_costs_subblock_8x8_with_handle;
+        use crate::forks::cost::{
+            strategy_search_costs_subblock_8x8_batch, SubblockStratSpec,
+        };
         use cubecl::prelude::*;
         let mask_row_base_subblock: Vec<u32> = (0..nb8)
             .map(|i| {
@@ -1431,219 +1433,134 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_4x4_x: Vec<f32> = dct4x4_x.iter().map(|w| 1.0 / w).collect();
         let inv_4x4_y: Vec<f32> = dct4x4_y.iter().map(|w| 1.0 / w).collect();
         let inv_4x4_b: Vec<f32> = dct4x4_b.iter().map(|w| 1.0 / w).collect();
-        // DCT4x4: 2.16 → 1.08 (libjxl reference, May 9 2026, gated by
-        // corpus regression test). The original 2.16 (= 2× libjxl)
-        // anti-bias was set as a starting point. Bisected on the
-        // 11-image corpus: 2.16 ✓, 1.6 ✓, 1.2 ✓, 1.08 ✓ (libjxl).
-        // Now at exact libjxl reference value.
-        let cost_dct4x4 = if evaluate_subblock_costs {
-            strategy_search_costs_subblock_8x8_with_handle(
-                enc,
-                &g_8x,
-                &g_8y,
-                &g_8b,
-                pw,
-                ph,
-                &g_mask,
-                &h_mrb_subblock,
-                mask_row_base_subblock.len(),
-                RAW_STRATEGY_DCT4X4,
-                &dct4x4_x,
-                &dct4x4_y,
-                &dct4x4_b,
-                &inv_4x4_x,
-                &inv_4x4_y,
-                &inv_4x4_b,
-                qac,
-                qac,
-                qac,
-                0,
-                0,
-                scaled_constants,
-                1.08,
-            )
-        } else {
-            Vec::new()
-        };
 
         let (dct4x8_x, dct4x8_y, dct4x8_b) = dct4x8_weights_per_channel();
         let inv_4x8_x: Vec<f32> = dct4x8_x.iter().map(|w| 1.0 / w).collect();
         let inv_4x8_y: Vec<f32> = dct4x8_y.iter().map(|w| 1.0 / w).collect();
         let inv_4x8_b: Vec<f32> = dct4x8_b.iter().map(|w| 1.0 / w).collect();
-        // DCT4x8 / DCT8x4: 1.72 → 0.98 (May 9 2026, gated by corpus
-        // regression test). libjxl reference is 0.86 — we're 14% above
-        // because at 0.95 the strat-wins photo 2684452d regresses
-        // +2% (FP-tied path-shift; bisected 1.72 ✓ → 1.2 ✓ → 1.0 ✓
-        // → 0.98 ✓ → 0.95 ✗).
-        let cost_dct4x8 = if _eval_dct4x8_8x4 {
-            strategy_search_costs_subblock_8x8_with_handle(
-                enc,
-                &g_8x,
-                &g_8y,
-                &g_8b,
-                pw,
-                ph,
-                &g_mask,
-                &h_mrb_subblock,
-                mask_row_base_subblock.len(),
-                RAW_STRATEGY_DCT4X8,
-                &dct4x8_x,
-                &dct4x8_y,
-                &dct4x8_b,
-                &inv_4x8_x,
-                &inv_4x8_y,
-                &inv_4x8_b,
-                qac,
-                qac,
-                qac,
-                0,
-                0,
-                scaled_constants,
-                0.98,
-            )
-        } else {
-            Vec::new()
-        };
-        let cost_dct8x4 = if _eval_dct4x8_8x4 {
-            strategy_search_costs_subblock_8x8_with_handle(
-                enc,
-                &g_8x,
-                &g_8y,
-                &g_8b,
-                pw,
-                ph,
-                &g_mask,
-                &h_mrb_subblock,
-                mask_row_base_subblock.len(),
-                RAW_STRATEGY_DCT8X4,
-                &dct4x8_x,
-                &dct4x8_y,
-                &dct4x8_b,
-                &inv_4x8_x,
-                &inv_4x8_y,
-                &inv_4x8_b,
-                qac,
-                qac,
-                qac,
-                0,
-                0,
-                scaled_constants,
-                0.98,
-            )
-        } else {
-            Vec::new()
-        };
 
-        // IDENTITY: 2.09 → 1.85 (May 9 2026, ~12% reduction gated by
-        // corpus regression test). libjxl reference is 1.0428 but
-        // going below 1.85 path-shifts on the strat-wins photos
-        // (07b9f93f flips RefineStratSearch → RefineDct8 at 1.7 with
-        // a +0.36% score change — within tolerance but the path
-        // label flips, which the test enforces).
-        //
-        // We tried libjxl's kFavor2X2AtHighQuality discount
-        // (`entropy_mul -= 0.4*((5-d)/5)^2` at d<5) earlier — it
-        // caused CATASTROPHIC photo regressions (×10 butteraugli on
-        // 02809272 and 07b9f93f at d=1.0). Don't re-try without
-        // first porting libjxl's missing counterweights.
         let (id_x, id_y, id_b) = identity_weights_per_channel();
         let inv_id_x: Vec<f32> = id_x.iter().map(|w| 1.0 / w).collect();
         let inv_id_y: Vec<f32> = id_y.iter().map(|w| 1.0 / w).collect();
         let inv_id_b: Vec<f32> = id_b.iter().map(|w| 1.0 / w).collect();
-        let cost_identity = if evaluate_subblock_costs {
-            strategy_search_costs_subblock_8x8_with_handle(
-                enc,
-                &g_8x,
-                &g_8y,
-                &g_8b,
-                pw,
-                ph,
-                &g_mask,
-                &h_mrb_subblock,
-                mask_row_base_subblock.len(),
-                RAW_STRATEGY_IDENTITY,
-                &id_x,
-                &id_y,
-                &id_b,
-                &inv_id_x,
-                &inv_id_y,
-                &inv_id_b,
-                qac,
-                qac,
-                qac,
-                0,
-                0,
-                scaled_constants,
-                1.85,
-            )
-        } else {
-            Vec::new()
-        };
 
-        // DCT2X2: 1.90 → 0.95 (libjxl reference, May 9 2026, gated by
-        // corpus regression test). Bisected: 1.90 ✓ → 1.5 ✓ → 1.0 ✓
-        // → 0.95 ✓ (libjxl). Now at exact reference.
         let (d2_x, d2_y, d2_b) = dct2x2_weights_per_channel();
         let inv_d2_x: Vec<f32> = d2_x.iter().map(|w| 1.0 / w).collect();
         let inv_d2_y: Vec<f32> = d2_y.iter().map(|w| 1.0 / w).collect();
         let inv_d2_b: Vec<f32> = d2_b.iter().map(|w| 1.0 / w).collect();
-        let cost_dct2x2 = if evaluate_subblock_costs {
-            strategy_search_costs_subblock_8x8_with_handle(
-                enc,
-                &g_8x,
-                &g_8y,
-                &g_8b,
-                pw,
-                ph,
-                &g_mask,
-                &h_mrb_subblock,
-                mask_row_base_subblock.len(),
-                RAW_STRATEGY_DCT2X2,
-                &d2_x,
-                &d2_y,
-                &d2_b,
-                &inv_d2_x,
-                &inv_d2_y,
-                &inv_d2_b,
-                qac,
-                qac,
-                qac,
-                0,
-                0,
-                scaled_constants,
-                0.95,
-            )
+
+        // entropy_mul tuning history per strategy:
+        //   DCT4x4   (libjxl 1.08)   — bisected to 1.08 (May 9 2026)
+        //   DCT4x8/8x4 (libjxl 0.86) — held at 0.98 (path-flip below 0.95)
+        //   IDENTITY (libjxl 1.0428) — held at 1.85 (path-flip on strat-wins)
+        //   DCT2x2   (libjxl 0.95)   — at libjxl reference 0.95
+        let mut specs: Vec<SubblockStratSpec> = Vec::new();
+        if evaluate_subblock_costs {
+            specs.push(SubblockStratSpec {
+                raw_strategy: RAW_STRATEGY_DCT4X4,
+                weights_x: &dct4x4_x,
+                weights_y: &dct4x4_y,
+                weights_b: &dct4x4_b,
+                inv_weights_x: &inv_4x4_x,
+                inv_weights_y: &inv_4x4_y,
+                inv_weights_b: &inv_4x4_b,
+                entropy_mul: 1.08,
+            });
+        }
+        if _eval_dct4x8_8x4 {
+            specs.push(SubblockStratSpec {
+                raw_strategy: RAW_STRATEGY_DCT4X8,
+                weights_x: &dct4x8_x,
+                weights_y: &dct4x8_y,
+                weights_b: &dct4x8_b,
+                inv_weights_x: &inv_4x8_x,
+                inv_weights_y: &inv_4x8_y,
+                inv_weights_b: &inv_4x8_b,
+                entropy_mul: 0.98,
+            });
+            specs.push(SubblockStratSpec {
+                raw_strategy: RAW_STRATEGY_DCT8X4,
+                weights_x: &dct4x8_x,
+                weights_y: &dct4x8_y,
+                weights_b: &dct4x8_b,
+                inv_weights_x: &inv_4x8_x,
+                inv_weights_y: &inv_4x8_y,
+                inv_weights_b: &inv_4x8_b,
+                entropy_mul: 0.98,
+            });
+        }
+        if evaluate_subblock_costs {
+            specs.push(SubblockStratSpec {
+                raw_strategy: RAW_STRATEGY_IDENTITY,
+                weights_x: &id_x,
+                weights_y: &id_y,
+                weights_b: &id_b,
+                inv_weights_x: &inv_id_x,
+                inv_weights_y: &inv_id_y,
+                inv_weights_b: &inv_id_b,
+                entropy_mul: 1.85,
+            });
+            specs.push(SubblockStratSpec {
+                raw_strategy: RAW_STRATEGY_DCT2X2,
+                weights_x: &d2_x,
+                weights_y: &d2_y,
+                weights_b: &d2_b,
+                inv_weights_x: &inv_d2_x,
+                inv_weights_y: &inv_d2_y,
+                inv_weights_b: &inv_d2_b,
+                entropy_mul: 0.95,
+            });
+        }
+        // Submit all strategies' pipelines, then ONE batched download.
+        // Replaces 5 sequential calls (each with its own queue-drain
+        // sync), folding 5 sync barriers into 1.
+        let costs_batch = strategy_search_costs_subblock_8x8_batch(
+            enc,
+            &g_8x,
+            &g_8y,
+            &g_8b,
+            pw,
+            ph,
+            &g_mask,
+            &h_mrb_subblock,
+            mask_row_base_subblock.len(),
+            qac,
+            qac,
+            qac,
+            0,
+            0,
+            scaled_constants,
+            &specs,
+        );
+        // Re-deal results back into the per-strategy named bins
+        // expected downstream. Order matches the push order above.
+        let mut iter = costs_batch.into_iter();
+        let cost_dct4x4 = if evaluate_subblock_costs {
+            iter.next().unwrap_or_default()
         } else {
             Vec::new()
         };
-        let _ = (
-            &dct4x4_x,
-            &dct4x4_y,
-            &dct4x4_b,
-            &inv_4x4_x,
-            &inv_4x4_y,
-            &inv_4x4_b,
-            &dct4x8_x,
-            &dct4x8_y,
-            &dct4x8_b,
-            &inv_4x8_x,
-            &inv_4x8_y,
-            &inv_4x8_b,
-            &id_x,
-            &id_y,
-            &id_b,
-            &inv_id_x,
-            &inv_id_y,
-            &inv_id_b,
-            &d2_x,
-            &d2_y,
-            &d2_b,
-            &inv_d2_x,
-            &inv_d2_y,
-            &inv_d2_b,
-            &h_mrb_subblock,
-            &mask_row_base_subblock,
-        );
+        let cost_dct4x8 = if _eval_dct4x8_8x4 {
+            iter.next().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let cost_dct8x4 = if _eval_dct4x8_8x4 {
+            iter.next().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let cost_identity = if evaluate_subblock_costs {
+            iter.next().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let cost_dct2x2 = if evaluate_subblock_costs {
+            iter.next().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let _ = (&h_mrb_subblock, &mask_row_base_subblock);
         mark("cost_subblock_8x8");
 
         // AFV0-3 cost grid: STILL SKIPPED (May 9 2026).
