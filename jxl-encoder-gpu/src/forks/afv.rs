@@ -872,6 +872,320 @@ pub fn afv_cost_grid_xyb_host<R: Runtime>(
     all_costs
 }
 
+/// Per-AFV-kind handle set used by
+/// [`afv_per_block_upstream_cost_xyb_host`] to keep all GPU
+/// pipeline outputs alive across the multi-kind launch loop until
+/// Phase B's batched read.
+///
+/// Tuple layout: `(x_stats, y_stats, b_stats, x_loss, y_loss, b_loss)`.
+/// First three are entropy/nzeros stats `GpuBlocks` (4 floats per
+/// block: `[entropy_sum, nzeros_sum, _, _]`); last three are raw
+/// `f64` per-block pixel-loss handles produced by the fused
+/// `pixel_loss_3ch` kernel.
+type AfvHandleSet<R> = (
+    crate::persistent::GpuBlocks<R>,
+    crate::persistent::GpuBlocks<R>,
+    crate::persistent::GpuBlocks<R>,
+    cubecl::server::Handle,
+    cubecl::server::Handle,
+    cubecl::server::Handle,
+);
+
+/// 3-channel XYB AFV per-block cost using libjxl's
+/// `entropy_mul × entropy + k_info_loss × loss_scalar` formula —
+/// the same shape used by every other 8x8-class strategy in
+/// [`crate::forks::cost::strategy_search_costs_subblock_8x8_batch`].
+///
+/// Replaces the placeholder [`afv_cost_grid_xyb_host`] (pure SSE × mask),
+/// which produced costs on a different scale than DCT8 / DCT4x4 /
+/// DCT4x8 / IDENTITY / DCT2x2 and required a per-image
+/// `dct8_mean / afv_mean` calibration to be comparable. With this
+/// formula, AFV costs sit on the same scale as the other sub-block
+/// cost grids natively.
+///
+/// ## Pipeline (per AFV kind 0..3)
+///
+/// 1. Forward AFV → 64-coef GpuBlocks per channel (X/Y/B).
+///    Reuses [`afv_transform_batch_persistent`].
+/// 2. 3-channel entropy + nzeros + per-coef error in one kernel
+///    launch via [`crate::persistent::GpuEncoder::entropy_coeffs_pixel_blocks_3ch_persistent`].
+///    Produces `(x_stats, y_stats, b_stats, x_err, y_err, b_err)`
+///    GpuBlocks. The per-coef error layout matches the AFV-packed
+///    coefficient layout (DCs at [0,0]/[0,1]/[1,0], AC at every
+///    other position), since the entropy kernel just writes
+///    `weights[i] * (val - quantized_val)` per coefficient in
+///    source order.
+/// 3. Inverse AFV on the per-coef errors → pixel-domain error
+///    GpuBlocks per channel. Reuses
+///    [`inverse_afv_transform_batch_persistent`]. The result is in
+///    normal 8×8 pixel layout (the inverse AFV places pixels with
+///    the appropriate corner mirroring).
+/// 4. Fused 3-channel pixel_loss kernel writes per-block masked
+///    8th-power loss for X/Y/B (one launch via
+///    [`crate::launch::pixel_loss_3ch::pixel_loss_3ch`]).
+///
+/// After all 4 kinds finish their pipelines (12 inverse-AFV launches
+/// plus 4 entropy launches plus 4 pixel_loss launches = 20 launches,
+/// all async), ONE batched read pulls all the stats and loss handles
+/// back. CPU-side finalize then extracts per-block entropy from each
+/// channel's stats, applies the X-channel multiblock weight (no-op
+/// for AFV — block_pixels = 64, covered_blocks = 1, weight = 1.0),
+/// combines pixel-loss across 3 channels via [`CHANNEL_MUL`], and
+/// applies [`per_block_upstream_cost_per_block`] (per-block
+/// `quant_for_coeffs` from `aq_field`).
+///
+/// ## Inputs
+///
+/// - `pre_gathered_8x8_x/y/b`: GPU-resident 8×8 pixel blocks per
+///   channel (e.g., from
+///   [`crate::persistent::GpuEncoder::gather_blocks_persistent`]).
+///   `coeffs_per_block = 64`.
+/// - `weights_x/y/b_per_block`: AFV quant weights per channel (one
+///   `[f32; 64]` per channel, used as broadcast template across
+///   all blocks).
+/// - `inv_weights_x/y/b_per_block`: precomputed `1.0 / w` per
+///   coefficient — the entropy kernel needs both directions.
+/// - `mask1x1`: GPU-resident mask plane (same layout as XYB).
+/// - `mask_row_base_handle` / `mask_row_base_len`: per-block mask
+///   start offsets (block index → top-left pixel offset in the mask
+///   plane). For AFV (8x8 blocks), this is the same per-block
+///   mask_row_base used by DCT8.
+/// - `quant_x/y/b`: scalar global quant for each channel (same as
+///   `qac` in the caller).
+/// - `cmap_factor_x/b`: `ytox_ratio(ytox)` / `ytob_ratio(ytob)` for
+///   chroma-from-luma. Pass 0.0 for both when CfL isn't available
+///   yet.
+/// - `entropy_mul`: per-strategy entropy multiplier from
+///   [`crate::forks::cost::afv_entropy_mul`]
+///   (typically `EntropyMulTable::reference().afv / .dct8`).
+/// - `scaled_constants`: `(info_loss_mul, cost_delta, zeros_mul)`
+///   from [`compute_scaled_constants`] (or
+///   [`COEFF_DOMAIN_CONSTANTS`] for coefficient-domain mode).
+/// - `quant_for_coeffs_per_block`: per-block `quant_norm16` for the
+///   loss-scalar denominator. For AFV (covered_blocks = 1), this is
+///   the per-8x8-block adaptive_quant value directly (= `aq_field`).
+///
+/// ## Output
+///
+/// `Vec<f32>` of length `4 * n_blocks` indexed by `[kind * n_blocks + b]`.
+/// Costs are on the same scale as DCT8 / DCT4x4 / etc. cost grids —
+/// the selector can compare them directly without per-image
+/// calibration.
+///
+/// ## Performance
+///
+/// Mirrors the 2-phase launch + batched-read pattern of
+/// `strategy_search_costs_subblock_8x8_batch`. All transforms,
+/// entropy, IDCT, and pixel_loss launches go in Phase A (no syncs);
+/// Phase B does ONE `client.read(...)` over all `4 × 9 = 36` result
+/// handles (3 stats + 3 losses per kind = 6 handles per kind; 9 if
+/// counting per-channel).
+///
+/// Wait — that's 6 handles per kind × 4 kinds = 24. Phase B has one
+/// sync. Phase C is host-only.
+#[allow(clippy::too_many_arguments)]
+pub fn afv_per_block_upstream_cost_xyb_host<R: Runtime>(
+    enc: &GpuEncoder<R>,
+    basis_t: &[f32; 256],
+    pre_gathered_8x8_x: &crate::persistent::GpuBlocks<R>,
+    pre_gathered_8x8_y: &crate::persistent::GpuBlocks<R>,
+    pre_gathered_8x8_b: &crate::persistent::GpuBlocks<R>,
+    weights_x_per_block: &[f32; 64],
+    weights_y_per_block: &[f32; 64],
+    weights_b_per_block: &[f32; 64],
+    inv_weights_x_per_block: &[f32; 64],
+    inv_weights_y_per_block: &[f32; 64],
+    inv_weights_b_per_block: &[f32; 64],
+    mask1x1: &crate::persistent::GpuPlane<R>,
+    mask_row_base_handle: &cubecl::server::Handle,
+    mask_row_base_len: usize,
+    quant_x: f32,
+    quant_y: f32,
+    quant_b: f32,
+    cmap_factor_x: f32,
+    cmap_factor_b: f32,
+    entropy_mul: f32,
+    scaled_constants: (f32, f32, f32),
+    quant_for_coeffs_per_block: &[f32],
+) -> Vec<f32> {
+    use crate::forks::cost::{
+        MASK_CHANNEL_OFFSET, apply_x_multiblock_weight_to_loss, combine_pixel_loss_3channel,
+        extract_per_block_entropy, per_block_upstream_cost_per_block,
+    };
+    use cubecl::prelude::*;
+
+    debug_assert_eq!(pre_gathered_8x8_x.coeffs_per_block(), 64);
+    debug_assert_eq!(pre_gathered_8x8_y.coeffs_per_block(), 64);
+    debug_assert_eq!(pre_gathered_8x8_b.coeffs_per_block(), 64);
+    let n_blocks = pre_gathered_8x8_x.num_blocks() as usize;
+    debug_assert_eq!(pre_gathered_8x8_y.num_blocks() as usize, n_blocks);
+    debug_assert_eq!(pre_gathered_8x8_b.num_blocks() as usize, n_blocks);
+    debug_assert_eq!(mask_row_base_len, n_blocks);
+    debug_assert_eq!(quant_for_coeffs_per_block.len(), n_blocks);
+    let (_info_loss_mul, cost_delta, _zeros_mul) = scaled_constants;
+
+    let weights_x_t: &[f32] = weights_x_per_block.as_slice();
+    let weights_y_t: &[f32] = weights_y_per_block.as_slice();
+    let weights_b_t: &[f32] = weights_b_per_block.as_slice();
+    let inv_x_t: &[f32] = inv_weights_x_per_block.as_slice();
+    let inv_y_t: &[f32] = inv_weights_y_per_block.as_slice();
+    let inv_b_t: &[f32] = inv_weights_b_per_block.as_slice();
+
+    // Block_pixels = 64 for AFV (always 8×8). covered_blocks = 1.
+    const BLOCK_PIXELS: usize = 64;
+    const BLOCK_W: u32 = 8;
+    const BLOCK_H: u32 = 8;
+
+    // Phase A: launch every kind's full pipeline. NO syncs.
+    // For each kind we accumulate (x_stats, y_stats, b_stats,
+    // x_loss_handle, y_loss_handle, b_loss_handle).
+    let mut handle_sets: Vec<AfvHandleSet<R>> = Vec::with_capacity(4);
+
+    // We need to download the pre-gathered XYB blocks ONCE so the
+    // afv_transform_batch_persistent host-side extract step (which
+    // wants `pixel_blocks: &[f32]`) can run. This is a single sync
+    // here (3 reads), but it's the same data that the placeholder
+    // path would have downloaded anyway. Future optimization: add a
+    // GPU-resident extract+pack kernel so this download goes away.
+    let pixel_blocks_x = enc.download_blocks(pre_gathered_8x8_x);
+    let pixel_blocks_y = enc.download_blocks(pre_gathered_8x8_y);
+    let pixel_blocks_b = enc.download_blocks(pre_gathered_8x8_b);
+
+    for kind in 0_usize..4 {
+        // 1. Forward AFV per channel → GpuBlocks (coeffs_per_block = 64).
+        let g_dct_x = afv_transform_batch_persistent(enc, basis_t, &pixel_blocks_x, kind);
+        let g_dct_y = afv_transform_batch_persistent(enc, basis_t, &pixel_blocks_y, kind);
+        let g_dct_b = afv_transform_batch_persistent(enc, basis_t, &pixel_blocks_b, kind);
+
+        // 2. 3-channel entropy + nzeros + per-coef error fused launch.
+        let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) = enc
+            .entropy_coeffs_pixel_blocks_3ch_persistent(
+                &g_dct_x,
+                &g_dct_y,
+                &g_dct_b,
+                weights_x_t,
+                weights_y_t,
+                weights_b_t,
+                inv_x_t,
+                inv_y_t,
+                inv_b_t,
+                cmap_factor_x,
+                cmap_factor_b,
+                quant_x,
+                quant_y,
+                quant_b,
+                cost_delta,
+            );
+
+        // 3. Inverse AFV on the per-coef errors → pixel-domain error.
+        let g_pix_err_x = inverse_afv_transform_batch_persistent(enc, basis_t, &g_x_err, kind);
+        let g_pix_err_y = inverse_afv_transform_batch_persistent(enc, basis_t, &g_y_err, kind);
+        let g_pix_err_b = inverse_afv_transform_batch_persistent(enc, basis_t, &g_b_err, kind);
+
+        // 4. Fused 3-channel pixel_loss kernel. AFV blocks are 8×8
+        // pixels; mask_row_base layout matches DCT8 (per-block
+        // 8×8-aligned offsets in the mask plane).
+        let h_loss_x = enc.client_ref().empty(n_blocks * 8); // f64
+        let h_loss_y = enc.client_ref().empty(n_blocks * 8);
+        let h_loss_b = enc.client_ref().empty(n_blocks * 8);
+        let err_floats = (g_pix_err_x.num_blocks() as usize) * BLOCK_PIXELS;
+        let mask_floats = (mask1x1.width() as usize) * (mask1x1.height() as usize);
+        crate::launch::pixel_loss_3ch::pixel_loss_3ch::<R>(
+            enc.client_ref(),
+            g_pix_err_x.handle().clone(),
+            g_pix_err_y.handle().clone(),
+            g_pix_err_b.handle().clone(),
+            mask1x1.handle().clone(),
+            mask_row_base_handle.clone(),
+            h_loss_x.clone(),
+            h_loss_y.clone(),
+            h_loss_b.clone(),
+            err_floats,
+            mask_floats,
+            n_blocks as u32,
+            mask1x1.width(),
+            MASK_CHANNEL_OFFSET[0],
+            MASK_CHANNEL_OFFSET[1],
+            MASK_CHANNEL_OFFSET[2],
+            BLOCK_W,
+            BLOCK_H,
+        );
+
+        handle_sets.push((
+            g_x_stats, g_y_stats, g_b_stats, h_loss_x, h_loss_y, h_loss_b,
+        ));
+    }
+
+    // Phase B: ONE batched read of all 4 kinds × 6 handles = 24.
+    let mut all_handles: Vec<cubecl::server::Handle> = Vec::with_capacity(handle_sets.len() * 6);
+    for set in &handle_sets {
+        all_handles.push(set.0.handle().clone());
+        all_handles.push(set.1.handle().clone());
+        all_handles.push(set.2.handle().clone());
+        all_handles.push(set.3.clone());
+        all_handles.push(set.4.clone());
+        all_handles.push(set.5.clone());
+    }
+    let mut bytes = enc.client_ref().read(all_handles);
+
+    // Phase C: per-kind CPU finalize.
+    let mut all_costs: Vec<f32> = Vec::with_capacity(4 * n_blocks);
+    let mut idx = 0usize;
+    for _kind in 0_usize..4 {
+        let xs_b = &bytes[idx];
+        idx += 1;
+        let ys_b = &bytes[idx];
+        idx += 1;
+        let bs_b = &bytes[idx];
+        idx += 1;
+        let xl_b = &bytes[idx];
+        idx += 1;
+        let yl_b = &bytes[idx];
+        idx += 1;
+        let bl_b = &bytes[idx];
+        idx += 1;
+        let x_stats = f32::from_bytes(xs_b);
+        let y_stats = f32::from_bytes(ys_b);
+        let b_stats = f32::from_bytes(bs_b);
+        let mut loss_x = f64::from_bytes(xl_b).to_vec();
+        let loss_y = f64::from_bytes(yl_b).to_vec();
+        let loss_b = f64::from_bytes(bl_b).to_vec();
+
+        let entropy_x = extract_per_block_entropy(x_stats, n_blocks);
+        let entropy_y = extract_per_block_entropy(y_stats, n_blocks);
+        let entropy_b = extract_per_block_entropy(b_stats, n_blocks);
+        // covered_blocks = 1 for AFV (single 8×8) → no-op.
+        apply_x_multiblock_weight_to_loss(&mut loss_x, 1);
+
+        let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
+        let nzeros_x = (0..n_blocks)
+            .map(|b| x_stats[b * 4 + 1])
+            .collect::<Vec<_>>();
+        let nzeros_y = (0..n_blocks)
+            .map(|b| y_stats[b * 4 + 1])
+            .collect::<Vec<_>>();
+        let nzeros_b = (0..n_blocks)
+            .map(|b| b_stats[b * 4 + 1])
+            .collect::<Vec<_>>();
+        let costs = per_block_upstream_cost_per_block(
+            &entropy_x,
+            &entropy_y,
+            &entropy_b,
+            &nzeros_x,
+            &nzeros_y,
+            &nzeros_b,
+            &pixel_loss_total,
+            entropy_mul,
+            scaled_constants,
+            quant_for_coeffs_per_block,
+            BLOCK_PIXELS,
+        );
+        all_costs.extend(costs);
+    }
+    let _ = bytes.drain(..);
+    all_costs
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
@@ -1335,5 +1649,176 @@ mod tests {
         for &v in &coeffs {
             assert!(v.is_finite(), "AFV-4×4 coefficient must be finite");
         }
+    }
+
+    /// Layer 1 invariant for chunk #2: the new
+    /// [`afv_per_block_upstream_cost_xyb_host`] returns finite,
+    /// non-negative costs and at least some non-zero values on a
+    /// non-trivial input. Compares scale against
+    /// `afv_cost_grid_xyb_host` (the placeholder, pure SSE × mask)
+    /// to confirm the new function produces meaningfully different
+    /// numbers — the ratio between them is the formula contribution
+    /// (entropy_mul × entropy + k_info_loss × loss_scalar) that the
+    /// old path was missing.
+    ///
+    /// The reference comparison: at this scale the new costs should
+    /// be in the same order of magnitude as DCT8 costs (a few hundred
+    /// to a few thousand for 8x8 noise blocks at d≈1.0), since both
+    /// use the same `entropy_mul × entropy + k_info_loss × loss_scalar`
+    /// formula and AFV's afv_entropy_mul = 0.818 / 0.8 ≈ 1.022 is
+    /// close to DCT8's 1.0. Specifically: the loss-scalar term
+    /// is `(loss/64)^(1/8) * 64 / quant`, which is a per-pixel loss
+    /// raised to the 1/8 power, multiplied by 64 / quant — this
+    /// dominates SSE-only costs by orders of magnitude when loss is
+    /// small. So the new costs should be HIGHER than the old SSE×mask
+    /// costs, not lower.
+    #[test]
+    fn test_afv_per_block_upstream_cost_xyb_host_smoke() {
+        use crate::forks::cost::{EntropyMulTable, afv_entropy_mul, compute_scaled_constants};
+        use crate::quant_weights::afv_weights_per_channel;
+
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // 4×4 = 16 8x8 blocks (32x32 image) — small but non-trivial.
+        const N: usize = 16;
+        const W: u32 = 32;
+        const H: u32 = 32;
+
+        // Build XYB-ish noise across blocks (block-major layout: one
+        // 8x8 row-major block after another).
+        let mut pixel_blocks_x = vec![0.0_f32; N * 64];
+        let mut pixel_blocks_y = vec![0.0_f32; N * 64];
+        let mut pixel_blocks_b = vec![0.0_f32; N * 64];
+        for b in 0..N {
+            for i in 0..64 {
+                let v = ((b * 7 + i * 11).wrapping_mul(31) % 251) as f32 / 251.0 - 0.5;
+                pixel_blocks_x[b * 64 + i] = 0.05 + 0.10 * v;
+                pixel_blocks_y[b * 64 + i] = 0.30 + 0.40 * v;
+                pixel_blocks_b[b * 64 + i] = 0.10 + 0.20 * v;
+            }
+        }
+        let (wx, wy, wb) = afv_weights_per_channel();
+        let inv_wx: [f32; 64] = core::array::from_fn(|i| 1.0 / wx[i]);
+        let inv_wy: [f32; 64] = core::array::from_fn(|i| 1.0 / wy[i]);
+        let inv_wb: [f32; 64] = core::array::from_fn(|i| 1.0 / wb[i]);
+
+        // Build a flat mask plane (mask = 1.0 everywhere).
+        let mask_data = vec![1.0_f32; (W as usize) * (H as usize)];
+        let mask_plane = enc.upload_plane(&mask_data, W, H);
+
+        // Per-block mask_row_base: top-left pixel offset of each 8x8
+        // block in the mask plane.
+        let xb = (W as usize) / 8;
+        let yb = (H as usize) / 8;
+        debug_assert_eq!(xb * yb, N);
+        let mask_row_base: Vec<u32> = (0..N)
+            .map(|i| {
+                let bx = i % xb;
+                let by = i / xb;
+                (by * 8 * (W as usize) + bx * 8) as u32
+            })
+            .collect();
+        use cubecl::prelude::*;
+        let mask_row_base_handle = enc
+            .client_ref()
+            .create_from_slice(u32::as_bytes(&mask_row_base));
+
+        // Upload XYB blocks as GpuBlocks for the new function.
+        let g_x = enc.upload_blocks(&pixel_blocks_x, N as u32, 64);
+        let g_y = enc.upload_blocks(&pixel_blocks_y, N as u32, 64);
+        let g_b = enc.upload_blocks(&pixel_blocks_b, N as u32, 64);
+
+        let table = EntropyMulTable::reference();
+        let entropy_mul = afv_entropy_mul(&table);
+        // Pixel-domain mode: scaled_constants from compute_scaled_constants.
+        // Bases per upstream's EffortProfile (1.2, 9.309, 10.833) at d=1.0.
+        let scaled_constants = compute_scaled_constants(1.0, (1.2, 9.309, 10.833));
+        // Per-block quant: uniform 0.765 (same as DCT8 default in test pipelines).
+        let quant_for_coeffs_per_block = vec![0.765_f32; N];
+        let quant = 0.765_f32;
+
+        let costs = afv_per_block_upstream_cost_xyb_host(
+            &enc,
+            &AFV4X4_BASIS_TRANSPOSE,
+            &g_x,
+            &g_y,
+            &g_b,
+            &wx,
+            &wy,
+            &wb,
+            &inv_wx,
+            &inv_wy,
+            &inv_wb,
+            &mask_plane,
+            &mask_row_base_handle,
+            N,
+            quant,
+            quant,
+            quant,
+            0.0,
+            0.0,
+            entropy_mul,
+            scaled_constants,
+            &quant_for_coeffs_per_block,
+        );
+
+        // Layer 1: shape + finiteness invariants.
+        assert_eq!(costs.len(), 4 * N, "expect 4 kinds × {N} blocks");
+        for &c in &costs {
+            assert!(
+                c.is_finite() && c >= 0.0,
+                "AFV per-block upstream cost must be finite >= 0, got {c}"
+            );
+        }
+        assert!(
+            costs.iter().any(|&c| c > 0.0),
+            "expected at least one non-zero AFV cost"
+        );
+
+        // Compare scale vs the placeholder (SSE × mask only). The new
+        // costs should be of a different order of magnitude — the
+        // entropy + loss-scalar terms add bits-and-quantization noise
+        // contributions that the placeholder lacks.
+        let mask_block_major = vec![1.0_f32; N * 64];
+        let placeholder = afv_cost_grid_xyb_host(
+            &enc,
+            &AFV4X4_BASIS_TRANSPOSE,
+            &pixel_blocks_x,
+            &pixel_blocks_y,
+            &pixel_blocks_b,
+            &wx,
+            &wy,
+            &wb,
+            &quant_for_coeffs_per_block,
+            &quant_for_coeffs_per_block,
+            &quant_for_coeffs_per_block,
+            &[0.6_f32, 0.6, 0.6, 0.6],
+            &[0.6_f32, 0.6, 0.6, 0.6],
+            &[0.6_f32, 0.6, 0.6, 0.6],
+            &mask_block_major,
+        );
+        let new_mean: f64 = costs.iter().map(|&v| v as f64).sum::<f64>() / costs.len() as f64;
+        let placeholder_mean: f64 =
+            placeholder.iter().map(|&v| v as f64).sum::<f64>() / placeholder.len() as f64;
+        std::println!(
+            "[afv-cost-formula] placeholder mean={placeholder_mean:.3e} new mean={new_mean:.3e} \
+             ratio={:.3e}",
+            new_mean / placeholder_mean.max(1e-30)
+        );
+        // The new formula adds the entropy + loss_scalar terms, which
+        // dominate when loss is small (it's loss^(1/8) → values ~few
+        // hundred for typical inputs). So new mean should generally be
+        // STRICTLY GREATER than the SSE-only placeholder.
+        assert!(
+            new_mean > placeholder_mean,
+            "new formula should produce larger costs than pure SSE × mask: \
+             new_mean={new_mean} vs placeholder_mean={placeholder_mean}"
+        );
+        // Sanity: new mean shouldn't be astronomically larger either —
+        // bound it at a reasonable factor (10000x) to catch unit
+        // mismatches.
+        assert!(
+            new_mean < placeholder_mean * 1.0e4,
+            "new formula scale wildly off vs placeholder: new={new_mean} placeholder={placeholder_mean}"
+        );
     }
 }
