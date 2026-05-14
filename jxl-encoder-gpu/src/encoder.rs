@@ -2260,8 +2260,9 @@ impl<R: Runtime> GpuEncoder<R> {
         iters: usize,
     ) -> Result<alloc::vec::Vec<u8>, jxl_encoder::api::EncodeError> {
         use jxl_encoder::__pre_quantized::{
-            AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, compute_cfl_map,
-            quantize_quant_field,
+            AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder,
+            adjust_quant_field_with_distance, compute_cfl_map, quantize_quant_field,
+            refine_cfl_map,
         };
 
         let (width, height) = lossy.dimensions();
@@ -2428,8 +2429,8 @@ impl<R: Runtime> GpuEncoder<R> {
             }
         }
 
-        // CfL on host from XYB.
-        let cfl_map = compute_cfl_map(
+        // CfL on host from XYB (pass 1: forced-DCT8, q=1).
+        let mut cfl_map = compute_cfl_map(
             &xyb_x,
             &xyb_y,
             &xyb_b,
@@ -2450,6 +2451,47 @@ impl<R: Runtime> GpuEncoder<R> {
         // so we only need the masking field here.
         let masking = plan.masking.clone();
         let quant_field_float = refined_aq;
+
+        // Build the encoder up front so we can pull EffortProfile knobs
+        // (cfl_newton*) for the CfL pass 2 refine call below — the CPU
+        // encoder threads these through `self.profile.cfl_newton*` at
+        // vardct/encoder.rs:1305-1307, and we need the same knobs here.
+        let mut vardct = VarDctEncoder::new(distance);
+        let profile_params = DistanceParams::compute_for_profile(distance, &vardct.profile);
+
+        // CfL pass 2: refine the map using the actual AC strategy and the
+        // butteraugli-refined u8 quant field. The CPU encoder runs this at
+        // effort >= 7 in encode_from_precomputed (vardct/encoder.rs:1293-1308)
+        // — without it the CfL map is fitted to the pre-buttloop quant
+        // field and is stale w.r.t. what bitstream emit will actually use.
+        //
+        // Mirror encode_from_precomputed's internal step at vardct/encoder.rs:1828:
+        // it adjusts a fresh copy of the input quant field via
+        // adjust_quant_field_with_distance before transform_and_quantize.
+        // refine_cfl_map needs the *adjusted* field for parity with the CPU
+        // path, so adjust a separate clone here. The unadjusted u8 field is
+        // still what we hand encode_from_precomputed below — it adjusts
+        // internally on its own copy, matching the CPU call site.
+        let quant_field_u8 = quantize_quant_field(&quant_field_float, refined_inv_scale);
+        if vardct.profile.cfl_two_pass && vardct.cfl_enabled {
+            let mut adjusted_qf = quant_field_u8.clone();
+            adjust_quant_field_with_distance(&ac_strategy, &mut adjusted_qf, distance);
+            refine_cfl_map(
+                &mut cfl_map,
+                &xyb_x,
+                &xyb_y,
+                &xyb_b,
+                cpu_pw,
+                xsize_blocks,
+                ysize_blocks,
+                &ac_strategy,
+                &adjusted_qf,
+                refined_outcome.final_scale,
+                vardct.profile.cfl_newton,
+                vardct.profile.cfl_newton_eps,
+                vardct.profile.cfl_newton_max_iters,
+            );
+        }
 
         let precomputed = EncoderPrecomputed::from_parts(
             width as usize,
@@ -2474,9 +2516,6 @@ impl<R: Runtime> GpuEncoder<R> {
             0,
         );
 
-        let mut vardct = VarDctEncoder::new(distance);
-        let profile_params = DistanceParams::compute_for_profile(distance, &vardct.profile);
-
         // Thread the per-iter SetQuantField recompute (matching CPU
         // `vardct/butteraugli_loop.rs`) through to the bitstream:
         // `encode_from_precomputed` re-derives its `params` from
@@ -2500,8 +2539,10 @@ impl<R: Runtime> GpuEncoder<R> {
             vardct.quant_ac_rescale = Some(rescale);
         }
 
-        let quant_field_u8 = quantize_quant_field(&quant_field_float, refined_inv_scale);
-
+        // `quant_field_u8` was computed above so we could feed an
+        // adjusted copy into refine_cfl_map. encode_from_precomputed
+        // adjusts its own internal copy, so we hand it the unadjusted
+        // value here (matches the CPU encoder's call shape).
         vardct
             .encode_from_precomputed(&precomputed, &quant_field_u8)
             .map_err(jxl_encoder::api::EncodeError::from)
