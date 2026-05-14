@@ -119,6 +119,14 @@ fn round_ties_even_to_i32(x: f32) -> i32 {
     out
 }
 
+/// Round-half-AWAY-from-zero for f32 -> i32 (matches Rust's
+/// `f32::round() as i32`). Used by DC quantize, NOT by AC quantize
+/// (AC uses `round_ties_even_to_i32` to match libjxl's `rintf()`).
+#[cube]
+fn round_ties_away_to_i32(x: f32) -> i32 {
+    f32::round(x) as i32
+}
+
 #[cube]
 fn dequant_y_with_bias(q: i32) -> f32 {
     let qf = q as f32;
@@ -226,6 +234,15 @@ pub fn fused_dct8_3ch_kernel(
     nzeros_x: &mut Array<u32>,
     nzeros_y: &mut Array<u32>,
     nzeros_b: &mut Array<u32>,
+    quant_dc_x: &mut Array<i16>,
+    quant_dc_y: &mut Array<i16>,
+    quant_dc_b: &mut Array<i16>,
+    float_dc_x: &mut Array<f32>,
+    float_dc_y: &mut Array<f32>,
+    float_dc_b: &mut Array<f32>,
+    inv_dc_factor_x: f32,
+    inv_dc_factor_y: f32,
+    inv_dc_factor_b: f32,
     plane_stride: u32,
     xsize_blocks: u32,
 ) {
@@ -275,6 +292,23 @@ pub fn fused_dct8_3ch_kernel(
     dct8_block(&mut scratch_x, &mut transposed_x, private_base);
     dct8_block(&mut scratch_y, &mut transposed_y, private_base);
     dct8_block(&mut scratch_b, &mut transposed_b, private_base);
+
+    // Step 2.5: extract DC + DC quantize, all from shared mem.
+    // Eliminates 6 separate kernels (3 gather + 3 dct8 just to reach
+    // these float DC values for the DC quantize chain).
+    let dc_x = transposed_x[private_base_us];
+    let dc_y = transposed_y[private_base_us];
+    let dc_b = transposed_b[private_base_us];
+    float_dc_x[block_idx] = dc_x;
+    float_dc_y[block_idx] = dc_y;
+    float_dc_b[block_idx] = dc_b;
+    let qdy_i32 = round_ties_away_to_i32(dc_y * inv_dc_factor_y);
+    quant_dc_y[block_idx] = qdy_i32 as i16;
+    let qdy_f = qdy_i32 as f32;
+    // X channel: dc_cfl_factor = 0.0
+    quant_dc_x[block_idx] = round_ties_away_to_i32(dc_x * inv_dc_factor_x) as i16;
+    // B channel: dc_cfl_factor = 0.5
+    quant_dc_b[block_idx] = round_ties_away_to_i32(dc_b * inv_dc_factor_b - qdy_f * 0.5f32) as i16;
 
     // Step 3: quantize Y AC into i32 + count nzeros.
     let qac_y = qac_qm_y[block_idx];

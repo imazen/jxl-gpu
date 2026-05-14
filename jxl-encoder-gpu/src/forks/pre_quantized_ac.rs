@@ -141,6 +141,16 @@ pub fn compute_pre_quantized_ac_dct8_persistent<R: Runtime>(
     let h_nz_x = client.empty(n_blocks * core::mem::size_of::<u32>());
     let h_nz_y = client.empty(n_blocks * core::mem::size_of::<u32>());
     let h_nz_b = client.empty(n_blocks * core::mem::size_of::<u32>());
+    // DC outputs: written by the fused kernel directly from shared
+    // memory after the DCT step. Eliminates the previous 6-launch DC
+    // chain (3 gather + 3 dct8 just to extract DC float coefs for
+    // the per-channel DC quantize kernels).
+    let h_qdc_x = client.empty(n_blocks * core::mem::size_of::<i16>());
+    let h_qdc_y = client.empty(n_blocks * core::mem::size_of::<i16>());
+    let h_qdc_b = client.empty(n_blocks * core::mem::size_of::<i16>());
+    let h_fdc_x = client.empty(n_blocks * core::mem::size_of::<f32>());
+    let h_fdc_y = client.empty(n_blocks * core::mem::size_of::<f32>());
+    let h_fdc_b = client.empty(n_blocks * core::mem::size_of::<f32>());
 
     let plane_n = gpu_pw * gpu_ph;
     crate::launch::fused_dct8_3ch::fused_dct8_3ch::<R>(
@@ -165,55 +175,19 @@ pub fn compute_pre_quantized_ac_dct8_persistent<R: Runtime>(
         h_nz_x.clone(),
         h_nz_y.clone(),
         h_nz_b.clone(),
+        h_qdc_x.clone(),
+        h_qdc_y.clone(),
+        h_qdc_b.clone(),
+        h_fdc_x.clone(),
+        h_fdc_y.clone(),
+        h_fdc_b.clone(),
+        params.inv_dc_factor_x,
+        params.inv_dc_factor_y,
+        params.inv_dc_factor_b,
         plane_n,
         n_blocks as u32,
         gpu_pw as u32,
         xsize_blocks as u32,
-    );
-
-    // DC still needs the float DCT coefs. Run a separate DCT8 for
-    // each channel (3 small kernels) then DC quantize × 3. Future
-    // chunk: extend the fused kernel to also write DC.
-    let g_8y = enc.gather_blocks_persistent(xy_g, 8, 8);
-    let g_8x = enc.gather_blocks_persistent(xx_g, 8, 8);
-    let g_8b = enc.gather_blocks_persistent(xb_g, 8, 8);
-    let dct_x = enc.dct_8x8_persistent(&g_8x);
-    let dct_y = enc.dct_8x8_persistent(&g_8y);
-    let dct_b = enc.dct_8x8_persistent(&g_8b);
-
-    let h_qdc_y = client.empty(n_blocks * core::mem::size_of::<i16>());
-    let h_fdc_y = client.empty(n_blocks * core::mem::size_of::<f32>());
-    crate::launch::quantize_dc::quantize_dc_y_dct8::<R>(
-        client,
-        dct_y.handle().clone(),
-        h_qdc_y.clone(),
-        h_fdc_y.clone(),
-        params.inv_dc_factor_y,
-        n_blocks as u32,
-    );
-    let h_qdc_x = client.empty(n_blocks * core::mem::size_of::<i16>());
-    let h_fdc_x = client.empty(n_blocks * core::mem::size_of::<f32>());
-    crate::launch::quantize_dc::quantize_dc_chroma_dct8::<R>(
-        client,
-        dct_x.handle().clone(),
-        h_qdc_y.clone(),
-        h_qdc_x.clone(),
-        h_fdc_x.clone(),
-        params.inv_dc_factor_x,
-        0.0,
-        n_blocks as u32,
-    );
-    let h_qdc_b = client.empty(n_blocks * core::mem::size_of::<i16>());
-    let h_fdc_b = client.empty(n_blocks * core::mem::size_of::<f32>());
-    crate::launch::quantize_dc::quantize_dc_chroma_dct8::<R>(
-        client,
-        dct_b.handle().clone(),
-        h_qdc_y.clone(),
-        h_qdc_b.clone(),
-        h_fdc_b.clone(),
-        params.inv_dc_factor_b,
-        0.5,
-        n_blocks as u32,
     );
 
     // Step 7: batched download (15 buffers — one sync barrier).
