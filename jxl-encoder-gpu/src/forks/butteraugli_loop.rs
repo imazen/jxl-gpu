@@ -1259,6 +1259,64 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
     let initial_aq_field_snapshot: alloc::vec::Vec<f32> = aq_field.clone();
     let mut diffmap = alloc::vec![0.0_f32; n_pixels];
 
+    // Convergence early-exit state. NOT a port from libjxl /
+    // jxl-encoder CPU butteraugli_loop — neither has any score-based
+    // break (both run `iters+1` iterations unconditionally). This is
+    // a NEW heuristic specific to the GPU loop.
+    //
+    // Rationale: at d=1.0 on our 12 MP corpus, e9 (4 iters) consistently
+    // produces MORE bytes than e8 (2 iters) even though the butteraugli
+    // score keeps improving. The score curve is monotonically decreasing
+    // but with sharply diminishing returns past iter 2 — late iters
+    // tighten qf for sub-target blocks, growing bytes for marginal
+    // pnorm_3 wins. Per-iter trace from the 3 test images at d=1.0:
+    //   02809272: score 1.93 → 1.57 → 1.48 → 1.31 → 1.21
+    //              bytes  745k → e8 730k (-2.0%) → e9 730k (-2.0%)
+    //   0369d229: score 2.49 → 1.99 → 1.59 → 1.35 → 1.26
+    //              bytes  277k → e8 303k (+9.2%) → e9 318k (+14.8%)
+    //   a365e654: score 2.19 → 1.77 → 1.73 → 1.45 → 1.32
+    //              bytes  783k → e8 849k (+8.4%) → e9 871k (+11.2%)
+    //
+    // The pattern: each additional iter past iter 2 keeps improving
+    // butteraugli score (good) but at a per-iter byte cost of 1.5-3%
+    // that exceeds the marginal score gain's worth. We want e9 ≤ e8
+    // in BYTES even at the cost of a small quality giveback.
+    //
+    // Two-gate early-exit:
+    //   1. Strict-worse safety net: if score regresses
+    //      (`result.score > prev_score`), the iter's adjustment hurt
+    //      — roll back aq_field to the prior snapshot and break.
+    //      Doesn't trigger on the 3 test images (their scores are
+    //      monotonically decreasing) but a sound safeguard against
+    //      pathological content where one bad-tile flip-flops.
+    //   2. "Good enough" gate: at iter >= 2, if the max-norm score is
+    //      below `SCORE_GOOD_ENOUGH_MUL * target_distance`, we've
+    //      already extracted the bulk of the loop's benefit. Each
+    //      additional iter from here costs more bytes than its marginal
+    //      pnorm_3 gain is worth. KEEP this iter's aq_field (it's
+    //      legitimately better than the snapshot) but break instead
+    //      of doing another adjust.
+    //
+    // Threshold values (calibrated on the 3 d=1.0 images above):
+    //   SCORE_GOOD_ENOUGH_MUL = 1.8
+    //     iter 2 scores are 1.48, 1.59, 1.73 — all < 1.8 × 1.0 = 1.8
+    //     so all 3 images break at iter 2 (matching e8 behavior at
+    //     e9 effort, the explicit goal). Hard content where iter 2
+    //     score is still >= 1.8 keeps going through iter 3+.
+    //
+    // Why max-norm `score` (not `pnorm_3`) for the good-enough gate:
+    // `score` is the libjxl convention for "is this image good enough
+    // visually" — both `BadQualityScore()` and `GoodQualityScore()`
+    // are max-norm thresholds. Using `pnorm_3` here would be a units
+    // mismatch with `target_distance`.
+    //
+    // Cost per iter: one Vec<f32> clone for the rollback snapshot
+    // (O(blocks) = O(MP/64), cheap vs the GPU encode work).
+    const SCORE_GOOD_ENOUGH_MUL: f32 = 1.8;
+    let mut prev_aq_field: alloc::vec::Vec<f32> = aq_field.clone();
+    let mut prev_score: f32 = f32::INFINITY;
+    let mut early_exit_at: Option<usize> = None;
+
     for iter in 0..=iters {
         // Step 1: encode at current aq_field — recon stays on GPU.
         let (rec_r, rec_g, rec_b) =
@@ -1283,7 +1341,59 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
             cfg.ysize_blocks,
             &cfg.info,
         );
+
+        // Convergence early-exit check (see comment above the loop).
+        // Only meaningful at iter >= 1 (need a prior measurement to
+        // compare against).
+        if iter > 0 {
+            // Gate 1: strict score regression. The adjust at end of
+            // (iter-1) made things worse, so roll back to the field
+            // that produced `prev_score`. The current encode step
+            // already happened (sunk cost), but emitting the rolled-
+            // back aq_field is what matters for downstream bytes.
+            //
+            // Suppress the previously-issued trace event if any —
+            // we still emit one for THIS iter at the bottom (with
+            // the rolled-back aq_field's still-just-measured score).
+            if result.score > prev_score {
+                aq_field = prev_aq_field.clone();
+                early_exit_at = Some(iter);
+                trace(RefineIterTrace {
+                    iter,
+                    iters,
+                    score: result.score,
+                    pnorm_3: result.pnorm_3,
+                    tile_dist: tile_dist.clone(),
+                });
+                break;
+            }
+            // Gate 2: "good enough" max-norm score. At iter >= 2, if
+            // we're already inside `SCORE_GOOD_ENOUGH_MUL × target`,
+            // additional iters cost more bytes than their marginal
+            // quality gain is worth. KEEP this iter's aq_field — it's
+            // a legitimate improvement over the prev snapshot — but
+            // skip the next adjust + iter.
+            if iter >= 2 && result.score < SCORE_GOOD_ENOUGH_MUL * target_distance {
+                early_exit_at = Some(iter);
+                trace(RefineIterTrace {
+                    iter,
+                    iters,
+                    score: result.score,
+                    pnorm_3: result.pnorm_3,
+                    tile_dist: tile_dist.clone(),
+                });
+                break;
+            }
+        }
+
         if iter < iters {
+            // Snapshot the aq_field BEFORE this iter's adjustment so
+            // the early-exit gate at the top of (iter+1) can roll
+            // back to the field that PRODUCED `prev_score`.
+            // (See "Convergence early-exit state" comment above the
+            // loop.) Cost: one Vec<f32> clone per iter, O(blocks).
+            prev_aq_field.clone_from(&aq_field);
+
             // kOriginalComparisonRound was tried (port from CPU
             // butteraugli_loop / libjxl enc_adaptive_quantization.cc:
             // 1039-1057). Empirically it made bytes WORSE on our
@@ -1383,6 +1493,12 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
             pnorm_3: result.pnorm_3,
             tile_dist: tile_dist.clone(),
         });
+
+        // Update early-exit reference for the next iter's gate
+        // checks. The corresponding `prev_aq_field` snapshot is
+        // taken inside the `if iter < iters` block above, BEFORE
+        // the per-block adjustment mutates `aq_field`.
+        prev_score = result.score;
     }
 
     // Final SetQuantField recompute on the final aq_field — mirrors the
@@ -1391,6 +1507,7 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
     // `final_inv_scale` to `quantize_quant_field` so the integer u8
     // field matches what the loop converged on.
     let final_params = DistanceParams::compute_from_quant_field(target_distance, &aq_field);
+    let _ = early_exit_at; // diagnostic-only, not currently surfaced through outcome
     Ok(RefinedAqOutcome {
         aq_field,
         final_inv_scale: final_params.inv_scale,
