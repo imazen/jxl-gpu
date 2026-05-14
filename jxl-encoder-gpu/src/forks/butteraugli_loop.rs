@@ -1202,6 +1202,9 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
 
     bg.set_reference(ref_srgb)?;
     let mut aq_field = initial_aq_field.to_vec();
+    // Snapshot of the initial aq_field used by kOriginalComparisonRound
+    // (re-centering at iter 1 to prevent runaway divergence).
+    let initial_aq_field_snapshot: alloc::vec::Vec<f32> = aq_field.clone();
     let mut diffmap = alloc::vec![0.0_f32; n_pixels];
 
     for iter in 0..=iters {
@@ -1229,23 +1232,52 @@ pub fn refine_aq_field_gpu_with_strategy_search_persistent<R: Runtime>(
             &cfg.info,
         );
         if iter < iters {
+            // kOriginalComparisonRound was tried (port from CPU
+            // butteraugli_loop / libjxl enc_adaptive_quantization.cc:
+            // 1039-1057). Empirically it made bytes WORSE on our
+            // images (it restricts good-block reductions, but our
+            // tighter e7 baseline already constrains those). Removed.
+            // initial_aq_field_snapshot kept because future tuning
+            // attempts may want it; cheap to allocate.
+            let _ = &initial_aq_field_snapshot;
+
             // Symmetric AQ adjustment matching the CPU butteraugli_loop
             // (which mirrors libjxl enc_adaptive_quantization.cc:1066-1110).
             //
-            // cur_pow = 0.2 for iter < 2: reduce qf for "good blocks"
-            //   (diff <= 1.0) via factor = diff^0.2 — this is what
-            //   reclaims bits when butteraugli says distance is below
-            //   target. Without this, the loop is a one-way ratchet
-            //   that only INCREASES bytes vs e7 (e8/e9 grow the file
-            //   instead of shrinking it like cjxl does).
+            // GPU-loop tuning notes (vs CPU butteraugli_loop.rs and
+            // libjxl enc_adaptive_quantization.cc):
             //
-            // cur_pow = 0.0 for iter >= 2: only fix bad blocks (the
-            //   prior behavior). diff^0 = 1 → factor = 1 → no change
-            //   to good blocks.
-            let cur_pow: f32 = if iter < 2 { 0.2 } else { 0.0 };
+            // libjxl/CPU defaults: cur_pow=0.2 (iter<2), no cap on diff.
+            // Empirically these gave us +0.5/+17/+10% bytes vs e7
+            // across 3 test images at d=1.0 — wrong direction overall.
+            //
+            // GPU tuning: cur_pow=0.5 (more aggressive reclamation
+            // for blocks under target), cap diff at 1.3 (limit
+            // bad-block growth so they don't ratchet up 50% per
+            // iter). Result: -1.8/+14.5/+9.0% across the same
+            // images — at least one case shrinks (target behavior),
+            // others grow less than CPU-faithful.
+            //
+            // Why we deviate from libjxl: our GPU encode path's
+            // initial AQ baseline is ~9% smaller bytes than cjxl's
+            // e7 baseline (we're already aggressive at e7). The
+            // libjxl cur_pow=0.2 was tuned for cjxl's looser e7
+            // baseline where blocks have more room to reclaim.
+            // For our tighter baseline, we need stronger cur_pow
+            // and a cap on bad-block bumps.
+            //
+            // Open issue: even with this tuning, some images grow
+            // bytes. Root cause is likely (a) GPU butteraugli
+            // tile_dist values diverging from CPU (FP precision),
+            // or (b) GPU loop missing kOriginalComparisonRound +
+            // per-iter SetQuantField recompute that the CPU loop
+            // has. See e8_e9_perf_2026-05-14.md for the full
+            // analysis.
+            let cur_pow: f32 = if iter < 2 { 0.5 } else { 0.0 };
+            let max_increase: f32 = 1.3;
             for bi in 0..aq_field.len() {
                 let diff_raw = tile_dist[bi] / target_distance;
-                let diff = diff_raw.min(1.5);
+                let diff = diff_raw.min(max_increase);
                 if diff > 1.0 {
                     aq_field[bi] *= diff;
                 } else if cur_pow > 0.0 {
