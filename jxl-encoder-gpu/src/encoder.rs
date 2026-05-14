@@ -1913,7 +1913,15 @@ impl<R: Runtime> GpuEncoder<R> {
                 continue;
             }
             if a.raw_strategy != 0 {
-                ac_strategy.set(bx, by, a.raw_strategy);
+                // GPU and CPU enums diverge for IDENTITY/DCT2X2/AFV0-3/DCT64*
+                // — see `crate::forks::transform::gpu_to_cpu_strategy` doc table.
+                // Without this remap, GPU's `DCT2X2=16` becomes CPU's
+                // `DCT64X64=16` and the bitstream emits a 64×64 wire code on
+                // a 1×1 block (djxl rejects, jxl-rs may pass invalid pixels).
+                let cpu_strategy = gpu_to_cpu_strategy(a.raw_strategy);
+                if cpu_strategy != CPU_RAW_STRATEGY_INVALID {
+                    ac_strategy.set(bx, by, cpu_strategy);
+                }
             }
         }
 
@@ -2071,7 +2079,12 @@ impl<R: Runtime> GpuEncoder<R> {
                 continue;
             }
             if a.raw_strategy != 0 {
-                ac_strategy.set(bx, by, a.raw_strategy);
+                // GPU↔CPU strategy enum remap; see fn docs in
+                // forks::transform::gpu_to_cpu_strategy.
+                let cpu_strategy = gpu_to_cpu_strategy(a.raw_strategy);
+                if cpu_strategy != CPU_RAW_STRATEGY_INVALID {
+                    ac_strategy.set(bx, by, cpu_strategy);
+                }
             }
         }
 
@@ -2425,7 +2438,12 @@ impl<R: Runtime> GpuEncoder<R> {
                 continue;
             }
             if a.raw_strategy != 0 {
-                ac_strategy.set(bx, by, a.raw_strategy);
+                // GPU↔CPU strategy enum remap; see fn docs in
+                // forks::transform::gpu_to_cpu_strategy.
+                let cpu_strategy = gpu_to_cpu_strategy(a.raw_strategy);
+                if cpu_strategy != CPU_RAW_STRATEGY_INVALID {
+                    ac_strategy.set(bx, by, cpu_strategy);
+                }
             }
         }
 

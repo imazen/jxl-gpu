@@ -94,6 +94,169 @@ pub const RAW_STRATEGY_AFV1: u8 = 18;
 pub const RAW_STRATEGY_AFV2: u8 = 19;
 pub const RAW_STRATEGY_AFV3: u8 = 20;
 
+/// Sentinel emitted by [`gpu_to_cpu_strategy`] when a GPU-only strategy
+/// has no CPU equivalent yet (currently always panics on the call site
+/// — see fn docs). Kept distinct from the in-band CPU codes 0..18 to
+/// prevent silent misinterpretation.
+pub const CPU_RAW_STRATEGY_INVALID: u8 = 0xFF;
+
+/// Map a GPU-side `RAW_STRATEGY_*` code to the equivalent
+/// jxl-encoder (CPU) `vardct::ac_strategy::RAW_STRATEGY_*` code.
+///
+/// **The two enums are NOT the same.** GPU's enum was assigned in the
+/// order strategies were ported (DCT8, DCT16, DCT32, DCT64, IDENTITY,
+/// DCT2X2, AFV0-3), while CPU's enum follows libjxl's ordering
+/// (DCT8, DCT16, DCT32, DCT4*, IDENTITY=8, DCT2X2=9, DCT32X16/32=10/11,
+/// AFV0-3=12-15, DCT64X64/32/64=16/17/18). This table is the bridge.
+///
+/// Without this mapping, `ac_strategy.set(bx, by, gpu_strategy_code)`
+/// would silently corrupt the bitstream — e.g. GPU's `DCT2X2=16`
+/// becomes CPU's `DCT64X64=16`, and the bitstream emits a 64×64 wire
+/// code on a 1×1 block that decoders reject.
+///
+/// | Strategy   | GPU code | CPU code |
+/// |------------|----------|----------|
+/// | DCT8       |  0       |  0       |
+/// | DCT16X8    |  1       |  1       |
+/// | DCT8X16    |  2       |  2       |
+/// | DCT16X16   |  3       |  3       |
+/// | DCT32X32   |  4       |  4       |
+/// | DCT4X8     |  5       |  5       |
+/// | DCT8X4     |  6       |  6       |
+/// | DCT4X4     |  7       |  7       |
+/// | DCT32X16   | 10       | 10       |
+/// | DCT16X32   | 11       | 11       |
+/// | DCT64X64   | 12       | **16**   |
+/// | DCT64X32   | 13       | **17**   |
+/// | DCT32X64   | 14       | **18**   |
+/// | IDENTITY   | 15       |  **8**   |
+/// | DCT2X2     | 16       |  **9**   |
+/// | AFV0       | 17       | **12**   |
+/// | AFV1       | 18       | **13**   |
+/// | AFV2       | 19       | **14**   |
+/// | AFV3       | 20       | **15**   |
+///
+/// Returns [`CPU_RAW_STRATEGY_INVALID`] (0xFF) for unknown codes; callers
+/// should treat that as "fall back to DCT8" (skip the assignment).
+#[inline]
+pub fn gpu_to_cpu_strategy(gpu_strategy: u8) -> u8 {
+    match gpu_strategy {
+        RAW_STRATEGY_DCT => 0,
+        RAW_STRATEGY_DCT16X8 => 1,
+        RAW_STRATEGY_DCT8X16 => 2,
+        RAW_STRATEGY_DCT16X16 => 3,
+        RAW_STRATEGY_DCT32X32 => 4,
+        RAW_STRATEGY_DCT4X8 => 5,
+        RAW_STRATEGY_DCT8X4 => 6,
+        RAW_STRATEGY_DCT4X4 => 7,
+        RAW_STRATEGY_IDENTITY => 8,
+        RAW_STRATEGY_DCT2X2 => 9,
+        RAW_STRATEGY_DCT32X16 => 10,
+        RAW_STRATEGY_DCT16X32 => 11,
+        RAW_STRATEGY_AFV0 => 12,
+        RAW_STRATEGY_AFV1 => 13,
+        RAW_STRATEGY_AFV2 => 14,
+        RAW_STRATEGY_AFV3 => 15,
+        RAW_STRATEGY_DCT64X64 => 16,
+        RAW_STRATEGY_DCT64X32 => 17,
+        RAW_STRATEGY_DCT32X64 => 18,
+        _ => CPU_RAW_STRATEGY_INVALID,
+    }
+}
+
+#[cfg(test)]
+mod gpu_to_cpu_tests {
+    use super::*;
+
+    /// Pin every GPU code to the CPU code documented in the table above.
+    /// If you change this, also update `jxl_encoder::__pre_quantized`
+    /// re-exports of the vardct strategy constants and the
+    /// `STRATEGY_CODE_LUT` table at vardct/ac_strategy.rs:104.
+    #[test]
+    fn every_gpu_strategy_maps_to_documented_cpu_code() {
+        let pairs: &[(u8, u8)] = &[
+            (RAW_STRATEGY_DCT, 0),
+            (RAW_STRATEGY_DCT16X8, 1),
+            (RAW_STRATEGY_DCT8X16, 2),
+            (RAW_STRATEGY_DCT16X16, 3),
+            (RAW_STRATEGY_DCT32X32, 4),
+            (RAW_STRATEGY_DCT4X8, 5),
+            (RAW_STRATEGY_DCT8X4, 6),
+            (RAW_STRATEGY_DCT4X4, 7),
+            (RAW_STRATEGY_IDENTITY, 8),
+            (RAW_STRATEGY_DCT2X2, 9),
+            (RAW_STRATEGY_DCT32X16, 10),
+            (RAW_STRATEGY_DCT16X32, 11),
+            (RAW_STRATEGY_AFV0, 12),
+            (RAW_STRATEGY_AFV1, 13),
+            (RAW_STRATEGY_AFV2, 14),
+            (RAW_STRATEGY_AFV3, 15),
+            (RAW_STRATEGY_DCT64X64, 16),
+            (RAW_STRATEGY_DCT64X32, 17),
+            (RAW_STRATEGY_DCT32X64, 18),
+        ];
+        for &(g, c) in pairs {
+            assert_eq!(
+                gpu_to_cpu_strategy(g),
+                c,
+                "GPU strategy {g} should map to CPU strategy {c}",
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_gpu_strategy_returns_invalid_sentinel() {
+        for g in 0u8..=255 {
+            // 0..7, 10, 11, 12..14 (DCT64), 15, 16, 17..20 (AFV) are valid.
+            let valid = matches!(
+                g,
+                RAW_STRATEGY_DCT
+                    | RAW_STRATEGY_DCT16X8
+                    | RAW_STRATEGY_DCT8X16
+                    | RAW_STRATEGY_DCT16X16
+                    | RAW_STRATEGY_DCT32X32
+                    | RAW_STRATEGY_DCT4X8
+                    | RAW_STRATEGY_DCT8X4
+                    | RAW_STRATEGY_DCT4X4
+                    | RAW_STRATEGY_DCT32X16
+                    | RAW_STRATEGY_DCT16X32
+                    | RAW_STRATEGY_DCT64X64
+                    | RAW_STRATEGY_DCT64X32
+                    | RAW_STRATEGY_DCT32X64
+                    | RAW_STRATEGY_IDENTITY
+                    | RAW_STRATEGY_DCT2X2
+                    | RAW_STRATEGY_AFV0
+                    | RAW_STRATEGY_AFV1
+                    | RAW_STRATEGY_AFV2
+                    | RAW_STRATEGY_AFV3
+            );
+            if !valid {
+                assert_eq!(
+                    gpu_to_cpu_strategy(g),
+                    CPU_RAW_STRATEGY_INVALID,
+                    "unknown GPU strategy {g} should map to INVALID sentinel",
+                );
+            }
+        }
+    }
+
+    /// Pin the well-known mismatches that have caused the AFV/DCT2X2/
+    /// IDENTITY → DCT64X64/DCT64X32/AFV3/AFV0 silent corruption bug
+    /// (imazen/jxl-encoder-gpu#5). If anyone re-aligns the GPU enum
+    /// to match CPU's, this test should be updated to match.
+    #[test]
+    fn pinned_known_mismatches() {
+        // GPU DCT2X2=16 was being misread as CPU DCT64X64=16 — the bug.
+        assert_eq!(gpu_to_cpu_strategy(RAW_STRATEGY_DCT2X2), 9);
+        // GPU IDENTITY=15 was being misread as CPU AFV3=15.
+        assert_eq!(gpu_to_cpu_strategy(RAW_STRATEGY_IDENTITY), 8);
+        // GPU DCT64X64=12 was being misread as CPU AFV0=12.
+        assert_eq!(gpu_to_cpu_strategy(RAW_STRATEGY_DCT64X64), 16);
+        // GPU AFV0=17 was being misread as CPU DCT64X32=17.
+        assert_eq!(gpu_to_cpu_strategy(RAW_STRATEGY_AFV0), 12);
+    }
+}
+
 /// Number of coefficient floats produced per block by each strategy.
 ///
 /// ```

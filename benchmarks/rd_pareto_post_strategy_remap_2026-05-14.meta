@@ -1,0 +1,18 @@
+# Metadata for rd_pareto_post_strategy_remap_2026-05-14.tsv
+# Generated: 2026-05-14
+# git_commit: pending (this commit)
+# Hostname: lilith
+# Hardware: AMD Ryzen 9 7950X (water-cooled), 128 GB RAM, NVIDIA RTX 5070 (CUDA)
+# Build: --release --features 'cuda encoder butteraugli-loop'
+# Purpose: verify zero failure rows on the 5-image RD-pareto sweep after
+# the GPU↔CPU strategy enum remap fix (issue #5). Pre-fix baseline
+# (rd_pareto_2026-05-14.tsv) had 15 missing rows out of 150 (=15
+# 'decode failed' / 'encode failed' messages); this run has 0/90 GPU
+# rows missing (cjxl arms intentionally excluded — they were never
+# affected by the bug; this run isolates the GPU encoder).
+# Per-image breakdown of pre-fix failures:
+#   - terminal:   4/6 distances × 3 GPU encoders = 12 rows missing
+#                 (DCT2X2=16 / IDENTITY=15 picks at d<=2.0)
+#   - a365e654:   1/6 distances × 3 GPU encoders =  3 rows missing
+#                 (suspected DCT2X2 picks at d=1.0)
+#   - other 3 images: clean (DCT8/DCT16x16-dominant photo content).

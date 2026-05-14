@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed (May 14, 2026)
+
+- **GPU↔CPU strategy code remap (issue #5)**: GPU's `RAW_STRATEGY_*`
+  enum (assigned in port order) and the CPU jxl-encoder's enum (libjxl
+  ordering) collide for IDENTITY/DCT2X2/AFV0-3/DCT64*. Without a remap
+  at the `AcStrategyMap::set` boundary, GPU's `DCT2X2=16` was being
+  written as CPU's `DCT64X64=16`, and the bitstream emitted a 64×64
+  wire code on a 1×1 block — djxl rejected, jxl-rs returned garbage.
+  Reproduced via `examples/rd_pareto_vs_cjxl` on `gb82-sc/terminal.png`:
+  4/6 distance points failed decode. Fix: new helper
+  `forks::transform::gpu_to_cpu_strategy()` documents and implements
+  the full mapping, called from all three `ac_strategy.set` sites in
+  `encoder.rs`. Regression test in `tests/strategy_remap_roundtrip.rs`.
+  Bug shipped from commit `a2555659` (May 8, 2026 — initial AFV
+  plumbing landed and the GPU enum diverged from CPU's). Sweep
+  failures drop 15 → 0 on the 5-image baseline. Archive:
+  `benchmarks/rd_pareto_post_strategy_remap_2026-05-14.tsv`.
+
 ### Fixed (May 10, 2026)
 
 - **debug-mode test failures in `forks/reconstruct.rs`**: 5 LossyEncoder
