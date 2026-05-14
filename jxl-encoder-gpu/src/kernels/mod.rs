@@ -33,6 +33,7 @@ pub mod fused_dct8_3ch;
 pub mod fused_dct_quant;
 pub mod fuzzy_erosion;
 pub mod gab;
+pub mod gab_3ch;
 pub mod gaborish;
 pub mod gather;
 pub mod histogram;

@@ -2501,9 +2501,15 @@ impl<R: Runtime> LossyEncoder<R> {
         // Real fix needs the cubecl pinned-buffer PR or the raw-cudarc
         // bypass — until then this 308 ms is the production baseline.
         // See `negative_perf_alloc_plane_zero_fill.md` memo.
-        let recon_x_p = enc.alloc_plane(self.padded_width, self.padded_height);
-        let recon_y_p = enc.alloc_plane(self.padded_width, self.padded_height);
-        let recon_b_p = enc.alloc_plane(self.padded_width, self.padded_height);
+        // Use uninitialized recon planes — the mixed-strategy
+        // reconstruct's per-strategy indexed_scatter covers every
+        // position in the padded plane (every 8×8 block is assigned a
+        // strategy, default DCT8). Skips the 308 ms / iter zero-init
+        // upload at 16 MP that was the e8/e9 inner loop's largest
+        // wedge per the negative_perf_alloc_plane_zero_fill.md memo.
+        let recon_x_p = enc.alloc_plane_uninit(self.padded_width, self.padded_height);
+        let recon_y_p = enc.alloc_plane_uninit(self.padded_width, self.padded_height);
+        let recon_b_p = enc.alloc_plane_uninit(self.padded_width, self.padded_height);
         encode_and_reconstruct_mixed_strategy_3channel(
             enc,
             &plan.xyb_x,
@@ -2557,11 +2563,12 @@ impl<R: Runtime> LossyEncoder<R> {
         //
         // recon_x_p / _y_p / _b_p are the GpuPlanes the mixed-strategy
         // reconstruct scattered into above. No upload needed —
-        // gab_smooth_persistent consumes them directly.
+        // gab_smooth_3ch_persistent consumes them directly. ONE launch
+        // for all 3 channels (vs 3 separate gab_smooth_persistent
+        // calls); same per-thread arithmetic, fewer launch barriers.
         let (gw_c, gw1, gw2) = gab_weights();
-        let recon_x_p = enc.gab_smooth_persistent(&recon_x_p, gw_c, gw1, gw2);
-        let recon_y_p = enc.gab_smooth_persistent(&recon_y_p, gw_c, gw1, gw2);
-        let recon_b_p = enc.gab_smooth_persistent(&recon_b_p, gw_c, gw1, gw2);
+        let (recon_x_p, recon_y_p, recon_b_p) =
+            enc.gab_smooth_3ch_persistent(&recon_x_p, &recon_y_p, &recon_b_p, gw_c, gw1, gw2);
 
         // EPF step 1+2 (matches run_pipeline_with_qac). Per-block qac maps
         // to u8 quant_field via `clamp(qac * 50, 1, 255)`; sharpness is

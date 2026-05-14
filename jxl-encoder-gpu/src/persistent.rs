@@ -438,6 +438,31 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// Like [`Self::alloc_plane`] but does NOT zero-fill. Returns
+    /// uninitialized GPU memory wrapped as a `GpuPlane`. Caller MUST
+    /// guarantee every pixel is written before any reader runs —
+    /// otherwise reads see arbitrary bytes.
+    ///
+    /// Used by the e8/e9 butteraugli refinement loop's recon planes:
+    /// the mixed-strategy reconstruct's per-strategy `indexed_scatter`
+    /// covers every position in the padded plane (every 8×8 block has
+    /// a strategy assignment, default DCT8), so the 308 ms / iter
+    /// zero-init upload would be wasted.
+    ///
+    /// Backed by `client.empty()` (allocates GPU memory, no host→GPU
+    /// transfer of zeros). Avoids the cubecl pageable HtoD ceiling
+    /// that makes `alloc_plane` slow at multi-MP image sizes.
+    pub fn alloc_plane_uninit(&self, width: u32, height: u32) -> GpuPlane<R> {
+        let n = (width as usize) * (height as usize);
+        let handle = self.client_ref().empty(n * 4);
+        GpuPlane {
+            handle,
+            width,
+            height,
+            _r: core::marker::PhantomData,
+        }
+    }
+
     /// Download a GPU plane back to host memory.
     pub fn download_plane(&self, plane: &GpuPlane<R>) -> Vec<f32> {
         let bytes = self
@@ -708,6 +733,53 @@ impl<R: Runtime> GpuEncoder<R> {
             height: plane.height,
             _r: core::marker::PhantomData,
         }
+    }
+
+    /// 3-channel fused variant of [`Self::gab_smooth_persistent`].
+    /// One launch instead of three. All inputs MUST share dimensions.
+    /// Used in the e8/e9 butteraugli refinement loop's postpass.
+    pub fn gab_smooth_3ch_persistent(
+        &self,
+        plane_x: &GpuPlane<R>,
+        plane_y: &GpuPlane<R>,
+        plane_b: &GpuPlane<R>,
+        w_center: f32,
+        w1: f32,
+        w2: f32,
+    ) -> (GpuPlane<R>, GpuPlane<R>, GpuPlane<R>) {
+        debug_assert_eq!(plane_x.width, plane_y.width);
+        debug_assert_eq!(plane_x.height, plane_y.height);
+        debug_assert_eq!(plane_x.width, plane_b.width);
+        debug_assert_eq!(plane_x.height, plane_b.height);
+        let n = plane_x.n_pixels();
+        let h_out_x = self.client_ref().empty(n * 4);
+        let h_out_y = self.client_ref().empty(n * 4);
+        let h_out_b = self.client_ref().empty(n * 4);
+        crate::launch::gab_3ch::gab_smooth_3ch::<R>(
+            self.client_ref(),
+            plane_x.handle.clone(),
+            plane_y.handle.clone(),
+            plane_b.handle.clone(),
+            h_out_x.clone(),
+            h_out_y.clone(),
+            h_out_b.clone(),
+            plane_x.width,
+            plane_x.height,
+            w_center,
+            w1,
+            w2,
+        );
+        let mk = |handle, w, h| GpuPlane {
+            handle,
+            width: w,
+            height: h,
+            _r: core::marker::PhantomData,
+        };
+        (
+            mk(h_out_x, plane_x.width, plane_x.height),
+            mk(h_out_y, plane_x.width, plane_x.height),
+            mk(h_out_b, plane_x.width, plane_x.height),
+        )
     }
 
     /// Persistent-API edge-replicate plane padding. Returns a new
