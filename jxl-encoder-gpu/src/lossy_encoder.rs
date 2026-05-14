@@ -2585,9 +2585,10 @@ impl<R: Runtime> LossyEncoder<R> {
         let ysize_blocks = self.padded_height / 8;
 
         let pad1 = 2_u32;
-        let p1_x = enc.pad_plane_persistent(&recon_x_p, pad1);
-        let p1_y = enc.pad_plane_persistent(&recon_y_p, pad1);
-        let p1_b = enc.pad_plane_persistent(&recon_b_p, pad1);
+        // Fused 3-channel pad (1 launch instead of 3) — same edge
+        // replication, processed for X/Y/B in one go.
+        let (p1_x, p1_y, p1_b) =
+            enc.pad_plane_3ch_persistent(&recon_x_p, &recon_y_p, &recon_b_p, pad1);
         let (s1_x, s1_y, s1_b) = enc.epf_step1_persistent(
             &p1_x,
             &p1_y,
@@ -2603,9 +2604,8 @@ impl<R: Runtime> LossyEncoder<R> {
         );
 
         let pad2 = 1_u32;
-        let p2_x = enc.pad_plane_persistent(&s1_x, pad2);
-        let p2_y = enc.pad_plane_persistent(&s1_y, pad2);
-        let p2_b = enc.pad_plane_persistent(&s1_b, pad2);
+        let (p2_x, p2_y, p2_b) =
+            enc.pad_plane_3ch_persistent(&s1_x, &s1_y, &s1_b, pad2);
         let (s2_x, s2_y, s2_b) = enc.epf_step2_persistent(
             &p2_x,
             &p2_y,
@@ -2952,10 +2952,10 @@ impl<R: Runtime> LossyEncoder<R> {
         let ysize_blocks = self.padded_height / 8;
 
         // Step 1 (5×5 plus, 5-pos SAD): pad=2, sigma_scale=1.65
+        // Fused 3-channel pad — 1 launch instead of 3.
         let pad1 = 2_u32;
-        let p1_x = enc.pad_plane_persistent(&recon_x_p, pad1);
-        let p1_y = enc.pad_plane_persistent(&recon_y_p, pad1);
-        let p1_b = enc.pad_plane_persistent(&recon_b_p, pad1);
+        let (p1_x, p1_y, p1_b) =
+            enc.pad_plane_3ch_persistent(&recon_x_p, &recon_y_p, &recon_b_p, pad1);
         let (s1_x, s1_y, s1_b) = enc.epf_step1_persistent(
             &p1_x,
             &p1_y,
@@ -2972,9 +2972,7 @@ impl<R: Runtime> LossyEncoder<R> {
 
         // Step 2 (3×3 plus, single-point SAD): pad=1, sigma_scale=10.725
         let pad2 = 1_u32;
-        let p2_x = enc.pad_plane_persistent(&s1_x, pad2);
-        let p2_y = enc.pad_plane_persistent(&s1_y, pad2);
-        let p2_b = enc.pad_plane_persistent(&s1_b, pad2);
+        let (p2_x, p2_y, p2_b) = enc.pad_plane_3ch_persistent(&s1_x, &s1_y, &s1_b, pad2);
         let (s2_x, s2_y, s2_b) = enc.epf_step2_persistent(
             &p2_x,
             &p2_y,

@@ -40,6 +40,45 @@ pub fn pad_plane_kernel(src: &Array<f32>, dst: &mut Array<f32>, width: u32, heig
     dst[idx] = src[sy * w + sx];
 }
 
+/// 3-channel fused pad — same edge-replication logic as
+/// `pad_plane_kernel` but processes X/Y/B in one launch each.
+/// Saves 2 launches per pad invocation (e8/e9 hot path: 2 EPF
+/// passes × 3 channels = 6 -> 2 launches per encode iter).
+#[cube(launch_unchecked)]
+#[allow(clippy::too_many_arguments)]
+pub fn pad_plane_3ch_kernel(
+    src_x: &Array<f32>,
+    src_y: &Array<f32>,
+    src_b: &Array<f32>,
+    dst_x: &mut Array<f32>,
+    dst_y: &mut Array<f32>,
+    dst_b: &mut Array<f32>,
+    width: u32,
+    height: u32,
+    pad: u32,
+) {
+    let idx = ABSOLUTE_POS;
+    let w = width as usize;
+    let h = height as usize;
+    let p = pad as usize;
+    let dst_w = w + 2usize * p;
+    let dst_h = h + 2usize * p;
+    let total = dst_w * dst_h;
+    if idx >= total {
+        terminate!();
+    }
+    let oy = idx / dst_w;
+    let ox = idx - oy * dst_w;
+    let max_x = w - 1usize;
+    let max_y = h - 1usize;
+    let sx = usize::min(usize::saturating_sub(ox, p), max_x);
+    let sy = usize::min(usize::saturating_sub(oy, p), max_y);
+    let sidx = sy * w + sx;
+    dst_x[idx] = src_x[sidx];
+    dst_y[idx] = src_y[sidx];
+    dst_b[idx] = src_b[sidx];
+}
+
 /// 3x3-plus SAD (5 positions: center + 4 cardinals) summed across 3
 /// channels, weighted by EPF_CHANNEL_SCALE. Both center and neighbor
 /// stencils are evaluated.

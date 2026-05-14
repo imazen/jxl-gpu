@@ -6,7 +6,9 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::kernels::epf::{epf_step0_kernel, epf_step1_kernel, epf_step2_kernel, pad_plane_kernel};
+use crate::kernels::epf::{
+    epf_step0_kernel, epf_step1_kernel, epf_step2_kernel, pad_plane_3ch_kernel, pad_plane_kernel,
+};
 
 const TPB: u32 = 256;
 
@@ -30,6 +32,43 @@ pub fn pad_plane<R: Runtime>(
             CubeDim::new_1d(TPB),
             ArrayArg::from_raw_parts(src, src_n),
             ArrayArg::from_raw_parts(dst, dst_n),
+            width,
+            height,
+            pad,
+        );
+    }
+}
+
+/// 3-channel fused pad. One launch instead of 3.
+#[allow(clippy::too_many_arguments)]
+pub fn pad_plane_3ch<R: Runtime>(
+    client: &ComputeClient<R>,
+    src_x: Handle,
+    src_y: Handle,
+    src_b: Handle,
+    dst_x: Handle,
+    dst_y: Handle,
+    dst_b: Handle,
+    width: u32,
+    height: u32,
+    pad: u32,
+) {
+    let src_n = (width as usize) * (height as usize);
+    let dst_w = width + 2 * pad;
+    let dst_h = height + 2 * pad;
+    let dst_n = (dst_w as usize) * (dst_h as usize);
+    let cubes = (dst_n as u32).div_ceil(TPB).max(1);
+    unsafe {
+        pad_plane_3ch_kernel::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(cubes, 1, 1),
+            CubeDim::new_1d(TPB),
+            ArrayArg::from_raw_parts(src_x, src_n),
+            ArrayArg::from_raw_parts(src_y, src_n),
+            ArrayArg::from_raw_parts(src_b, src_n),
+            ArrayArg::from_raw_parts(dst_x, dst_n),
+            ArrayArg::from_raw_parts(dst_y, dst_n),
+            ArrayArg::from_raw_parts(dst_b, dst_n),
             width,
             height,
             pad,

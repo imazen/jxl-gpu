@@ -805,6 +805,47 @@ impl<R: Runtime> GpuEncoder<R> {
         }
     }
 
+    /// 3-channel fused pad — single launch instead of 3. All input
+    /// planes MUST share dimensions. Used by the e7/e8/e9 EPF
+    /// preamble to pad X/Y/B in one go.
+    pub fn pad_plane_3ch_persistent(
+        &self,
+        x: &GpuPlane<R>,
+        y: &GpuPlane<R>,
+        b: &GpuPlane<R>,
+        pad: u32,
+    ) -> (GpuPlane<R>, GpuPlane<R>, GpuPlane<R>) {
+        debug_assert_eq!(x.width, y.width);
+        debug_assert_eq!(x.height, y.height);
+        debug_assert_eq!(x.width, b.width);
+        debug_assert_eq!(x.height, b.height);
+        let dst_w = x.width + 2 * pad;
+        let dst_h = x.height + 2 * pad;
+        let dst_n = (dst_w as usize) * (dst_h as usize);
+        let h_x = self.client_ref().empty(dst_n * 4);
+        let h_y = self.client_ref().empty(dst_n * 4);
+        let h_b = self.client_ref().empty(dst_n * 4);
+        crate::launch::epf::pad_plane_3ch::<R>(
+            self.client_ref(),
+            x.handle.clone(),
+            y.handle.clone(),
+            b.handle.clone(),
+            h_x.clone(),
+            h_y.clone(),
+            h_b.clone(),
+            x.width,
+            x.height,
+            pad,
+        );
+        let mk = |handle, w, h| GpuPlane {
+            handle,
+            width: w,
+            height: h,
+            _r: core::marker::PhantomData,
+        };
+        (mk(h_x, dst_w, dst_h), mk(h_y, dst_w, dst_h), mk(h_b, dst_w, dst_h))
+    }
+
     /// Persistent-API EPF step 1 (3×3 plus, 5-pos SAD). Inputs are
     /// PADDED `GpuPlane`s (caller is responsible for padding via
     /// [`Self::pad_plane_persistent`] with `pad = 2`). `inv_sigma` is
