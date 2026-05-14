@@ -2045,18 +2045,117 @@ impl<R: Runtime> GpuEncoder<R> {
         // `width * height * 3` bytes (no padding, no per-pixel powf).
         let plan = lossy.prepare_strategy_search_plan_from_u8(self, pixels_u8, distance);
 
-        // Step 2: download xyb planes (GPU-padded layout) in one
-        // batched read instead of three sequential round-trips.
-        // Saves ~25 ms at 12 MP by avoiding 2 extra submit+wait pairs.
+        // Step 2: AcStrategyMap from plan.assignments (clip to CPU grid).
+        // This depends only on plan, not on XYB on host.
+        let mut ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
+        for a in &plan.assignments {
+            let bx = a.bx as usize;
+            let by = a.by as usize;
+            if bx >= xsize_blocks || by >= ysize_blocks {
+                continue;
+            }
+            use crate::forks::transform::*;
+            let (cx, cy): (usize, usize) = match a.raw_strategy {
+                RAW_STRATEGY_DCT16X8 => (1, 2),
+                RAW_STRATEGY_DCT8X16 => (2, 1),
+                RAW_STRATEGY_DCT16X16 => (2, 2),
+                RAW_STRATEGY_DCT32X16 => (2, 4),
+                RAW_STRATEGY_DCT16X32 => (4, 2),
+                RAW_STRATEGY_DCT32X32 => (4, 4),
+                RAW_STRATEGY_DCT64X32 => (4, 8),
+                RAW_STRATEGY_DCT32X64 => (8, 4),
+                RAW_STRATEGY_DCT64X64 => (8, 8),
+                _ => (1, 1),
+            };
+            if bx + cx > xsize_blocks || by + cy > ysize_blocks {
+                continue;
+            }
+            if a.raw_strategy != 0 {
+                ac_strategy.set(bx, by, a.raw_strategy);
+            }
+        }
+
+        // GPU pre-quantized AC fast path: ENABLED. Backed by the
+        // fully-fused 3-channel DCT8 producer
+        // (kernels::fused_dct8_3ch::fused_dct8_3ch_kernel) +
+        // GPU CfL (kernels::cfl_collect → existing newton kernel),
+        // which lets us SKIP the 60 ms XYB DtoH download + 28 ms
+        // host-side repack + 9 ms CPU compute_cfl_map for
+        // all-DCT8 images.
+        //
+        // Bitstream is NOT byte-identical to CPU due to cubecl-vs-jxl_simd
+        // DCT FP precision (~2% chroma AC coefs flip by 1 near rounding
+        // ties); corpus_regression at 0.5% score tolerance covers it.
+        const ENABLE_GPU_DCT8_FAST_PATH: bool = true;
+        let all_dct8 = ENABLE_GPU_DCT8_FAST_PATH
+            && (0..ysize_blocks)
+                .all(|by| (0..xsize_blocks).all(|bx| ac_strategy.raw_strategy(bx, by) == 0));
+
+        let vardct = VarDctEncoder::new(distance);
+        let params = DistanceParams::compute_for_profile(distance, &vardct.profile);
+
+        let quant_field_float = plan.quant_field_float.clone();
+        let masking = plan.masking.clone();
+        debug_assert_eq!(quant_field_float.len(), num_blocks, "qf len");
+        debug_assert_eq!(masking.len(), num_blocks, "mask len");
+        let quant_field_u8 = quantize_quant_field(&quant_field_float, params.inv_scale);
+
+        if all_dct8 {
+            // GPU CfL: matches CPU compute_cfl_map within ±1 (FP +
+            // padded num_per_tile noise — see cfl_map_gpu_matches_cpu_small).
+            let cfl_result = crate::forks::cfl_map_gpu::compute_cfl_map_gpu_persistent(
+                self,
+                &plan.xyb_x_gpu,
+                &plan.xyb_y_gpu,
+                &plan.xyb_b_gpu,
+                xsize_blocks,
+                ysize_blocks,
+                true, // use_newton (effort >= 7)
+                1e-3,
+                10,
+            );
+            let cfl_map = jxl_encoder::__pre_quantized::CflMap {
+                ytox: cfl_result.ytox,
+                ytob: cfl_result.ytob,
+                xsize_tiles: cfl_result.xsize_tiles,
+                ysize_tiles: cfl_result.ysize_tiles,
+            };
+            // For the fast path, encode_from_pre_quantized_ac doesn't
+            // read xyb_x/y/b — pass empty Vecs and skip the 60 ms
+            // XYB download + 28 ms repack entirely.
+            let precomputed = EncoderPrecomputed::from_parts(
+                width as usize,
+                height as usize,
+                xsize_blocks,
+                ysize_blocks,
+                cpu_pw,
+                cpu_ph,
+                alloc::vec::Vec::new(),
+                alloc::vec::Vec::new(),
+                alloc::vec::Vec::new(),
+                alloc::vec::Vec::new(), // linear_rgb (rate-control only)
+                cfl_map,
+                None,
+                quant_field_float.clone(),
+                masking,
+                None,
+                ac_strategy,
+                true,
+                distance,
+                0,
+                0,
+            );
+            return run_gpu_dct8_pre_quantized_path(
+                self, &plan, &precomputed, &vardct, &quant_field_u8,
+                &params, distance, xsize_blocks, ysize_blocks,
+            );
+        }
+
+        // Slow path (any non-DCT8 block): need XYB on host for CPU
+        // transform_and_quantize + compute_cfl_map.
         let (xyb_x_gpu, xyb_y_gpu, xyb_b_gpu) =
             self.download_planes_3ch(&plan.xyb_x_gpu, &plan.xyb_y_gpu, &plan.xyb_b_gpu);
 
-        // Step 2b: re-pack from GPU's 16-aligned to CPU's 8-aligned —
-        // identical fix-up to the f32 variant (see that fn for the
-        // gaborish-edge-replication rationale). Run all three
-        // channels in parallel (rayon::join × 3 — they're disjoint
-        // dest buffers, fully data-parallel). At 12 MP that's
-        // ~144 MB of host-memory bandwidth in 25 ms instead of 75 ms.
         let repack = |src: &[f32]| -> alloc::vec::Vec<f32> {
             if cpu_pw == gpu_pw as usize && cpu_ph == gpu_ph as usize {
                 src.to_vec()
@@ -2088,42 +2187,11 @@ impl<R: Runtime> GpuEncoder<R> {
                 dst
             }
         };
-        // 3-way rayon::join — saves ~50 ms at 12 MP vs sequential.
         let ((xyb_x, xyb_y), xyb_b) = rayon::join(
             || rayon::join(|| repack(&xyb_x_gpu), || repack(&xyb_y_gpu)),
             || repack(&xyb_b_gpu),
         );
 
-        // Step 3: AcStrategyMap from plan.assignments (clip to CPU grid).
-        let mut ac_strategy = AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks);
-        for a in &plan.assignments {
-            let bx = a.bx as usize;
-            let by = a.by as usize;
-            if bx >= xsize_blocks || by >= ysize_blocks {
-                continue;
-            }
-            use crate::forks::transform::*;
-            let (cx, cy): (usize, usize) = match a.raw_strategy {
-                RAW_STRATEGY_DCT16X8 => (1, 2),
-                RAW_STRATEGY_DCT8X16 => (2, 1),
-                RAW_STRATEGY_DCT16X16 => (2, 2),
-                RAW_STRATEGY_DCT32X16 => (2, 4),
-                RAW_STRATEGY_DCT16X32 => (4, 2),
-                RAW_STRATEGY_DCT32X32 => (4, 4),
-                RAW_STRATEGY_DCT64X32 => (4, 8),
-                RAW_STRATEGY_DCT32X64 => (8, 4),
-                RAW_STRATEGY_DCT64X64 => (8, 8),
-                _ => (1, 1),
-            };
-            if bx + cx > xsize_blocks || by + cy > ysize_blocks {
-                continue;
-            }
-            if a.raw_strategy != 0 {
-                ac_strategy.set(bx, by, a.raw_strategy);
-            }
-        }
-
-        // Step 4: CfL on host from downloaded XYB.
         let cfl_map = compute_cfl_map(
             &xyb_x,
             &xyb_y,
@@ -2132,23 +2200,11 @@ impl<R: Runtime> GpuEncoder<R> {
             cpu_ph,
             xsize_blocks,
             ysize_blocks,
-            true, // use_newton (effort >= 7)
-            1e-3, // newton_eps
-            10,   // newton_max_iters
+            true,
+            1e-3,
+            10,
         );
 
-        // Step 5: GPU-computed quant_field_float + masking from
-        // `prepare_strategy_search_plan_from_u8` (compute_quant_field_full_persistent).
-        // See the f32 variant above for parity-test reference.
-        let quant_field_float = plan.quant_field_float.clone();
-        let masking = plan.masking.clone();
-        debug_assert_eq!(quant_field_float.len(), num_blocks, "qf len");
-        debug_assert_eq!(masking.len(), num_blocks, "mask len");
-
-        // Step 6: linear_rgb only used by rate-control loop; pass empty.
-        let linear_rgb = alloc::vec::Vec::new();
-
-        // Step 7: assemble + Step 8: encode (identical to f32 variant).
         let precomputed = EncoderPrecomputed::from_parts(
             width as usize,
             height as usize,
@@ -2159,58 +2215,18 @@ impl<R: Runtime> GpuEncoder<R> {
             xyb_x,
             xyb_y,
             xyb_b,
-            linear_rgb,
+            alloc::vec::Vec::new(),
             cfl_map,
             None,
-            quant_field_float.clone(),
+            quant_field_float,
             masking,
             None,
             ac_strategy,
-            true, // gaborish_enabled
+            true,
             distance,
             0,
             0,
         );
-        let vardct = VarDctEncoder::new(distance);
-        let params = DistanceParams::compute_for_profile(distance, &vardct.profile);
-        let quant_field_u8 = quantize_quant_field(&quant_field_float, params.inv_scale);
-
-        // Conditional GPU pre-quantized AC fast path: if EVERY block
-        // is DCT8 (the simplest strategy, common at high distances /
-        // low-detail content), the GPU producer skips the CPU
-        // transform_and_quantize entirely. Falls back to the CPU
-        // path on any non-DCT8 block.
-        //
-        // The GPU producer is not byte-identical to CPU due to
-        // cubecl-vs-jxl_simd DCT FP precision (~2% of borderline
-        // chroma AC coefs flip by 1 near rounding ties). corpus
-        // regression at 0.5% score tolerance covers this.
-        // GPU pre-quantized AC fast path: ENABLED. Backed by the
-        // fully-fused 3-channel DCT8 producer
-        // (kernels::fused_dct8_3ch::fused_dct8_3ch_kernel) — collapses
-        // the previous ~10-launch chain (gather × 3, DCT × 3, quantize
-        // Y, cfl_quantize × 2, nzeros × 3) into ONE mega-kernel that
-        // keeps all intermediates in shared memory.
-        //
-        // DC quant remains separate (3 small launches reading the
-        // re-computed DCT float coefs) — future chunk extends the
-        // fused kernel to also write DC.
-        //
-        // Bitstream is NOT byte-identical to CPU due to cubecl-vs-jxl_simd
-        // DCT FP precision (~2% chroma AC coefs flip by 1 near rounding
-        // ties); corpus_regression at 0.5% score tolerance covers it.
-        const ENABLE_GPU_DCT8_FAST_PATH: bool = true;
-        if ENABLE_GPU_DCT8_FAST_PATH {
-            let all_dct8 = (0..ysize_blocks).all(|by| {
-                (0..xsize_blocks).all(|bx| precomputed.ac_strategy.raw_strategy(bx, by) == 0)
-            });
-            if all_dct8 {
-                return run_gpu_dct8_pre_quantized_path(
-                    self, &plan, &precomputed, &vardct, &quant_field_u8,
-                    &params, distance, xsize_blocks, ysize_blocks,
-                );
-            }
-        }
 
         vardct
             .encode_from_precomputed(&precomputed, &quant_field_u8)

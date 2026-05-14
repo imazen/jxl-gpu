@@ -49,6 +49,7 @@ pub mod afv;
 #[cfg(feature = "butteraugli-loop")]
 pub mod butteraugli_loop;
 pub mod cfl;
+pub mod cfl_map_gpu;
 pub mod cost;
 pub mod dequant;
 pub mod epf;
