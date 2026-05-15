@@ -77,10 +77,6 @@ jobs:
     env:
       # Force wgpu to pick the Vulkan backend (Lavapipe = SW Vulkan).
       WGPU_BACKEND: vulkan
-      # Point the Vulkan loader at Lavapipe (Mesa SW rasterizer); the
-      # GitHub runner has no real GPU, and llvmpipe / lavapipe is the
-      # only ICD that runs without one.
-      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
       # Force any GLX-bound code path through Mesa softpipe (defense in
       # depth — wgpu shouldn't touch GLX, but cubecl-wgpu init has
       # surprised us before).
@@ -96,10 +92,38 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
-      - name: Verify Lavapipe is visible to the Vulkan loader
+      - name: Discover Lavapipe ICD path and export VK_ICD_FILENAMES
+        # Mesa renamed the ICD JSON across versions: older Ubuntu installed
+        # `lvp_icd.x86_64.json`, Ubuntu 24.04's `mesa-vulkan-drivers`
+        # (Mesa 25.x+) ships the unsuffixed `lvp_icd.json`. Match either
+        # and export to GITHUB_ENV so subsequent steps inherit the path.
         run: |
-          vulkaninfo --summary || true
-          test -f "$VK_ICD_FILENAMES" || { echo "Lavapipe ICD not at $VK_ICD_FILENAMES"; ls /usr/share/vulkan/icd.d/; exit 1; }
+          set -euo pipefail
+          for cand in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
+                      /usr/share/vulkan/icd.d/lvp_icd.json; do
+            if [ -f "$cand" ]; then
+              echo "Found Lavapipe ICD at $cand"
+              echo "VK_ICD_FILENAMES=$cand" >> "$GITHUB_ENV"
+              found=1
+              break
+            fi
+          done
+          if [ -z "${found:-}" ]; then
+            echo "No Lavapipe ICD found in /usr/share/vulkan/icd.d/" >&2
+            ls -la /usr/share/vulkan/icd.d/ >&2
+            exit 1
+          fi
+      - name: Verify Lavapipe is reachable via Vulkan loader
+        run: |
+          echo "VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
+          vulkaninfo --summary | head -40
+          # Sanity: ensure the loader actually surfaces a llvmpipe device.
+          # Without this, wgpu would silently fall back to no-adapter and
+          # the parity examples would either hang or hit a "no device" panic.
+          vulkaninfo --summary | grep -q 'DRIVER_ID_MESA_LLVMPIPE' || {
+            echo "Lavapipe driver not surfaced — VK loader can't see it" >&2
+            exit 1
+          }
       - name: cargo build --no-default-features --features wgpu --lib
         run: cargo build --release --no-default-features --features wgpu --lib
       - name: cargo build parity examples (wgpu)
