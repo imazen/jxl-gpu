@@ -190,6 +190,21 @@ pub struct StrategySearchPlan<R: Runtime> {
     pub xyb_y_gpu: GpuPlane<R>,
     /// XYB B-channel GPU plane (see `xyb_x_gpu`).
     pub xyb_b_gpu: GpuPlane<R>,
+    /// XYB pre-gaborish GPU planes [X, Y, B] — the unsharpened XYB
+    /// output of `xyb_from_linear_rgb_persistent`, *before* the 5x5
+    /// gaborish_inverse runs. Held so the slow-path encode can
+    /// download them and feed
+    /// [`jxl_encoder::__pre_quantized::EncoderPrecomputed::with_xyb_pre_gaborish`]
+    /// for patches detection — the only place patches stay byte-exact
+    /// across the encoder/decoder boundary (decoder pipeline is
+    /// `IDCT → gaborish → EPF → patches`, so the patches reference
+    /// frame stores pre-gaborish patch values). Adds a 3-plane refcount
+    /// hold; bytes only download when the slow path takes them.
+    pub xyb_x_pre_gab_gpu: GpuPlane<R>,
+    /// XYB pre-gaborish GPU plane (Y channel) — see `xyb_x_pre_gab_gpu`.
+    pub xyb_y_pre_gab_gpu: GpuPlane<R>,
+    /// XYB pre-gaborish GPU plane (B channel) — see `xyb_x_pre_gab_gpu`.
+    pub xyb_b_pre_gab_gpu: GpuPlane<R>,
     /// Per-8x8-block DC grid for X channel (length = num_padded_blocks).
     pub dc_grid_x: Vec<f32>,
     /// Per-8x8-block DC grid for Y channel.
@@ -1460,9 +1475,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // clarity (single explicit upload point) and as setup for
         // future fused-multi-strategy launches; not a production perf
         // win in itself.
-        use crate::forks::cost::{
-            strategy_search_costs_subblock_8x8_batch, SubblockStratSpec,
-        };
+        use crate::forks::cost::{SubblockStratSpec, strategy_search_costs_subblock_8x8_batch};
         use cubecl::prelude::*;
         let mask_row_base_subblock: Vec<u32> = (0..nb8)
             .map(|i| {
@@ -1638,7 +1651,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // Sweep first; the corpus_regression test catches drift.
         let afv_costs_full: Vec<f32> = if self.evaluate_afv {
             use crate::forks::afv::afv_per_block_upstream_cost_xyb_host;
-            use crate::forks::cost::{afv_entropy_mul, EntropyMulTable};
+            use crate::forks::cost::{EntropyMulTable, afv_entropy_mul};
             use crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE;
             use crate::quant_weights::afv_weights_per_channel;
 
@@ -2090,11 +2103,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // skipped (empty Vec); convert empties to None so the selector
         // doesn't read garbage.
         fn opt<'a>(v: &'a [f32]) -> Option<&'a [f32]> {
-            if v.is_empty() {
-                None
-            } else {
-                Some(v)
-            }
+            if v.is_empty() { None } else { Some(v) }
         }
         let sub_blocks = crate::pipeline::SubBlockCostGrids {
             dct4x4: opt(&cost_dct4x4),
@@ -2261,25 +2270,25 @@ impl<R: Runtime> LossyEncoder<R> {
         // (evaluate_afv = false) — the GPU LLF fast paths (DCT8 /
         // DCT16x16 / DCT16x8 / DCT8x16) use g_dc_*_gpu directly via
         // set_llf_*_indexed_persistent, so the host slice is unused.
-        let (dc_grid_x, dc_grid_y, dc_grid_b): (Vec<f32>, Vec<f32>, Vec<f32>) =
-            if self.evaluate_afv {
-                let mut bytes = enc.client_ref().read(alloc::vec![
-                    g_dc_x.handle().clone(),
-                    g_dc_y.handle().clone(),
-                    g_dc_b.handle().clone(),
-                ]);
-                use cubecl::prelude::*;
-                let b_bytes = bytes.pop().expect("read[2]");
-                let y_bytes = bytes.pop().expect("read[1]");
-                let x_bytes = bytes.pop().expect("read[0]");
-                (
-                    f32::from_bytes(&x_bytes).to_vec(),
-                    f32::from_bytes(&y_bytes).to_vec(),
-                    f32::from_bytes(&b_bytes).to_vec(),
-                )
-            } else {
-                (Vec::new(), Vec::new(), Vec::new())
-            };
+        let (dc_grid_x, dc_grid_y, dc_grid_b): (Vec<f32>, Vec<f32>, Vec<f32>) = if self.evaluate_afv
+        {
+            let mut bytes = enc.client_ref().read(alloc::vec![
+                g_dc_x.handle().clone(),
+                g_dc_y.handle().clone(),
+                g_dc_b.handle().clone(),
+            ]);
+            use cubecl::prelude::*;
+            let b_bytes = bytes.pop().expect("read[2]");
+            let y_bytes = bytes.pop().expect("read[1]");
+            let x_bytes = bytes.pop().expect("read[0]");
+            (
+                f32::from_bytes(&x_bytes).to_vec(),
+                f32::from_bytes(&y_bytes).to_vec(),
+                f32::from_bytes(&b_bytes).to_vec(),
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
         // Keep the GPU dc_grid handles too — encode_with_strategy_plan_adaptive
         // threads them into encode_and_reconstruct_* via the
         // `dc_grid_*_gpu` Option params, skipping the per-iter
@@ -2356,6 +2365,12 @@ impl<R: Runtime> LossyEncoder<R> {
             xyb_x_gpu: xx_g,
             xyb_y_gpu: xy_g,
             xyb_b_gpu: xb_g,
+            // Pre-gaborish XYB held for patches detection in the
+            // slow-path bitstream emit. Refcounted GpuPlane — no new
+            // PCIe bytes; the encoder slow path downloads on demand.
+            xyb_x_pre_gab_gpu: xx,
+            xyb_y_pre_gab_gpu: xy,
+            xyb_b_pre_gab_gpu: xb,
             dc_grid_x,
             dc_grid_y,
             dc_grid_b,
@@ -2763,8 +2778,7 @@ impl<R: Runtime> LossyEncoder<R> {
         );
 
         let pad2 = 1_u32;
-        let (p2_x, p2_y, p2_b) =
-            enc.pad_plane_3ch_persistent(&s1_x, &s1_y, &s1_b, pad2);
+        let (p2_x, p2_y, p2_b) = enc.pad_plane_3ch_persistent(&s1_x, &s1_y, &s1_b, pad2);
         let (s2_x, s2_y, s2_b) = enc.epf_step2_persistent(
             &p2_x,
             &p2_y,

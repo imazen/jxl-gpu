@@ -1958,6 +1958,27 @@ impl<R: Runtime> GpuEncoder<R> {
         // Step 6: linear_rgb is only used by rate-control loop; pass empty.
         let linear_rgb = alloc::vec::Vec::new();
 
+        // Step 6b: download pre-gaborish XYB for patches detection.
+        // Patches MUST be detected on un-sharpened XYB so the
+        // encoder-side subtract + decoder-side add roundtrip
+        // (decoder pipeline: IDCT → gaborish → EPF → patches; see
+        // libjxl/lib/jxl/dec_cache.cc:148-194). Detecting on
+        // post-gaborish XYB and subtracting from post-gaborish XYB
+        // produces sharpening halos around every glyph after the
+        // decoder add-patches step (measured: butteraugli 0.5 → 8.3
+        // on terminal.png at d=0.5). On photos the patches detection
+        // produces no patches and these planes are dropped immediately,
+        // so the only cost is the download itself (~1 ms / MP).
+        let (xyb_x_pre, xyb_y_pre, xyb_b_pre) = self.download_planes_3ch(
+            &plan.xyb_x_pre_gab_gpu,
+            &plan.xyb_y_pre_gab_gpu,
+            &plan.xyb_b_pre_gab_gpu,
+        );
+        let ((xyb_x_pre, xyb_y_pre), xyb_b_pre) = rayon::join(
+            || rayon::join(|| repack(&xyb_x_pre), || repack(&xyb_y_pre)),
+            || repack(&xyb_b_pre),
+        );
+
         // Step 7: assemble EncoderPrecomputed.
         let precomputed = EncoderPrecomputed::from_parts(
             width as usize,
@@ -1980,7 +2001,8 @@ impl<R: Runtime> GpuEncoder<R> {
             distance,
             0,
             0,
-        );
+        )
+        .with_xyb_pre_gaborish([xyb_x_pre, xyb_y_pre, xyb_b_pre]);
 
         // Step 8: build the CPU VarDctEncoder + convert quant field.
         let vardct = VarDctEncoder::new(distance);
@@ -2159,8 +2181,15 @@ impl<R: Runtime> GpuEncoder<R> {
                 0,
             );
             return run_gpu_dct8_pre_quantized_path(
-                self, &plan, &precomputed, &vardct, &quant_field_u8,
-                &params, distance, xsize_blocks, ysize_blocks,
+                self,
+                &plan,
+                &precomputed,
+                &vardct,
+                &quant_field_u8,
+                &params,
+                distance,
+                xsize_blocks,
+                ysize_blocks,
             );
         }
 
@@ -2218,6 +2247,19 @@ impl<R: Runtime> GpuEncoder<R> {
             10,
         );
 
+        // Download pre-gaborish XYB for patches detection — see the
+        // matching block in encode_lossy_to_bitstream_via_precomputed
+        // for the rationale.
+        let (xyb_x_pre, xyb_y_pre, xyb_b_pre) = self.download_planes_3ch(
+            &plan.xyb_x_pre_gab_gpu,
+            &plan.xyb_y_pre_gab_gpu,
+            &plan.xyb_b_pre_gab_gpu,
+        );
+        let ((xyb_x_pre, xyb_y_pre), xyb_b_pre) = rayon::join(
+            || rayon::join(|| repack(&xyb_x_pre), || repack(&xyb_y_pre)),
+            || repack(&xyb_b_pre),
+        );
+
         let precomputed = EncoderPrecomputed::from_parts(
             width as usize,
             height as usize,
@@ -2239,7 +2281,8 @@ impl<R: Runtime> GpuEncoder<R> {
             distance,
             0,
             0,
-        );
+        )
+        .with_xyb_pre_gaborish([xyb_x_pre, xyb_y_pre, xyb_b_pre]);
 
         vardct
             .encode_from_precomputed(&precomputed, &quant_field_u8)
@@ -2511,6 +2554,17 @@ impl<R: Runtime> GpuEncoder<R> {
             );
         }
 
+        // Download pre-gaborish XYB for patches detection — see the
+        // matching block in encode_lossy_to_bitstream_via_precomputed.
+        let (xyb_x_pre_dl, xyb_y_pre_dl, xyb_b_pre_dl) = self.download_planes_3ch(
+            &plan.xyb_x_pre_gab_gpu,
+            &plan.xyb_y_pre_gab_gpu,
+            &plan.xyb_b_pre_gab_gpu,
+        );
+        let xyb_x_pre = repack_first(&xyb_x_pre_dl);
+        let xyb_y_pre = repack_first(&xyb_y_pre_dl);
+        let xyb_b_pre = repack_first(&xyb_b_pre_dl);
+
         let precomputed = EncoderPrecomputed::from_parts(
             width as usize,
             height as usize,
@@ -2532,7 +2586,8 @@ impl<R: Runtime> GpuEncoder<R> {
             distance,
             0,
             0,
-        );
+        )
+        .with_xyb_pre_gaborish([xyb_x_pre, xyb_y_pre, xyb_b_pre]);
 
         // Thread the per-iter SetQuantField recompute (matching CPU
         // `vardct/butteraugli_loop.rs`) through to the bitstream:
@@ -2616,13 +2671,13 @@ fn run_gpu_dct8_pre_quantized_path<R: Runtime>(
     }
     let x_qm_mul = (1.25_f32).powf(params.x_qm_scale as f32 - 2.0);
     let b_qm_mul = (1.25_f32).powf(params.b_qm_scale as f32 - 2.0);
-    let qac_per_block: alloc::vec::Vec<f32> =
-        quant_field_u8.iter().map(|&q| params.scale * q as f32).collect();
-    let qac_qm_x: alloc::vec::Vec<f32> =
-        qac_per_block.iter().map(|&q| q * x_qm_mul).collect();
+    let qac_per_block: alloc::vec::Vec<f32> = quant_field_u8
+        .iter()
+        .map(|&q| params.scale * q as f32)
+        .collect();
+    let qac_qm_x: alloc::vec::Vec<f32> = qac_per_block.iter().map(|&q| q * x_qm_mul).collect();
     let qac_qm_y: alloc::vec::Vec<f32> = qac_per_block.clone();
-    let qac_qm_b: alloc::vec::Vec<f32> =
-        qac_per_block.iter().map(|&q| q * b_qm_mul).collect();
+    let qac_qm_b: alloc::vec::Vec<f32> = qac_per_block.iter().map(|&q| q * b_qm_mul).collect();
 
     fn arr64(s: &[f32]) -> [f32; 64] {
         let mut a = [0.0_f32; 64];
