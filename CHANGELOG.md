@@ -9,18 +9,32 @@
   never compiled to a GPU compute pipeline) and the `cuda` job stayed
   commented out for lack of a self-hosted runner. New job on
   `ubuntu-latest` installs `mesa-vulkan-drivers` + `vulkan-tools`,
-  points the Vulkan loader at Lavapipe (`VK_ICD_FILENAMES=…/lvp_icd.x86_64.json`,
-  `WGPU_BACKEND=vulkan`, `LIBGL_ALWAYS_SOFTWARE=1`), then builds
-  `--no-default-features --features wgpu` and runs two representative
-  parity examples end-to-end: `xyb_parity` (pointwise XYB forward+inverse,
-  fastest signal) and `dct8_parity` (per-block DCT8/IDCT8 with
-  SharedMemory + cube_dim, exercises the heavier `#[cube]` surface).
-  Locally on Lavapipe both pass with the documented < 1e-5 tolerance
-  (xyb max|Δ| = 1.79e-7, dct8 max|Δ| = 2.24e-8). The wgpu backend
-  is vendor-agnostic (Vulkan / Metal / DX12) so the same job catches
-  GPU regressions that the CPU fallback can't see, and the parity-test
-  invariant proves the kernels actually executed (a no-op fallback
-  would have non-zero diff). Workflow file: `.github/workflows/ci.yml`.
+  discovers the Lavapipe ICD JSON (Mesa renamed `lvp_icd.x86_64.json` →
+  `lvp_icd.json` in the 25.x packages) and exports
+  `VK_ICD_FILENAMES`, then runs `vulkaninfo --summary` and asserts
+  `DRIVER_ID_MESA_LLVMPIPE` is surfaced before any cargo work — a
+  silent no-adapter regression fails loud instead of letting the
+  parity examples hang. Builds `--no-default-features --features wgpu`
+  and runs two representative parity examples end-to-end:
+  `xyb_parity` (pointwise XYB forward+inverse, fastest signal) and
+  `dct8_parity` (per-block DCT8/IDCT8 with SharedMemory + cube_dim,
+  exercises the heavier `#[cube]` surface). Both assert max|Δ| < 1e-5
+  vs `jxl-encoder-simd::*_scalar`. Verified live on the Lavapipe-on-
+  ubuntu-latest runner: xyb X/Y/B max|Δ| = 1.19e-7 / 1.19e-7 /
+  1.79e-7, dct8 forward / IDCT / roundtrip max|Δ| = 2.24e-8 / 0 /
+  2.38e-7 — same numbers as local Lavapipe, confirming the kernels
+  actually executed on the runner (a no-op fallback would never
+  return matching diffs). The wgpu backend is vendor-agnostic
+  (Vulkan / Metal / DX12) so the same job catches GPU regressions
+  that the CPU fallback can't see. The job also clones the public
+  sibling path-dep repos (`imazen/jxl-encoder`,
+  `imazen/zenmetrics@feat/internals-from-linear-planes`,
+  `imazen/fast-ssim2`, `imazen/butteraugli`, `lilith/jxl-rs`) into
+  the layout the workspace expects so cargo can resolve the manifest
+  without the local-only paths the maintainer's box uses. Negative
+  test (locally tightened tolerance to 1e-12) panics with exit 101
+  as expected. Workflow: `.github/workflows/ci.yml`. CI run:
+  https://github.com/imazen/jxl-gpu/actions/runs/25939839648.
 
 ### Fixed (May 15, 2026)
 

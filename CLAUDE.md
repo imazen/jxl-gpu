@@ -487,16 +487,26 @@ Jobs in `.github/workflows/ci.yml`:
 - **`build-i686`** (cross to `i686-unknown-linux-gnu`) — 32-bit pointer-width gate
   (mandatory per global CLAUDE.md).
 - **`lint`** (ubuntu-latest) — `cargo fmt --check` + clippy on `--features cpu --lib --tests`.
-- **`build-wgpu`** (ubuntu-latest, **runs the GPU kernels**) — installs
-  `mesa-vulkan-drivers` + `vulkan-tools`, points the Vulkan loader at Lavapipe
-  (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`,
-  `WGPU_BACKEND=vulkan`, `LIBGL_ALWAYS_SOFTWARE=1`), builds
-  `--no-default-features --features wgpu`, then runs `xyb_parity` (pointwise) and
-  `dct8_parity` (per-block + SharedMemory) end-to-end. Lavapipe is Mesa's software
-  Vulkan ICD — slow but it actually compiles + dispatches the `#[cube]` kernels and
-  asserts max|Δ| < 1e-5 against the CPU reference. This is the only CI job that
-  proves the kernels are correct on a real GPU compute pipeline. Local validation
-  on Lavapipe: xyb max|Δ| = 1.79e-7, dct8 max|Δ| = 2.24e-8.
+- **`build-wgpu`** (ubuntu-latest, **runs the GPU kernels**) — clones the public
+  sibling path-dep repos (`imazen/jxl-encoder`,
+  `imazen/zenmetrics@feat/internals-from-linear-planes`,
+  `imazen/fast-ssim2`, `imazen/butteraugli`, `lilith/jxl-rs`) so cargo can resolve
+  the workspace; installs `mesa-vulkan-drivers` + `vulkan-tools`; discovers the
+  Lavapipe ICD JSON path (Mesa renamed `lvp_icd.x86_64.json` → `lvp_icd.json` in
+  the 25.x packages; the job tries both and exports `VK_ICD_FILENAMES` to
+  `GITHUB_ENV`); verifies `vulkaninfo --summary` surfaces
+  `DRIVER_ID_MESA_LLVMPIPE` (silent no-adapter regression fails loud); then builds
+  `--no-default-features --features wgpu` and runs `xyb_parity` (pointwise) and
+  `dct8_parity` (per-block + SharedMemory) end-to-end. Both assert max|Δ| < 1e-5
+  vs the `jxl-encoder-simd::*_scalar` reference. Lavapipe is Mesa's software
+  Vulkan ICD — slow but it actually compiles + dispatches the `#[cube]` kernels.
+  This is the only CI job that proves the kernels are correct on a real GPU
+  compute pipeline. Live verification on the Lavapipe-on-ubuntu-latest runner:
+  xyb X/Y/B max|Δ| = 1.19e-7 / 1.19e-7 / 1.79e-7, dct8 forward / IDCT /
+  roundtrip max|Δ| = 2.24e-8 / 0 / 2.38e-7 — same numbers as local Lavapipe,
+  confirming the kernels actually executed on the runner (a no-op fallback would
+  never return matching diffs). First green run:
+  https://github.com/imazen/jxl-gpu/actions/runs/25939839648.
 - **`build-cuda`** (commented out) — self-hosted runner with NVIDIA hardware. Run
   the full parity-example matrix here once a runner is added; the wgpu job above
   is the vendor-agnostic stand-in for shared CI.
