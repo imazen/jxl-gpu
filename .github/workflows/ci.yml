@@ -110,7 +110,11 @@ jobs:
           parent="$(dirname "$GITHUB_WORKSPACE")"
           gparent="$(dirname "$parent")"
           git clone --depth 1 https://github.com/imazen/jxl-encoder "$parent/jxl-encoder"
-          git clone --depth 1 https://github.com/imazen/zenmetrics "$parent/zenmetrics"
+          # zenmetrics: workspace expects the `internals` feature on
+          # butteraugli-gpu (see comment in workspace Cargo.toml:42-45)
+          # which only exists on `feat/internals-from-linear-planes`.
+          git clone --depth 1 --branch feat/internals-from-linear-planes \
+            https://github.com/imazen/zenmetrics "$parent/zenmetrics"
           git clone --depth 1 https://github.com/imazen/fast-ssim2 "$parent/fast-ssim2"
           git clone --depth 1 https://github.com/imazen/butteraugli "$gparent/butteraugli"
           # The absolute path /home/lilith/work/third-party/jxl-rs/jxl
