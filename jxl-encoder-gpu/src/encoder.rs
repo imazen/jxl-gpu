@@ -1974,13 +1974,155 @@ impl<R: Runtime> GpuEncoder<R> {
             &plan.xyb_y_pre_gab_gpu,
             &plan.xyb_b_pre_gab_gpu,
         );
-        let ((xyb_x_pre, xyb_y_pre), xyb_b_pre) = rayon::join(
+        let ((mut xyb_x_pre, mut xyb_y_pre), mut xyb_b_pre) = rayon::join(
             || rayon::join(|| repack(&xyb_x_pre), || repack(&xyb_y_pre)),
             || repack(&xyb_b_pre),
         );
 
+        // Step 6c: host-side patches detect/subtract for libjxl-parity
+        // (case-1) path in encode_from_precomputed. With this in place
+        // the encoder uses our pre-detected `patches_data` directly and
+        // skips its in-function detection (case-2), which only applies
+        // CfL pass-1 recompute and leaves quant_field / mask /
+        // ac_strategy fitted to un-patched XYB. Mirrors what
+        // EncoderPrecomputed::compute_with_budget does on the
+        // rate-control / default-API CPU path. On photos this is a
+        // no-op (patches detection returns None).
+        //
+        // Pipeline (matches CPU `compute_with_budget`):
+        // 1. Detect patches on PRE-gaborish XYB (`find_and_build`).
+        // 2. `quantize_ref_image()` so encoder subtract matches
+        //    decoder add bit-for-bit.
+        // 3. Subtract from PRE-gaborish XYB.
+        // 4. Re-run `gaborish_inverse` on the patches-subtracted
+        //    pre-gab XYB to get the patches-subtracted POST-gab XYB
+        //    that the bitstream emit path will DCT. (Subtracting from
+        //    post-gab directly is wrong — gaborish is a 5x5 filter,
+        //    so `gaborish_inverse(P - Q) ≠ gaborish_inverse(P) - Q`.)
+        // 5. Recompute `cfl_map` on the patches-subtracted post-gab.
+        let mut xyb_x = xyb_x;
+        let mut xyb_y = xyb_y;
+        let mut xyb_b = xyb_b;
+        let mut cfl_map = cfl_map;
+        let mut quant_field_float = quant_field_float;
+        let mut masking = masking;
+        let mut ac_strategy = ac_strategy;
+        let mut mask1x1: Option<alloc::vec::Vec<f32>> = None;
+        let patches_data: Option<jxl_encoder::__pre_quantized::PatchesData> = {
+            let mut pd = jxl_encoder::__pre_quantized::find_and_build_patches(
+                [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
+                width as usize,
+                height as usize,
+                cpu_pw,
+            );
+            if let Some(ref mut p) = pd {
+                p.quantize_ref_image();
+                let mut pre = [
+                    core::mem::take(&mut xyb_x_pre),
+                    core::mem::take(&mut xyb_y_pre),
+                    core::mem::take(&mut xyb_b_pre),
+                ];
+                jxl_encoder::__pre_quantized::subtract_patches(&mut pre, cpu_pw, p);
+                let [x, y, b] = pre;
+                xyb_x_pre = x;
+                xyb_y_pre = y;
+                xyb_b_pre = b;
+                // Materialize the patches-subtracted post-gaborish XYB
+                // (what `precomputed.xyb_*` is contracted to hold for
+                // case-1) by re-running the 5x5 gaborish_inverse on
+                // the patches-subtracted pre-gab planes.
+                let mut post_x = xyb_x_pre.clone();
+                let mut post_y = xyb_y_pre.clone();
+                let mut post_b = xyb_b_pre.clone();
+                jxl_encoder::__pre_quantized::gaborish_inverse(
+                    &mut post_x,
+                    &mut post_y,
+                    &mut post_b,
+                    cpu_pw,
+                    cpu_ph,
+                )
+                .map_err(jxl_encoder::api::EncodeError::from)?;
+                xyb_x = post_x;
+                xyb_y = post_y;
+                xyb_b = post_b;
+                // Recompute CfL pass 1 on patches-subtracted post-gab
+                // XYB. CfL pass 2 still runs inside
+                // encode_from_precomputed (cfl_two_pass at e>=7) —
+                // it takes the precomputed cfl_map as the pass-1 seed
+                // and refines on the actual ac_strategy + final qf.
+                cfl_map = compute_cfl_map(
+                    &xyb_x,
+                    &xyb_y,
+                    &xyb_b,
+                    cpu_pw,
+                    cpu_ph,
+                    xsize_blocks,
+                    ysize_blocks,
+                    true,
+                    1e-3,
+                    10,
+                );
+
+                // Case-1 contract: quant_field / masking / mask1x1 /
+                // ac_strategy MUST also be fitted to patches-subtracted
+                // XYB. The GPU plan computed them on UN-patched
+                // POST-gab XYB. Without recomputing here we'd hit
+                // case-1 codepath but with un-patched precomputed
+                // state — bytes match case-2 baseline (verified
+                // empirically). Mirrors what
+                // `EncoderPrecomputed::compute_with_budget` does at
+                // jxl-encoder/src/vardct/precomputed.rs:375-459.
+                //
+                // libjxl pipeline order:
+                //   quant_field / mask / mask1x1 on PRE-gab patches-subtracted XYB
+                //   gaborish (already applied above to post buffers)
+                //   ac_strategy on POST-gab patches-subtracted XYB
+                //
+                // k_ac_quant + EffortProfile pulled from
+                // VarDctEncoder::profile so distance-driven knobs
+                // match the bitstream emit path.
+                let vardct_for_profile = jxl_encoder::__pre_quantized::VarDctEncoder::new(distance);
+                let profile = &vardct_for_profile.profile;
+                let (qf, mk) = jxl_encoder::__pre_quantized::compute_quant_field_float_free(
+                    &xyb_x_pre,
+                    &xyb_y_pre,
+                    &xyb_b_pre,
+                    cpu_pw,
+                    cpu_ph,
+                    xsize_blocks,
+                    ysize_blocks,
+                    distance,
+                    profile.k_ac_quant,
+                )
+                .map_err(jxl_encoder::api::EncodeError::from)?;
+                quant_field_float = qf;
+                masking = mk;
+                mask1x1 = Some(jxl_encoder::__pre_quantized::compute_mask1x1(
+                    &xyb_y_pre, cpu_pw, cpu_ph,
+                ));
+
+                ac_strategy = jxl_encoder::__pre_quantized::compute_ac_strategy(
+                    &xyb_x,
+                    &xyb_y,
+                    &xyb_b,
+                    cpu_pw,
+                    cpu_ph,
+                    xsize_blocks,
+                    ysize_blocks,
+                    distance,
+                    &quant_field_float,
+                    &masking,
+                    &cfl_map,
+                    mask1x1.as_deref(),
+                    cpu_pw,
+                    profile,
+                );
+            }
+            pd
+        };
+
         // Step 7: assemble EncoderPrecomputed.
-        let precomputed = EncoderPrecomputed::from_parts(
+        let precomputed_base = EncoderPrecomputed::from_parts(
             width as usize,
             height as usize,
             xsize_blocks,
@@ -1995,7 +2137,7 @@ impl<R: Runtime> GpuEncoder<R> {
             None,
             quant_field_float.clone(),
             masking,
-            None,
+            mask1x1,
             ac_strategy,
             true, // gaborish_enabled (matches GPU's xyb_*_gpu output)
             distance,
@@ -2003,6 +2145,11 @@ impl<R: Runtime> GpuEncoder<R> {
             0,
         )
         .with_xyb_pre_gaborish([xyb_x_pre, xyb_y_pre, xyb_b_pre]);
+        let precomputed = if let Some(pd) = patches_data {
+            precomputed_base.with_patches_data(pd)
+        } else {
+            precomputed_base
+        };
 
         // Step 8: build the CPU VarDctEncoder + convert quant field.
         let vardct = VarDctEncoder::new(distance);
@@ -2255,12 +2402,109 @@ impl<R: Runtime> GpuEncoder<R> {
             &plan.xyb_y_pre_gab_gpu,
             &plan.xyb_b_pre_gab_gpu,
         );
-        let ((xyb_x_pre, xyb_y_pre), xyb_b_pre) = rayon::join(
+        let ((mut xyb_x_pre, mut xyb_y_pre), mut xyb_b_pre) = rayon::join(
             || rayon::join(|| repack(&xyb_x_pre), || repack(&xyb_y_pre)),
             || repack(&xyb_b_pre),
         );
 
-        let precomputed = EncoderPrecomputed::from_parts(
+        // Host-side patches detect/subtract for libjxl-parity case-1.
+        // See the matching block in
+        // encode_lossy_to_bitstream_via_precomputed for the full
+        // rationale (find → quantize → subtract pre-gab → gaborish →
+        // recompute CfL → recompute quant_field/mask/ac_strategy).
+        let mut xyb_x = xyb_x;
+        let mut xyb_y = xyb_y;
+        let mut xyb_b = xyb_b;
+        let mut cfl_map = cfl_map;
+        let mut quant_field_float = quant_field_float;
+        let mut masking = masking;
+        let mut ac_strategy = ac_strategy;
+        let mut mask1x1: Option<alloc::vec::Vec<f32>> = None;
+        let patches_data: Option<jxl_encoder::__pre_quantized::PatchesData> = {
+            let mut pd = jxl_encoder::__pre_quantized::find_and_build_patches(
+                [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
+                width as usize,
+                height as usize,
+                cpu_pw,
+            );
+            if let Some(ref mut p) = pd {
+                p.quantize_ref_image();
+                let mut pre = [
+                    core::mem::take(&mut xyb_x_pre),
+                    core::mem::take(&mut xyb_y_pre),
+                    core::mem::take(&mut xyb_b_pre),
+                ];
+                jxl_encoder::__pre_quantized::subtract_patches(&mut pre, cpu_pw, p);
+                let [x, y, b] = pre;
+                xyb_x_pre = x;
+                xyb_y_pre = y;
+                xyb_b_pre = b;
+                let mut post_x = xyb_x_pre.clone();
+                let mut post_y = xyb_y_pre.clone();
+                let mut post_b = xyb_b_pre.clone();
+                jxl_encoder::__pre_quantized::gaborish_inverse(
+                    &mut post_x,
+                    &mut post_y,
+                    &mut post_b,
+                    cpu_pw,
+                    cpu_ph,
+                )
+                .map_err(jxl_encoder::api::EncodeError::from)?;
+                xyb_x = post_x;
+                xyb_y = post_y;
+                xyb_b = post_b;
+                cfl_map = compute_cfl_map(
+                    &xyb_x,
+                    &xyb_y,
+                    &xyb_b,
+                    cpu_pw,
+                    cpu_ph,
+                    xsize_blocks,
+                    ysize_blocks,
+                    true,
+                    1e-3,
+                    10,
+                );
+                let vardct_for_profile = jxl_encoder::__pre_quantized::VarDctEncoder::new(distance);
+                let profile = &vardct_for_profile.profile;
+                let (qf, mk) = jxl_encoder::__pre_quantized::compute_quant_field_float_free(
+                    &xyb_x_pre,
+                    &xyb_y_pre,
+                    &xyb_b_pre,
+                    cpu_pw,
+                    cpu_ph,
+                    xsize_blocks,
+                    ysize_blocks,
+                    distance,
+                    profile.k_ac_quant,
+                )
+                .map_err(jxl_encoder::api::EncodeError::from)?;
+                quant_field_float = qf;
+                masking = mk;
+                mask1x1 = Some(jxl_encoder::__pre_quantized::compute_mask1x1(
+                    &xyb_y_pre, cpu_pw, cpu_ph,
+                ));
+                ac_strategy = jxl_encoder::__pre_quantized::compute_ac_strategy(
+                    &xyb_x,
+                    &xyb_y,
+                    &xyb_b,
+                    cpu_pw,
+                    cpu_ph,
+                    xsize_blocks,
+                    ysize_blocks,
+                    distance,
+                    &quant_field_float,
+                    &masking,
+                    &cfl_map,
+                    mask1x1.as_deref(),
+                    cpu_pw,
+                    profile,
+                );
+            }
+            pd
+        };
+
+        let precomputed_base = EncoderPrecomputed::from_parts(
             width as usize,
             height as usize,
             xsize_blocks,
@@ -2273,9 +2517,9 @@ impl<R: Runtime> GpuEncoder<R> {
             alloc::vec::Vec::new(),
             cfl_map,
             None,
-            quant_field_float,
+            quant_field_float.clone(),
             masking,
-            None,
+            mask1x1,
             ac_strategy,
             true,
             distance,
@@ -2283,6 +2527,20 @@ impl<R: Runtime> GpuEncoder<R> {
             0,
         )
         .with_xyb_pre_gaborish([xyb_x_pre, xyb_y_pre, xyb_b_pre]);
+        let precomputed = if let Some(pd) = patches_data {
+            precomputed_base.with_patches_data(pd)
+        } else {
+            precomputed_base
+        };
+
+        // `quant_field_u8` was built before the patches block from the
+        // *original* GPU-plan `quant_field_float`. When patches
+        // re-derived a new float field on host, regenerate the u8
+        // quant field so the bitstream matches the field the encoder
+        // sees. When no patches were detected the recompute is a
+        // no-op (quant_field_float is unchanged) but cheap relative
+        // to the encode itself.
+        let quant_field_u8 = quantize_quant_field(&quant_field_float, params.inv_scale);
 
         vardct
             .encode_from_precomputed(&precomputed, &quant_field_u8)
@@ -2561,11 +2819,75 @@ impl<R: Runtime> GpuEncoder<R> {
             &plan.xyb_y_pre_gab_gpu,
             &plan.xyb_b_pre_gab_gpu,
         );
-        let xyb_x_pre = repack_first(&xyb_x_pre_dl);
-        let xyb_y_pre = repack_first(&xyb_y_pre_dl);
-        let xyb_b_pre = repack_first(&xyb_b_pre_dl);
+        let mut xyb_x_pre = repack_first(&xyb_x_pre_dl);
+        let mut xyb_y_pre = repack_first(&xyb_y_pre_dl);
+        let mut xyb_b_pre = repack_first(&xyb_b_pre_dl);
 
-        let precomputed = EncoderPrecomputed::from_parts(
+        // Host-side patches detect/subtract for libjxl-parity case-1
+        // — see the matching block in
+        // encode_lossy_to_bitstream_via_precomputed for the rationale.
+        // refine_cfl_map (pass 2) ran above using the un-patched xyb;
+        // when patches subtract here, the decorrelation it computed
+        // is fitted to a slightly different residual. We replace the
+        // pass-1+pass-2 cfl_map with a fresh pass-1 fit on the
+        // patches-subtracted post-gab XYB; the encoder's
+        // `cfl_two_pass` runs pass-2 again inside
+        // encode_from_precomputed (cfl_two_pass at e>=7) on top of
+        // that seed, against the actual ac_strategy + final qf —
+        // matching the case-1 contract.
+        let mut xyb_x = xyb_x;
+        let mut xyb_y = xyb_y;
+        let mut xyb_b = xyb_b;
+        let patches_data: Option<jxl_encoder::__pre_quantized::PatchesData> = {
+            let mut pd = jxl_encoder::__pre_quantized::find_and_build_patches(
+                [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
+                width as usize,
+                height as usize,
+                cpu_pw,
+            );
+            if let Some(ref mut p) = pd {
+                p.quantize_ref_image();
+                let mut pre = [
+                    core::mem::take(&mut xyb_x_pre),
+                    core::mem::take(&mut xyb_y_pre),
+                    core::mem::take(&mut xyb_b_pre),
+                ];
+                jxl_encoder::__pre_quantized::subtract_patches(&mut pre, cpu_pw, p);
+                let [x, y, b] = pre;
+                xyb_x_pre = x;
+                xyb_y_pre = y;
+                xyb_b_pre = b;
+                let mut post_x = xyb_x_pre.clone();
+                let mut post_y = xyb_y_pre.clone();
+                let mut post_b = xyb_b_pre.clone();
+                jxl_encoder::__pre_quantized::gaborish_inverse(
+                    &mut post_x,
+                    &mut post_y,
+                    &mut post_b,
+                    cpu_pw,
+                    cpu_ph,
+                )
+                .map_err(jxl_encoder::api::EncodeError::from)?;
+                xyb_x = post_x;
+                xyb_y = post_y;
+                xyb_b = post_b;
+                cfl_map = compute_cfl_map(
+                    &xyb_x,
+                    &xyb_y,
+                    &xyb_b,
+                    cpu_pw,
+                    cpu_ph,
+                    xsize_blocks,
+                    ysize_blocks,
+                    true,
+                    1e-3,
+                    10,
+                );
+            }
+            pd
+        };
+
+        let precomputed_base = EncoderPrecomputed::from_parts(
             width as usize,
             height as usize,
             xsize_blocks,
@@ -2588,6 +2910,11 @@ impl<R: Runtime> GpuEncoder<R> {
             0,
         )
         .with_xyb_pre_gaborish([xyb_x_pre, xyb_y_pre, xyb_b_pre]);
+        let precomputed = if let Some(pd) = patches_data {
+            precomputed_base.with_patches_data(pd)
+        } else {
+            precomputed_base
+        };
 
         // Thread the per-iter SetQuantField recompute (matching CPU
         // `vardct/butteraugli_loop.rs`) through to the bitstream:
