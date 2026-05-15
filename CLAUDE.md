@@ -755,3 +755,35 @@ d≥3, etc.) free to drop, since whole-image trial is cheap on GPU.
 - List MISSING before PRESENT in any status report.
 - Tests passing ≠ feature working — run `parity_real_image.rs` end-to-end.
 - See ~/.claude/CLAUDE.md "NEVER CLAIM FALSE COMPLETION" for the full discipline.
+
+## Dropped optimizations log
+
+The GPU encoder reached RD-pareto parity vs cjxl/libjxl on 2026-05-15 by mirroring
+the CPU encoder closely. Several optimizations the GPU could in principle do were
+intentionally NOT shipped because they would produce GPU != CPU bytes that
+parity tests, byte-identical hash locks, or screenshot/photo regression suites
+would catch.
+
+The canonical catalog (with file:line refs, commit hashes, estimated wall-clock /
+file-size impact, and re-enable instructions) lives in:
+
+  `~/.claude/projects/-home-lilith-work-zen-jxl-encoder/memory/dropped_optimizations_for_parity_2026-05-15.md`
+
+Top 5 highest-cost drops to revisit first when relaxing bit-exact:
+
+1. **CPU `transform_and_quantize` slow-path round-trip** (50-66% of e7 wall-clock
+   at 12 MP on photos). Multi-week project to GPU-port `AdjustQuantBlockAC` +
+   patches detection + CfL pass 2.
+2. **Per-strategy `entropy_mul` lifted above libjxl reference** (1-3% file size,
+   mixed direction). Gated by missing libjxl counterweights (kAvoidEntropyOfTransforms,
+   X-channel multi-block weight).
+3. **AFV0-3 cost-grid evaluation default-OFF** (`with_evaluate_afv` opt-in).
+   `corpus_regression` byte-identical invariant. Few-percent on screenshots, 0
+   on photos.
+4. **DCT8 fast-path bit-divergence accepted** (~2% chroma AC coefs flip by 1 near
+   rounding ties). Already shipped — saves 60+28+9 ms / encode.
+5. **Patches detection skipped on all-DCT8 fast path** (30-50% on rare pure-DCT8
+   screenshots).
+
+Update the memory file (NOT this CLAUDE.md) when adding new drops or revisiting
+existing ones — that file is the source of truth.
