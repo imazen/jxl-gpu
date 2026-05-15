@@ -1,0 +1,46 @@
+# rd_pareto_vs_cjxl TSV
+# generated_utc	2026-05-15T06:11:00Z
+# git_commit	11a90ad
+# hostname	lilith
+# cmdline	./target/release/examples/rd_pareto_vs_cjxl --image /home/lilith/work/codec-corpus/gb82-sc/terminal.png --image /home/lilith/work/codec-corpus/gb82-sc/codec_wiki.png --image /home/lilith/work/codec-corpus/gb82-sc/windows95.png --image /home/lilith/work/codec-corpus/gb82-sc/imac_g3.png --distance 0.5 --distance 1.0 --distance 2.0 --encoder gpu_e7 --encoder gpu_e8 --encoder cjxl_e7 --out /home/lilith/work/zen/jxl-encoder-gpu/benchmarks/rd_pareto_d0.5_screenshots_post_fix.tsv
+# n_images	4
+# distances	[0.5, 1.0, 2.0]
+# encoders	["gpu_e7", "gpu_e8", "cjxl_e7"]
+# runs	1
+image	width	height	encoder	effort	distance	bytes	measured_bfly	measured_ssim2	encode_ms
+terminal	1646	1062	gpu_e7	7	0.5	60483	0.522399	94.618181	1888.46
+terminal	1646	1062	gpu_e8	8	0.5	74774	0.569422	94.697270	614.68
+terminal	1646	1062	cjxl_e7	7	0.5	54404	0.392752	95.499922	176.88
+terminal	1646	1062	gpu_e7	7	1	63175	0.789396	91.869266	229.78
+terminal	1646	1062	gpu_e8	8	1	54358	1.321088	89.578484	251.06
+terminal	1646	1062	cjxl_e7	7	1	55034	0.758913	94.188551	224.85
+terminal	1646	1062	gpu_e7	7	2	51197	1.371722	88.864155	227.00
+terminal	1646	1062	gpu_e8	8	2	40592	2.387119	85.186260	259.39
+terminal	1646	1062	cjxl_e7	7	2	43730	1.331995	91.973322	213.60
+codec_wiki	2560	1664	gpu_e7	7	0.5	124907	0.818271	92.800521	3182.97
+codec_wiki	2560	1664	gpu_e8	8	0.5	239053	5.667752	73.812145	728.05
+codec_wiki	2560	1664	cjxl_e7	7	0.5	149514	0.804164	92.716574	167.49
+codec_wiki	2560	1664	gpu_e7	7	1	116673	1.054544	90.183190	522.68
+codec_wiki	2560	1664	gpu_e8	8	1	179480	23.136829	26.606993	714.30
+codec_wiki	2560	1664	cjxl_e7	7	1	135624	1.084701	91.345955	274.82
+codec_wiki	2560	1664	gpu_e7	7	2	93748	1.986435	86.351914	557.07
+codec_wiki	2560	1664	gpu_e8	8	2	81634	4.073726	80.552517	702.67
+codec_wiki	2560	1664	cjxl_e7	7	2	104013	2.023521	88.209761	272.13
+windows95	640	480	gpu_e7	7	0.5	50493	0.733574	91.756229	51.55
+windows95	640	480	gpu_e8	8	0.5	53333	1.204814	88.627824	72.21
+windows95	640	480	cjxl_e7	7	0.5	45869	0.748572	93.836191	65.27
+windows95	640	480	gpu_e7	7	1	51672	1.255012	87.801497	60.97
+windows95	640	480	gpu_e8	8	1	49331	1.817441	85.191070	86.83
+windows95	640	480	cjxl_e7	7	1	49468	1.203257	89.985830	70.18
+windows95	640	480	gpu_e7	7	2	39650	2.251198	81.722583	61.03
+windows95	640	480	gpu_e8	8	2	37599	2.902717	76.362993	84.96
+windows95	640	480	cjxl_e7	7	2	39088	2.092393	83.327137	72.12
+imac_g3	2940	1912	gpu_e7	7	0.5	328060	66.006279	6.224510	679.55
+imac_g3	2940	1912	gpu_e8	8	0.5	481059	65.998154	6.234262	712.94
+imac_g3	2940	1912	cjxl_e7	7	0.5	594148	0.710297	90.105357	204.34
+imac_g3	2940	1912	gpu_e7	7	1	299451	65.964378	6.290733	763.80
+imac_g3	2940	1912	gpu_e8	8	1	341044	66.036942	6.237024	902.66
+imac_g3	2940	1912	cjxl_e7	7	1	545063	1.311114	88.336552	328.02
+imac_g3	2940	1912	gpu_e7	7	2	249036	65.988503	5.912238	811.72
+imac_g3	2940	1912	gpu_e8	8	2	221138	65.934082	5.533998	944.29
+imac_g3	2940	1912	cjxl_e7	7	2	415358	1.892595	85.233444	345.47

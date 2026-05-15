@@ -2031,17 +2031,25 @@ impl<R: Runtime> GpuEncoder<R> {
                 // (what `precomputed.xyb_*` is contracted to hold for
                 // case-1) by re-running the 5x5 gaborish_inverse on
                 // the patches-subtracted pre-gab planes.
+                //
+                // libjxl-parity gate: at distance <= 0.5, gaborish is
+                // disabled (enc_frame.cc:281, mirrored in
+                // jxl-encoder/src/api.rs:3842). Skip the inverse so
+                // post-gab equals pre-gab — matches what cjxl produces
+                // and what we now signal in `vardct.enable_gaborish`.
                 let mut post_x = xyb_x_pre.clone();
                 let mut post_y = xyb_y_pre.clone();
                 let mut post_b = xyb_b_pre.clone();
-                jxl_encoder::__pre_quantized::gaborish_inverse(
-                    &mut post_x,
-                    &mut post_y,
-                    &mut post_b,
-                    cpu_pw,
-                    cpu_ph,
-                )
-                .map_err(jxl_encoder::api::EncodeError::from)?;
+                if distance > 0.5 {
+                    jxl_encoder::__pre_quantized::gaborish_inverse(
+                        &mut post_x,
+                        &mut post_y,
+                        &mut post_b,
+                        cpu_pw,
+                        cpu_ph,
+                    )
+                    .map_err(jxl_encoder::api::EncodeError::from)?;
+                }
                 xyb_x = post_x;
                 xyb_y = post_y;
                 xyb_b = post_b;
@@ -2083,6 +2091,14 @@ impl<R: Runtime> GpuEncoder<R> {
                 // match the bitstream emit path.
                 let vardct_for_profile = jxl_encoder::__pre_quantized::VarDctEncoder::new(distance);
                 let profile = &vardct_for_profile.profile;
+                // libjxl-parity: when gaborish is off the iqf is
+                // computed at `distance * 0.62` (see
+                // jxl-encoder/src/vardct/encoder.rs:869-876).
+                let distance_for_iqf = if distance > 0.5 {
+                    distance
+                } else {
+                    distance * 0.62
+                };
                 let (qf, mk) = jxl_encoder::__pre_quantized::compute_quant_field_float_free(
                     &xyb_x_pre,
                     &xyb_y_pre,
@@ -2091,7 +2107,7 @@ impl<R: Runtime> GpuEncoder<R> {
                     cpu_ph,
                     xsize_blocks,
                     ysize_blocks,
-                    distance,
+                    distance_for_iqf,
                     profile.k_ac_quant,
                 )
                 .map_err(jxl_encoder::api::EncodeError::from)?;
@@ -2152,7 +2168,13 @@ impl<R: Runtime> GpuEncoder<R> {
         };
 
         // Step 8: build the CPU VarDctEncoder + convert quant field.
-        let vardct = VarDctEncoder::new(distance);
+        // Mirror libjxl's gaborish gate: at d <= 0.5, gaborish is
+        // disabled (enc_frame.cc:281 → CPU api.rs:3842). The bitstream
+        // emit signals `fh.gaborish = self.enable_gaborish` so the
+        // decoder must NOT apply the 3x3 blur — required to match the
+        // un-sharpened XYB the prepare path now produces.
+        let mut vardct = VarDctEncoder::new(distance);
+        vardct.enable_gaborish = distance > 0.5;
         let params = DistanceParams::compute_for_profile(distance, &vardct.profile);
         let quant_field_u8 = quantize_quant_field(&quant_field_float, params.inv_scale);
 
@@ -2273,7 +2295,13 @@ impl<R: Runtime> GpuEncoder<R> {
             && (0..ysize_blocks)
                 .all(|by| (0..xsize_blocks).all(|bx| ac_strategy.raw_strategy(bx, by) == 0));
 
-        let vardct = VarDctEncoder::new(distance);
+        // Mirror libjxl's gaborish gate: at d <= 0.5, gaborish is
+        // disabled (enc_frame.cc:281 → CPU api.rs:3842). The bitstream
+        // emit signals `fh.gaborish = self.enable_gaborish` so the
+        // decoder must NOT apply the 3x3 blur — required to match the
+        // un-sharpened XYB the prepare path now produces.
+        let mut vardct = VarDctEncoder::new(distance);
+        vardct.enable_gaborish = distance > 0.5;
         let params = DistanceParams::compute_for_profile(distance, &vardct.profile);
 
         let quant_field_float = plan.quant_field_float.clone();
@@ -2439,17 +2467,22 @@ impl<R: Runtime> GpuEncoder<R> {
                 xyb_x_pre = x;
                 xyb_y_pre = y;
                 xyb_b_pre = b;
+                // libjxl-parity gate: skip gaborish_inverse at d <= 0.5
+                // — see corresponding block in
+                // encode_lossy_to_bitstream_via_precomputed.
                 let mut post_x = xyb_x_pre.clone();
                 let mut post_y = xyb_y_pre.clone();
                 let mut post_b = xyb_b_pre.clone();
-                jxl_encoder::__pre_quantized::gaborish_inverse(
-                    &mut post_x,
-                    &mut post_y,
-                    &mut post_b,
-                    cpu_pw,
-                    cpu_ph,
-                )
-                .map_err(jxl_encoder::api::EncodeError::from)?;
+                if distance > 0.5 {
+                    jxl_encoder::__pre_quantized::gaborish_inverse(
+                        &mut post_x,
+                        &mut post_y,
+                        &mut post_b,
+                        cpu_pw,
+                        cpu_ph,
+                    )
+                    .map_err(jxl_encoder::api::EncodeError::from)?;
+                }
                 xyb_x = post_x;
                 xyb_y = post_y;
                 xyb_b = post_b;
@@ -2467,6 +2500,14 @@ impl<R: Runtime> GpuEncoder<R> {
                 );
                 let vardct_for_profile = jxl_encoder::__pre_quantized::VarDctEncoder::new(distance);
                 let profile = &vardct_for_profile.profile;
+                // libjxl-parity: when gaborish is off the iqf is
+                // computed at `distance * 0.62` (see
+                // jxl-encoder/src/vardct/encoder.rs:869-876).
+                let distance_for_iqf = if distance > 0.5 {
+                    distance
+                } else {
+                    distance * 0.62
+                };
                 let (qf, mk) = jxl_encoder::__pre_quantized::compute_quant_field_float_free(
                     &xyb_x_pre,
                     &xyb_y_pre,
@@ -2475,7 +2516,7 @@ impl<R: Runtime> GpuEncoder<R> {
                     cpu_ph,
                     xsize_blocks,
                     ysize_blocks,
-                    distance,
+                    distance_for_iqf,
                     profile.k_ac_quant,
                 )
                 .map_err(jxl_encoder::api::EncodeError::from)?;
@@ -2776,6 +2817,12 @@ impl<R: Runtime> GpuEncoder<R> {
         // encoder threads these through `self.profile.cfl_newton*` at
         // vardct/encoder.rs:1305-1307, and we need the same knobs here.
         let mut vardct = VarDctEncoder::new(distance);
+        // Mirror libjxl's gaborish gate: at d <= 0.5, gaborish is
+        // disabled (enc_frame.cc:281 → CPU api.rs:3842). The bitstream
+        // emit signals `fh.gaborish = self.enable_gaborish` so the
+        // decoder must NOT apply the 3x3 blur — required to match the
+        // un-sharpened XYB the prepare path now produces.
+        vardct.enable_gaborish = distance > 0.5;
         let profile_params = DistanceParams::compute_for_profile(distance, &vardct.profile);
 
         // CfL pass 2: refine the map using the actual AC strategy and the
@@ -2857,17 +2904,22 @@ impl<R: Runtime> GpuEncoder<R> {
                 xyb_x_pre = x;
                 xyb_y_pre = y;
                 xyb_b_pre = b;
+                // libjxl-parity gate: skip gaborish_inverse at d <= 0.5
+                // — see corresponding block in
+                // encode_lossy_to_bitstream_via_precomputed.
                 let mut post_x = xyb_x_pre.clone();
                 let mut post_y = xyb_y_pre.clone();
                 let mut post_b = xyb_b_pre.clone();
-                jxl_encoder::__pre_quantized::gaborish_inverse(
-                    &mut post_x,
-                    &mut post_y,
-                    &mut post_b,
-                    cpu_pw,
-                    cpu_ph,
-                )
-                .map_err(jxl_encoder::api::EncodeError::from)?;
+                if distance > 0.5 {
+                    jxl_encoder::__pre_quantized::gaborish_inverse(
+                        &mut post_x,
+                        &mut post_y,
+                        &mut post_b,
+                        cpu_pw,
+                        cpu_ph,
+                    )
+                    .map_err(jxl_encoder::api::EncodeError::from)?;
+                }
                 xyb_x = post_x;
                 xyb_y = post_y;
                 xyb_b = post_b;

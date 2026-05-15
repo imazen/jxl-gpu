@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Fixed (May 15, 2026)
+
+- **libjxl-parity gaborish gate at d ≤ 0.5 (RD-pareto wedge)**: GPU
+  bitstream emit ran the 5×5 gaborish sharpening unconditionally and
+  signaled `fh.gaborish=true` to the decoder, but cjxl/CPU rate-control
+  skip both the encoder gaborish AND the decoder 3×3 gab_smooth at
+  `distance ≤ 0.5` (libjxl `enc_frame.cc:281`, mirrored in
+  `jxl-encoder/src/api.rs:3842`). At d=0.5 the encoder ALSO scales the
+  quant-field input distance by 0.62 to compensate for the missing
+  sharpening (`jxl-encoder/src/vardct/encoder.rs:869-876`). The mismatch
+  cost screenshots 8-27% butteraugli vs CPU rate-control. This change
+  mirrors all three pieces in `prepare_strategy_search_plan_inner`,
+  `run_pipeline_with_qac`, `encode_with_strategy_plan_adaptive_persistent_traced`,
+  and the three `encode_lossy_to_bitstream_via_precomputed*` entry
+  points (`vardct.enable_gaborish = distance > 0.5` + skip the
+  patches-branch `gaborish_inverse` + use `distance * 0.62` for
+  `compute_quant_field_float_free`). Photos at d=1.0 byte-identical
+  (02809272 = 297492). Screenshots at d=0.5 (gpu_e7) closed the wedge:
+  terminal 0.678 → 0.522 bfly (-23%, 178 KB → 60 KB), codec_wiki 0.961
+  → 0.818 (-15%, 153 KB → 125 KB), windows95 1.358 → 0.734 (-46%,
+  79 KB → 50 KB). Corpus regression `EXPECTED_SCORES` rebaselined for
+  d=0.5 photo entries (smart-turnkey reconstruction sees a small
+  butteraugli regression on photos at d=0.5 because gaborish was a net
+  win for them — accepted as the cost of cjxl bitstream parity). Sweep
+  archive at `benchmarks/rd_pareto_d0.5_screenshots_post_fix.tsv`.
+
 ### Fixed (May 14, 2026)
 
 - **GPU↔CPU strategy code remap (issue #5)**: GPU's `RAW_STRATEGY_*`

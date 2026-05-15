@@ -149,61 +149,77 @@ const EXPECTED_SCORES: &[(&str, f32, f32, BestOfBothPath)] = &[
         BestOfBothPath::SkippedStratSearchAsScreenshot,
     ),
     // ===== d=0.5 (high-quality web) =====
+    //
+    // 2026-05-15: scores rebaselined after the libjxl-parity gaborish
+    // gate (commit TBD). At d <= 0.5 cjxl skips both encoder gaborish
+    // (5x5 sharpening) and decoder gab_smooth (3x3 blur) per
+    // enc_frame.cc:281; we now mirror that. The smart turnkey's
+    // run_pipeline_with_qac and encode_with_strategy_plan both gate
+    // gaborish at d <= 0.5 (run_pipeline derives distance from qac
+    // mean, encode_with_strategy_plan reads plan.target_distance).
+    // Photos at d=0.5 see slightly higher butteraugli scores in the
+    // smart-turnkey reconstruction (gaborish was a small net win for
+    // photos here) but the BITSTREAM emit now matches cjxl rate-
+    // control closely on screenshots — terminal d=0.5 GPU bfly
+    // dropped 0.678 → 0.522 (-23%), with corresponding bytes drop.
+    // This rebaseline accepts the photo regression as the cost of
+    // bitstream-vs-cjxl parity; see CHANGELOG entry for details.
     (
         "clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png",
         0.5,
-        0.6641,
-        BestOfBothPath::RefineStratSearch,
+        0.6708,
+        BestOfBothPath::RefineDct8,
     ),
     (
         "clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png",
         0.5,
-        0.6705,
-        BestOfBothPath::Tie,
+        0.6497,
+        BestOfBothPath::RefineStratSearch,
     ),
     (
         "clic2025-1024/0d154749c7771f58e89ad343653ec4e20d6f037da829f47f5598e5d0a4ab61f0.png",
         0.5,
-        0.5272,
-        BestOfBothPath::Tie,
+        0.5541,
+        BestOfBothPath::RefineDct8,
     ),
     (
         "clic2025-1024/1e2f9d41529197f1.png",
         0.5,
-        0.5071,
-        BestOfBothPath::Tie,
+        0.5521,
+        BestOfBothPath::RefineDct8,
     ),
     (
         "clic2025-1024/1cba10ad9bb4ced57e42f7656c5f2a58d32dc6bad084957d2f8d1c78e0fcd224.png",
         0.5,
-        0.6554,
-        BestOfBothPath::RefineDct8,
+        0.6859,
+        BestOfBothPath::RefineStratSearch,
     ),
     (
         "clic2025-1024/0c49a5cce349020bbba2f97ae41e90ba.png",
         0.5,
-        0.6380,
-        BestOfBothPath::RefineDct8,
+        0.6811,
+        BestOfBothPath::RefineStratSearch,
     ),
     (
         "clic2025-1024/11f2b039b293758398b1a7a8afa64bb2.png",
         0.5,
-        0.7292,
+        0.7461,
         BestOfBothPath::RefineDct8,
     ),
-    // d=0.5 score improved 0.7397 → 0.7109 (DCT64 6→5) → 0.6957
-    // (DCT64 5→4.8) — total 5.9% improvement from the original 6.0
-    // baseline. Strat-search picks DCT64 here for real gain.
+    // d=0.5: pre-fix history was 0.7397 → 0.7109 (DCT64 6→5) → 0.6957
+    // (DCT64 5→4.8). Post-gaborish-gate rebaseline lands at 0.7234
+    // — strat-search no longer picks DCT64 here at d=0.5 because the
+    // un-sharpened XYB shifts cost-grid picks toward DCT8.
     (
         "clic2025-1024/22ea12c903e41583.png",
         0.5,
-        0.6957,
-        BestOfBothPath::RefineStratSearch,
+        0.7234,
+        BestOfBothPath::RefineDct8,
     ),
     (
         "clic2025-1024/2684452db505ddbb.png",
         0.5,
-        0.6667,
+        0.6803,
         BestOfBothPath::RefineStratSearch,
     ),
     (

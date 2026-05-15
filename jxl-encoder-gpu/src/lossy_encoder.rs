@@ -1274,10 +1274,34 @@ impl<R: Runtime> LossyEncoder<R> {
 
         // Stage 2: XYB + gaborish (GPU). Stage 1 (upload) was done by
         // the caller; planes are already on device.
+        //
+        // libjxl gates gaborish at distance > 0.5 (enc_frame.cc:281).
+        // The CPU API mirrors this at jxl-encoder/src/api.rs:3842
+        // (`enc.enable_gaborish = cfg.gaborish && effective_distance > 0.5`).
+        // At d <= 0.5 cjxl skips gaborish entirely AND scales the quant
+        // field's input distance by 0.62 (vardct/bitstream.rs:1261-1265,
+        // also vardct/encoder.rs:869-876). Without this gate the GPU
+        // produced gaborished XYB at d=0.5 while the bitstream emit
+        // signaled `enable_gaborish=true` to the decoder — but cjxl at
+        // d=0.5 produces UN-sharpened XYB and signals `gaborish=false`,
+        // so screenshots regressed by 8-27% bfly vs CPU rate-control
+        // (terminal: GPU 1.393 vs CPU 1.094). Mirror the gate here.
+        let enable_gaborish_local = target_distance > 0.5;
         let (xx, xy, xb) = enc.xyb_from_linear_rgb_persistent(&g_r, &g_g, &g_b);
-        let xx_g = enc.gaborish_5x5_persistent(&xx, &self.weights);
-        let xy_g = enc.gaborish_5x5_persistent(&xy, &self.weights);
-        let xb_g = enc.gaborish_5x5_persistent(&xb, &self.weights);
+        let (xx_g, xy_g, xb_g) = if enable_gaborish_local {
+            (
+                enc.gaborish_5x5_persistent(&xx, &self.weights),
+                enc.gaborish_5x5_persistent(&xy, &self.weights),
+                enc.gaborish_5x5_persistent(&xb, &self.weights),
+            )
+        } else {
+            // Refcount-only clones (see GpuPlane Clone impl, persistent.rs:139).
+            // No PCIe traffic, no GPU work; downstream stages see un-sharpened
+            // XYB and the StrategySearchPlan's xyb_x_pre_gab_gpu and xyb_x_gpu
+            // happen to point at the same buffer (correct — pre and post are
+            // identical when gaborish is skipped).
+            (xx.clone(), xy.clone(), xb.clone())
+        };
 
         // Stage 3: mask1x1 from Y channel — keep on GPU.
         //
@@ -2341,6 +2365,17 @@ impl<R: Runtime> LossyEncoder<R> {
         // 0/4257 blocks land on a different u8 bucket at 1025×257.
         let cpu_pw = (w).div_ceil(8) * 8;
         let cpu_ph = (h).div_ceil(8) * 8;
+        // libjxl-parity: when gaborish is disabled, the quant field is
+        // computed at `distance * 0.62` (a tighter target) to compensate
+        // for the missing 5x5 sharpening filter. See
+        // jxl-encoder/src/vardct/bitstream.rs:1261-1265 and
+        // vardct/encoder.rs:869-876. AC strategy + cost grids still see
+        // raw `target_distance` — only this iqf computation rescales.
+        let distance_for_iqf = if enable_gaborish_local {
+            target_distance
+        } else {
+            target_distance * 0.62
+        };
         let (quant_field_float, masking) =
             crate::forks::adaptive_quant::compute_quant_field_full_persistent(
                 enc,
@@ -2349,7 +2384,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 &xb_g,
                 cpu_pw,
                 cpu_ph,
-                target_distance,
+                distance_for_iqf,
                 K_AC_QUANT,
             );
         mark("gpu_quant_field");
@@ -2735,14 +2770,22 @@ impl<R: Runtime> LossyEncoder<R> {
         // run_pipeline_with_qac. EPF closes most of the perceptual gap
         // vs the uniform-qac DCT8 baseline.
         //
+        // libjxl-parity gaborish gate: when prepare_strategy_search_plan
+        // skipped the 5x5 sharpening at d <= 0.5, the decoder-side
+        // gab_smooth (3x3 blur) MUST also be skipped or the recon
+        // becomes blurry vs what the bitstream emit produces (which
+        // signals fh.gaborish=false → decoder skips its own gab_smooth).
         // recon_x_p / _y_p / _b_p are the GpuPlanes the mixed-strategy
         // reconstruct scattered into above. No upload needed —
         // gab_smooth_3ch_persistent consumes them directly. ONE launch
         // for all 3 channels (vs 3 separate gab_smooth_persistent
         // calls); same per-thread arithmetic, fewer launch barriers.
-        let (gw_c, gw1, gw2) = gab_weights();
-        let (recon_x_p, recon_y_p, recon_b_p) =
-            enc.gab_smooth_3ch_persistent(&recon_x_p, &recon_y_p, &recon_b_p, gw_c, gw1, gw2);
+        let (recon_x_p, recon_y_p, recon_b_p) = if plan.target_distance > 0.5 {
+            let (gw_c, gw1, gw2) = gab_weights();
+            enc.gab_smooth_3ch_persistent(&recon_x_p, &recon_y_p, &recon_b_p, gw_c, gw1, gw2)
+        } else {
+            (recon_x_p, recon_y_p, recon_b_p)
+        };
 
         // EPF step 1+2 (matches run_pipeline_with_qac). Per-block qac maps
         // to u8 quant_field via `clamp(qac * 50, 1, 255)`; sharpness is
@@ -3015,6 +3058,21 @@ impl<R: Runtime> LossyEncoder<R> {
 
     /// Per-block adaptive variant of `run_pipeline`. Takes a precomputed
     /// per-block qac_qm field instead of broadcasting a scalar.
+    ///
+    /// libjxl-parity gaborish gate: skip both encoder gaborish_5x5 AND
+    /// decoder gab_smooth when the effective central distance is
+    /// <= 0.5, matching the bitstream emit path. Distance is recovered
+    /// from the qac field's mean (= K_AC_QUANT / mean(qac)) — for
+    /// uniform encodes that's exact; for adaptive
+    /// `block_means_to_qac_field(R=2)` the mean stays close to the
+    /// central qac_uniform = K_AC_QUANT/target_distance, so the gate
+    /// decision lines up with the `target_distance` used by
+    /// `prepare_strategy_search_plan_inner` at the same overall
+    /// distance. Pre-fix the pipeline ran gaborish unconditionally →
+    /// smart turnkey's strat-search-vs-DCT8 comparison was made
+    /// against gaborized reconstruction even when the bitstream was
+    /// un-sharpened, so the pick disagreed with what the bitstream
+    /// actually shipped.
     fn run_pipeline_with_qac(
         &self,
         enc: &GpuEncoder<R>,
@@ -3026,10 +3084,30 @@ impl<R: Runtime> LossyEncoder<R> {
         let xf = vec![0.0_f32; self.num_blocks as usize];
         let bf = vec![0.0_f32; self.num_blocks as usize];
 
+        // Recover central distance from qac field. mean stays close to
+        // central qac for both uniform and adaptive encodes.
+        let qac_mean: f32 = if qac_vec.is_empty() {
+            distance_to_qac(1.0)
+        } else {
+            qac_vec.iter().copied().sum::<f32>() / (qac_vec.len() as f32)
+        };
+        let derived_distance = if qac_mean > 0.0 {
+            K_AC_QUANT / qac_mean
+        } else {
+            1.0
+        };
+        let enable_gaborish_local = derived_distance > 0.5;
         let (xx, xy, xb) = enc.xyb_from_linear_rgb_persistent(g_r, g_g, g_b);
-        let xx_g = enc.gaborish_5x5_persistent(&xx, &self.weights);
-        let xy_g = enc.gaborish_5x5_persistent(&xy, &self.weights);
-        let xb_g = enc.gaborish_5x5_persistent(&xb, &self.weights);
+        let (xx_g, xy_g, xb_g) = if enable_gaborish_local {
+            (
+                enc.gaborish_5x5_persistent(&xx, &self.weights),
+                enc.gaborish_5x5_persistent(&xy, &self.weights),
+                enc.gaborish_5x5_persistent(&xb, &self.weights),
+            )
+        } else {
+            // Refcount-only clone (see GpuPlane Clone impl, persistent.rs:139).
+            (xx.clone(), xy.clone(), xb.clone())
+        };
         let bx_g = enc.gather_blocks_persistent(&xx_g, 8, 8);
         let by_g = enc.gather_blocks_persistent(&xy_g, 8, 8);
         let bb_g = enc.gather_blocks_persistent(&xb_g, 8, 8);
@@ -3086,10 +3164,20 @@ impl<R: Runtime> LossyEncoder<R> {
         // XYB before xyb_to_linear; without it, the gaborish
         // pre-sharpening from the encoder side persists in the output
         // and the reconstruction is over-sharp/blocky.
-        let (gw_c, gw1, gw2) = crate::forks::reconstruct::gab_weights();
-        let recon_x_p = enc.gab_smooth_persistent(&recon_x_p, gw_c, gw1, gw2);
-        let recon_y_p = enc.gab_smooth_persistent(&recon_y_p, gw_c, gw1, gw2);
-        let recon_b_p = enc.gab_smooth_persistent(&recon_b_p, gw_c, gw1, gw2);
+        //
+        // libjxl-parity gaborish gate: at d <= 0.5 the encoder did NOT
+        // sharpen, so the decoder must NOT smooth either — `fh.gaborish`
+        // signals false and the decoder skips the 3x3 blur. Mirror.
+        let (recon_x_p, recon_y_p, recon_b_p) = if enable_gaborish_local {
+            let (gw_c, gw1, gw2) = crate::forks::reconstruct::gab_weights();
+            (
+                enc.gab_smooth_persistent(&recon_x_p, gw_c, gw1, gw2),
+                enc.gab_smooth_persistent(&recon_y_p, gw_c, gw1, gw2),
+                enc.gab_smooth_persistent(&recon_b_p, gw_c, gw1, gw2),
+            )
+        } else {
+            (recon_x_p, recon_y_p, recon_b_p)
+        };
 
         // EPF chain (decoder edge-preserving filter). Runs after
         // gab_smooth on the reconstructed XYB planes, before

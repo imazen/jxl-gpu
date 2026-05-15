@@ -1,0 +1,93 @@
+# RD-pareto sweep — libjxl-parity gaborish gate at d <= 0.5
+# 2026-05-15
+
+## Change under test
+
+GPU bitstream emit now mirrors cjxl's gaborish gate:
+
+- `prepare_strategy_search_plan_inner` (lossy_encoder.rs:1289-1304):
+  skip `gaborish_5x5_persistent` when `target_distance <= 0.5`. The
+  XYB stays un-sharpened; downstream mask, AQ, cost-grids, and the
+  `xyb_*_gpu` fields all see the un-sharpened plane.
+- `compute_quant_field_full_persistent` is called with
+  `distance_for_iqf = target_distance * 0.62` when the gate fires,
+  matching libjxl `vardct/encoder.rs:869-876`.
+- `run_pipeline_with_qac` (lossy_encoder.rs:3069+): derives effective
+  central distance from the qac-field mean, gates both encoder
+  gaborish and decoder gab_smooth on `derived_distance > 0.5`.
+- `encode_with_strategy_plan_adaptive_persistent_traced` (lossy_encoder.rs:2778+):
+  reads `plan.target_distance` directly to gate the postpass
+  `gab_smooth_3ch_persistent`.
+- All three `encode_lossy_to_bitstream_via_precomputed*` entry points
+  in encoder.rs:
+  - set `vardct.enable_gaborish = distance > 0.5` so the bitstream
+    signals `fh.gaborish=false` to the decoder at d <= 0.5;
+  - skip the patches-branch host-side `gaborish_inverse` at d <= 0.5;
+  - use `distance_for_iqf = distance * 0.62` for the patches-branch
+    `compute_quant_field_float_free` recompute.
+
+## Image set
+
+4 screenshots from `gb82-sc/`:
+- `terminal.png` (1646×1062)
+- `codec_wiki.png` (2560×1664)
+- `windows95.png` (640×480)
+- `imac_g3.png` (2940×1912) — pre-existing broken on main at d>=0.5
+  (bfly=66 across distances, bytes <60% of cjxl). Independent bug,
+  unrelated to this fix; verified by re-running the same sweep on
+  `main@origin` with no local changes.
+
+## Distances
+
+0.5, 1.0, 2.0
+
+## Encoders
+
+- `gpu_e7` (`encode_lossy_to_bitstream_via_precomputed`)
+- `gpu_e8` (`encode_lossy_to_bitstream_via_precomputed_with_butteraugli`, 2 iters)
+- `cjxl_e7` (libjxl's cjxl, effort 7)
+
+## Hardware / setup
+
+- AMD Ryzen 9 7950X
+- NVIDIA RTX (CUDA backend via cubecl 0.10)
+- libjxl `cjxl` v0.12.0 from `/home/lilith/work/jxl-efforts/libjxl/build/tools/cjxl`
+- jxl-oxide for decode + Rust butteraugli for measurement (sRGB-linear
+  request enforces TF parity per jxl-encoder CLAUDE.md)
+
+## Headline result
+
+| Image | distance | pre-fix bfly | post-fix bfly | post-fix vs cjxl bfly | Δbytes vs cjxl |
+|---|---:|---:|---:|---:|---:|
+| terminal | 0.5 | 0.678 | **0.522** | 0.393 | +11% |
+| codec_wiki | 0.5 | 0.961 | **0.818** | 0.804 | -16% (smaller!) |
+| windows95 | 0.5 | 1.358 | **0.734** | 0.749 | +10% |
+
+Pre-fix at d=0.5: terminal +73% bfly vs cjxl, +228% bytes.
+Post-fix at d=0.5: terminal +33% bfly vs cjxl, +11% bytes.
+
+## Photos NOT regressed
+
+`02809272...png` (CLIC photo, 1024×1024) at d=1.0 gpu_e7:
+- pre-fix bytes: 297492
+- post-fix bytes: 297492 — **byte-identical** (verified)
+
+## Test impact
+
+`tests/corpus_regression.rs` `EXPECTED_SCORES` rebaselined for the 9
+photo entries at d=0.5. Smart-turnkey reconstruction sees a small
+butteraugli increase on photos at d=0.5 (gaborish was a perceptual
+win for them) — accepted as the cost of cjxl bitstream parity. d=1.0
+and d=2.0 entries unchanged (gate fires only at d <= 0.5). Screenshot
+entries (`gb82-sc/graph.png`, `gb82-sc/gmessages.png`) unchanged.
+
+## Reproduce
+
+    cargo build --release -p jxl-encoder-gpu --features 'cuda encoder butteraugli-loop' --example rd_pareto_vs_cjxl
+    ./target/release/examples/rd_pareto_vs_cjxl \
+        --image /home/lilith/work/codec-corpus/gb82-sc/terminal.png \
+        --image /home/lilith/work/codec-corpus/gb82-sc/codec_wiki.png \
+        --image /home/lilith/work/codec-corpus/gb82-sc/windows95.png \
+        --distance 0.5 --distance 1.0 --distance 2.0 \
+        --encoder gpu_e7 --encoder gpu_e8 --encoder cjxl_e7 \
+        --out benchmarks/rd_pareto_d0.5_screenshots_post_fix.tsv
