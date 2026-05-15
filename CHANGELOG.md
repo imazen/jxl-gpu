@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added (May 15, 2026)
+
+- **CI: `build-wgpu` job that actually exercises the GPU kernels via
+  Lavapipe**: previous CI only ran the `cubecl-cpu` fallback (kernels
+  never compiled to a GPU compute pipeline) and the `cuda` job stayed
+  commented out for lack of a self-hosted runner. New job on
+  `ubuntu-latest` installs `mesa-vulkan-drivers` + `vulkan-tools`,
+  points the Vulkan loader at Lavapipe (`VK_ICD_FILENAMES=…/lvp_icd.x86_64.json`,
+  `WGPU_BACKEND=vulkan`, `LIBGL_ALWAYS_SOFTWARE=1`), then builds
+  `--no-default-features --features wgpu` and runs two representative
+  parity examples end-to-end: `xyb_parity` (pointwise XYB forward+inverse,
+  fastest signal) and `dct8_parity` (per-block DCT8/IDCT8 with
+  SharedMemory + cube_dim, exercises the heavier `#[cube]` surface).
+  Locally on Lavapipe both pass with the documented < 1e-5 tolerance
+  (xyb max|Δ| = 1.79e-7, dct8 max|Δ| = 2.24e-8). The wgpu backend
+  is vendor-agnostic (Vulkan / Metal / DX12) so the same job catches
+  GPU regressions that the CPU fallback can't see, and the parity-test
+  invariant proves the kernels actually executed (a no-op fallback
+  would have non-zero diff). Workflow file: `.github/workflows/ci.yml`.
+
 ### Fixed (May 15, 2026)
 
 - **libjxl-parity gaborish gate at d ≤ 0.5 (RD-pareto wedge)**: GPU

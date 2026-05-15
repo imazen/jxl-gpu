@@ -66,6 +66,58 @@ jobs:
       - name: cargo clippy (lib + tests only — examples are throwaway parity probes)
         run: cargo clippy --release --no-default-features --features cpu --lib --tests -- -D warnings
 
+  # WGPU backend on shared GitHub runners — exercises the GPU kernels
+  # via Mesa's Lavapipe (software Vulkan ICD). Slow (~minutes per
+  # parity example) but actually executes #[cube] kernel code, unlike
+  # the cubecl-cpu fallback. Catches regressions in the kernels
+  # themselves on a vendor-agnostic backend.
+  build-wgpu:
+    name: build + parity (wgpu / Lavapipe)
+    runs-on: ubuntu-latest
+    env:
+      # Force wgpu to pick the Vulkan backend (Lavapipe = SW Vulkan).
+      WGPU_BACKEND: vulkan
+      # Point the Vulkan loader at Lavapipe (Mesa SW rasterizer); the
+      # GitHub runner has no real GPU, and llvmpipe / lavapipe is the
+      # only ICD that runs without one.
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+      # Force any GLX-bound code path through Mesa softpipe (defense in
+      # depth — wgpu shouldn't touch GLX, but cubecl-wgpu init has
+      # surprised us before).
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      # Suppress wgpu's chatty info-level logs in CI.
+      RUST_LOG: warn
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install Lavapipe + Vulkan tools (Mesa SW Vulkan ICD)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - name: Verify Lavapipe is visible to the Vulkan loader
+        run: |
+          vulkaninfo --summary || true
+          test -f "$VK_ICD_FILENAMES" || { echo "Lavapipe ICD not at $VK_ICD_FILENAMES"; ls /usr/share/vulkan/icd.d/; exit 1; }
+      - name: cargo build --no-default-features --features wgpu --lib
+        run: cargo build --release --no-default-features --features wgpu --lib
+      - name: cargo build parity examples (wgpu)
+        run: |
+          cargo build --release --no-default-features --features wgpu \
+            --example xyb_parity --example dct8_parity
+      - name: Run xyb_parity (pointwise XYB forward+inverse kernel)
+        # ~256 KB upload, two pointwise kernels, two downloads. Fastest
+        # parity check — verifies the wgpu compute pipeline end-to-end
+        # (compile cube source → upload → dispatch → download) without
+        # spending too long.
+        run: ./target/release/examples/xyb_parity
+      - name: Run dct8_parity (per-block compute with SharedMemory)
+        # Heavier kernel: forward DCT8 + IDCT8 over 256 blocks, exercises
+        # SharedMemory + cube_dim + DCT/IDCT roundtrip. Catches a much
+        # larger swath of #[cube] surface than xyb alone.
+        run: ./target/release/examples/dct8_parity
+
   # CUDA build on a self-hosted runner with NVIDIA hardware.
   # Disabled by default — uncomment + add a self-hosted runner with
   # CUDA 13+ to enable. The full parity examples only run here.

@@ -475,6 +475,39 @@ numbers), and idle.
 - Cold compile is 5-9 min on first build of any cubecl-cuda crate; plan iteration
   in 1-2h batches and reuse the cached build (G6.1 in zenmetrics CUBECL_GOTCHAS.md).
 
+## CI matrix
+
+Jobs in `.github/workflows/ci.yml`:
+
+- **`build-cpu`** (5-platform matrix: ubuntu, windows, windows-11-arm, macos-15-intel,
+  macos-latest) — `--no-default-features --features cpu`, builds lib + runs `--tests`.
+  Compiles the kernels but only against `cubecl-cpu`, which lowers `#[cube]` code to
+  CPU SIMD — useful for catching API-level bugs but does NOT exercise the actual GPU
+  compute pipeline.
+- **`build-i686`** (cross to `i686-unknown-linux-gnu`) — 32-bit pointer-width gate
+  (mandatory per global CLAUDE.md).
+- **`lint`** (ubuntu-latest) — `cargo fmt --check` + clippy on `--features cpu --lib --tests`.
+- **`build-wgpu`** (ubuntu-latest, **runs the GPU kernels**) — installs
+  `mesa-vulkan-drivers` + `vulkan-tools`, points the Vulkan loader at Lavapipe
+  (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`,
+  `WGPU_BACKEND=vulkan`, `LIBGL_ALWAYS_SOFTWARE=1`), builds
+  `--no-default-features --features wgpu`, then runs `xyb_parity` (pointwise) and
+  `dct8_parity` (per-block + SharedMemory) end-to-end. Lavapipe is Mesa's software
+  Vulkan ICD — slow but it actually compiles + dispatches the `#[cube]` kernels and
+  asserts max|Δ| < 1e-5 against the CPU reference. This is the only CI job that
+  proves the kernels are correct on a real GPU compute pipeline. Local validation
+  on Lavapipe: xyb max|Δ| = 1.79e-7, dct8 max|Δ| = 2.24e-8.
+- **`build-cuda`** (commented out) — self-hosted runner with NVIDIA hardware. Run
+  the full parity-example matrix here once a runner is added; the wgpu job above
+  is the vendor-agnostic stand-in for shared CI.
+
+Adding new kernel parity examples to `build-wgpu`: pick the smallest input that
+still exercises the kernel's full code path, ensure it has a `wgpu` cfg branch
+that selects `cubecl::wgpu::WgpuRuntime`, and add it to the "Run" steps in
+`.github/workflows/ci.yml`. Lavapipe is slow (~1-2 minutes per heavy kernel), so
+keep the CI list to a representative subset; full per-kernel validation belongs
+on the (future) self-hosted CUDA runner.
+
 ## Reference docs (READ FIRST)
 
 - `~/work/zen/zenmetrics/docs/CUBECL_PORTING_GUIDE.md` — 559-line per-pattern guide.
