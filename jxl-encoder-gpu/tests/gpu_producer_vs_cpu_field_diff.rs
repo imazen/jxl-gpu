@@ -14,8 +14,7 @@ use jxl_encoder::__pre_quantized::{
 };
 use jxl_encoder_gpu::encoder::GpuEncoder;
 use jxl_encoder_gpu::forks::pre_quantized_ac::{
-    PreQuantizedDct8Params, compute_pre_quantized_ac_dct8_persistent,
-    reshape_to_transform_output,
+    PreQuantizedDct8Params, compute_pre_quantized_ac_dct8_persistent, reshape_to_transform_output,
 };
 
 type B = cubecl::cuda::CudaRuntime;
@@ -49,11 +48,11 @@ fn gpu_producer_field_diff_vs_cpu() {
     let distance = 1.0_f32;
     let mut encoder = VarDctEncoder::new(distance);
     encoder.effort = 4;
-    encoder.profile = jxl_encoder::effort::EffortProfile::lossy(
-        4, jxl_encoder::api::EncoderMode::Reference,
-    );
+    encoder.profile =
+        jxl_encoder::effort::EffortProfile::lossy(4, jxl_encoder::api::EncoderMode::Reference);
     let params = jxl_encoder::__pre_quantized::DistanceParams::compute_for_profile(
-        distance, &encoder.profile,
+        distance,
+        &encoder.profile,
     );
 
     let raw_quant_uniform: u8 = 16;
@@ -64,17 +63,31 @@ fn gpu_producer_field_diff_vs_cpu() {
     let masking = vec![1.0_f32; n_blocks];
 
     let pc = EncoderPrecomputed::from_parts(
-        width, height, xsize_blocks, ysize_blocks, cpu_pw, cpu_ph,
-        xyb_x.clone(), xyb_y.clone(), xyb_b.clone(),
+        width,
+        height,
+        xsize_blocks,
+        ysize_blocks,
+        cpu_pw,
+        cpu_ph,
+        xyb_x.clone(),
+        xyb_y.clone(),
+        xyb_b.clone(),
         Vec::new(),
-        CflMap { ytox: cfl_map.ytox.clone(), ytob: cfl_map.ytob.clone(),
-                 xsize_tiles: 1, ysize_tiles: 1 },
+        CflMap {
+            ytox: cfl_map.ytox.clone(),
+            ytob: cfl_map.ytob.clone(),
+            xsize_tiles: 1,
+            ysize_tiles: 1,
+        },
         Option::<NoiseParams>::None,
         quant_field_float,
         masking,
         None,
         AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks),
-        true, distance, 0, 0,
+        true,
+        distance,
+        0,
+        0,
     );
 
     // CPU TransformOutput.
@@ -102,12 +115,19 @@ fn gpu_producer_field_diff_vs_cpu() {
     }
     let x_qm_mul = (1.25_f32).powf(params.x_qm_scale as f32 - 2.0);
     let b_qm_mul = (1.25_f32).powf(params.b_qm_scale as f32 - 2.0);
-    let qac_per_block: Vec<f32> = quant_field.iter().map(|&q| params.scale * q as f32).collect();
+    let qac_per_block: Vec<f32> = quant_field
+        .iter()
+        .map(|&q| params.scale * q as f32)
+        .collect();
     let qac_qm_x: Vec<f32> = qac_per_block.iter().map(|&q| q * x_qm_mul).collect();
     let qac_qm_y: Vec<f32> = qac_per_block.clone();
     let qac_qm_b: Vec<f32> = qac_per_block.iter().map(|&q| q * b_qm_mul).collect();
 
-    fn arr64(s: &[f32]) -> [f32; 64] { let mut a = [0.0; 64]; a.copy_from_slice(s); a }
+    fn arr64(s: &[f32]) -> [f32; 64] {
+        let mut a = [0.0; 64];
+        a.copy_from_slice(s);
+        a
+    }
     let dct8_weights_x = arr64(jxl_encoder::__pre_quantized::quant_weights_dct8(0));
     let dct8_weights_y = arr64(jxl_encoder::__pre_quantized::quant_weights_dct8(1));
     let dct8_weights_b = arr64(jxl_encoder::__pre_quantized::quant_weights_dct8(2));
@@ -128,9 +148,15 @@ fn gpu_producer_field_diff_vs_cpu() {
     };
 
     let pq = compute_pre_quantized_ac_dct8_persistent(
-        &enc, &xx_g, &xy_g, &xb_g,
-        xsize_blocks, ysize_blocks,
-        &dct8_weights_x, &dct8_weights_y, &dct8_weights_b,
+        &enc,
+        &xx_g,
+        &xy_g,
+        &xb_g,
+        xsize_blocks,
+        ysize_blocks,
+        &dct8_weights_x,
+        &dct8_weights_y,
+        &dct8_weights_b,
         &pq_params,
     );
     let gpu = reshape_to_transform_output(pq, xsize_blocks, ysize_blocks);
@@ -200,7 +226,9 @@ fn gpu_producer_field_diff_vs_cpu() {
         }
     }
     if total_diffs > 0 {
-        panic!("GPU producer diverges from CPU in {total_diffs} field positions; \
-                see eprintln above for first 3 of each kind");
+        panic!(
+            "GPU producer diverges from CPU in {total_diffs} field positions; \
+                see eprintln above for first 3 of each kind"
+        );
     }
 }

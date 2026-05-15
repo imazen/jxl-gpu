@@ -6,14 +6,12 @@
 
 pub mod adaptive_quant;
 pub mod afv;
-pub mod aq_field;
 pub mod afv_compose;
+pub mod aq_field;
 pub mod block_l2;
 pub mod cfl;
 pub mod cfl_collect;
 pub mod cfl_quantize;
-pub mod nzeros_count;
-pub mod quantize_dc;
 pub mod dc_grid;
 pub mod dc_restore;
 pub mod dct16;
@@ -43,9 +41,11 @@ pub mod indexed_gather;
 pub mod indexed_scatter;
 pub mod mask1x1;
 pub mod mask_for_ac_strategy;
+pub mod nzeros_count;
 pub mod pixel_loss;
 pub mod pixel_loss_3ch;
 pub mod quantize;
+pub mod quantize_dc;
 pub mod set_dc;
 pub mod set_llf;
 pub mod sse_reduce;

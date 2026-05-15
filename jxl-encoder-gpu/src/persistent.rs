@@ -843,7 +843,11 @@ impl<R: Runtime> GpuEncoder<R> {
             height: h,
             _r: core::marker::PhantomData,
         };
-        (mk(h_x, dst_w, dst_h), mk(h_y, dst_w, dst_h), mk(h_b, dst_w, dst_h))
+        (
+            mk(h_x, dst_w, dst_h),
+            mk(h_y, dst_w, dst_h),
+            mk(h_b, dst_w, dst_h),
+        )
     }
 
     /// Persistent-API EPF step 1 (3×3 plus, 5-pos SAD). Inputs are

@@ -251,8 +251,16 @@ mod tests {
         let x_factor: Vec<f32> = (0..n_blocks).map(|i| -0.3 + i as f32 * 0.02).collect();
         let thr: [f32; 4] = [0.58, 0.62, 0.62, 0.62];
 
-        let cpu = cpu_reference(&x_orig, &quant_ac_y, &weights_x, &weights_y,
-                                &qac_qm_x, &qac_qm_y, &x_factor, &thr);
+        let cpu = cpu_reference(
+            &x_orig,
+            &quant_ac_y,
+            &weights_x,
+            &weights_y,
+            &qac_qm_x,
+            &qac_qm_y,
+            &x_factor,
+            &thr,
+        );
 
         // Upload everything, launch, download.
         let h_x = client.create_from_slice(f32::as_bytes(&x_orig));
@@ -266,8 +274,17 @@ mod tests {
         let h_out = client.empty(n_blocks * 64 * core::mem::size_of::<i32>());
 
         cfl_quantize_dct8::<CudaRuntime>(
-            &client, h_x, h_qy, h_wx, h_wy, h_qmx, h_qmy, h_xf, h_thr,
-            h_out.clone(), n_blocks as u32,
+            &client,
+            h_x,
+            h_qy,
+            h_wx,
+            h_wy,
+            h_qmx,
+            h_qmy,
+            h_xf,
+            h_thr,
+            h_out.clone(),
+            n_blocks as u32,
         );
         let mut bytes = client.read(alloc::vec![h_out]);
         let out_bytes = bytes.pop().unwrap();
@@ -279,12 +296,19 @@ mod tests {
         }
         let mut diffs = 0;
         for i in 0..gpu.len() {
-            if i % 64 == 0 { continue; } // DC
+            if i % 64 == 0 {
+                continue;
+            } // DC
             if gpu[i] != cpu[i] {
                 diffs += 1;
                 if diffs <= 5 {
-                    eprintln!("[cfl_quantize parity diff] block={} pos={} gpu={} cpu={}",
-                        i / 64, i % 64, gpu[i], cpu[i]);
+                    eprintln!(
+                        "[cfl_quantize parity diff] block={} pos={} gpu={} cpu={}",
+                        i / 64,
+                        i % 64,
+                        gpu[i],
+                        cpu[i]
+                    );
                 }
             }
         }
@@ -292,7 +316,9 @@ mod tests {
         // cases between GPU and CPU rounding paths. The synthetic
         // input is unlikely to land any.
         let max_allowed = (gpu.len() as f64 * 0.0005) as usize;
-        assert!(diffs <= max_allowed, "{diffs} > {max_allowed} (0.05%) mismatches");
+        assert!(
+            diffs <= max_allowed,
+            "{diffs} > {max_allowed} (0.05%) mismatches"
+        );
     }
 }
-

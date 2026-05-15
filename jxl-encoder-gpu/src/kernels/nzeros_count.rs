@@ -78,7 +78,11 @@ mod tests {
         let gpu: Vec<u32> = u32::from_bytes(&nz_bytes).to_vec();
 
         for b in 0..n_blocks {
-            assert_eq!(gpu[b], cpu_nzeros[b], "block {b}: gpu={} cpu={}", gpu[b], cpu_nzeros[b]);
+            assert_eq!(
+                gpu[b], cpu_nzeros[b],
+                "block {b}: gpu={} cpu={}",
+                gpu[b], cpu_nzeros[b]
+            );
         }
     }
 }

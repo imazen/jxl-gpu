@@ -462,8 +462,7 @@ mod tests {
                 for y in 0..cpu_ph {
                     let g_off = y * gpu_pw;
                     let c_off = y * cpu_pw;
-                    cpu[c_off..c_off + cpu_pw]
-                        .copy_from_slice(&gpu[g_off..g_off + cpu_pw]);
+                    cpu[c_off..c_off + cpu_pw].copy_from_slice(&gpu[g_off..g_off + cpu_pw]);
                 }
             }
 
@@ -478,19 +477,18 @@ mod tests {
                 &enc, &xx_g, &xy_g, &xb_g, cpu_pw, cpu_ph, distance, k_ac_quant,
             );
 
-            let (cpu_qf, cpu_mask) =
-                jxl_encoder::__pre_quantized::compute_quant_field_float_free(
-                    &cpu_xx,
-                    &cpu_xy,
-                    &cpu_xb,
-                    cpu_pw,
-                    cpu_ph,
-                    cpu_pw / 8,
-                    cpu_ph / 8,
-                    distance,
-                    k_ac_quant,
-                )
-                .expect("cpu compute");
+            let (cpu_qf, cpu_mask) = jxl_encoder::__pre_quantized::compute_quant_field_float_free(
+                &cpu_xx,
+                &cpu_xy,
+                &cpu_xb,
+                cpu_pw,
+                cpu_ph,
+                cpu_pw / 8,
+                cpu_ph / 8,
+                distance,
+                k_ac_quant,
+            )
+            .expect("cpu compute");
 
             assert_eq!(gpu_qf.len(), cpu_qf.len(), "qf len {w}x{h}");
             assert_eq!(gpu_mask.len(), cpu_mask.len(), "mask len {w}x{h}");
@@ -571,12 +569,9 @@ mod tests {
         let b = make(3);
 
         // Production GPU path: pad to gpu_pw, upload, xyb, gaborish.
-        let r_padded =
-            crate::lossy_encoder::pad_to_alignment_test_helper(&r, w, h, gpu_pw, gpu_ph);
-        let g_padded =
-            crate::lossy_encoder::pad_to_alignment_test_helper(&g, w, h, gpu_pw, gpu_ph);
-        let b_padded =
-            crate::lossy_encoder::pad_to_alignment_test_helper(&b, w, h, gpu_pw, gpu_ph);
+        let r_padded = crate::lossy_encoder::pad_to_alignment_test_helper(&r, w, h, gpu_pw, gpu_ph);
+        let g_padded = crate::lossy_encoder::pad_to_alignment_test_helper(&g, w, h, gpu_pw, gpu_ph);
+        let b_padded = crate::lossy_encoder::pad_to_alignment_test_helper(&b, w, h, gpu_pw, gpu_ph);
 
         let g_r = enc.upload_plane(&r_padded, gpu_pw as u32, gpu_ph as u32);
         let g_g = enc.upload_plane(&g_padded, gpu_pw as u32, gpu_ph as u32);
@@ -625,19 +620,18 @@ mod tests {
         let xsize_blocks = cpu_pw / 8;
         let ysize_blocks = cpu_ph / 8;
 
-        let (cpu_qf, cpu_mask) =
-            jxl_encoder::__pre_quantized::compute_quant_field_float_free(
-                &cpu_xx,
-                &cpu_xy,
-                &cpu_xb,
-                cpu_pw,
-                cpu_ph,
-                xsize_blocks,
-                ysize_blocks,
-                distance,
-                k_ac_quant,
-            )
-            .expect("cpu");
+        let (cpu_qf, cpu_mask) = jxl_encoder::__pre_quantized::compute_quant_field_float_free(
+            &cpu_xx,
+            &cpu_xy,
+            &cpu_xb,
+            cpu_pw,
+            cpu_ph,
+            xsize_blocks,
+            ysize_blocks,
+            distance,
+            k_ac_quant,
+        )
+        .expect("cpu");
 
         let (gpu_qf, gpu_mask) = compute_quant_field_full_persistent(
             &enc, &xx_g, &xy_g, &xb_g, cpu_pw, cpu_ph, distance, k_ac_quant,

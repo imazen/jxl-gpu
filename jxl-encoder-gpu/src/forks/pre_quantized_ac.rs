@@ -24,8 +24,8 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use cubecl::prelude::*;
 use cubecl::Runtime;
+use cubecl::prelude::*;
 
 use crate::encoder::GpuEncoder;
 use crate::persistent::GpuPlane;
@@ -192,10 +192,18 @@ pub fn compute_pre_quantized_ac_dct8_persistent<R: Runtime>(
 
     // Step 7: batched download (15 buffers — one sync barrier).
     let mut all_bytes = client.read(alloc::vec![
-        h_q_x.clone(), h_q_y.clone(), h_q_b.clone(),       // quant_ac × 3
-        h_qdc_x, h_qdc_y, h_qdc_b,                          // quant_dc × 3
-        h_fdc_x, h_fdc_y, h_fdc_b,                          // float_dc × 3
-        h_nz_x, h_nz_y, h_nz_b,                             // nzeros × 3
+        h_q_x.clone(),
+        h_q_y.clone(),
+        h_q_b.clone(), // quant_ac × 3
+        h_qdc_x,
+        h_qdc_y,
+        h_qdc_b, // quant_dc × 3
+        h_fdc_x,
+        h_fdc_y,
+        h_fdc_b, // float_dc × 3
+        h_nz_x,
+        h_nz_y,
+        h_nz_b, // nzeros × 3
     ]);
     // Drain in reverse to match push order.
     let nz_b_b = all_bytes.pop().expect("nz_b");
@@ -363,9 +371,15 @@ mod tests {
         };
 
         let out = compute_pre_quantized_ac_dct8_persistent(
-            &enc, &xx_g, &xy_g, &xb_g,
-            xsize_blocks, ysize_blocks,
-            &weights_x, &weights_y, &weights_b,
+            &enc,
+            &xx_g,
+            &xy_g,
+            &xb_g,
+            xsize_blocks,
+            ysize_blocks,
+            &weights_x,
+            &weights_y,
+            &weights_b,
             &params,
         );
 
@@ -381,8 +395,11 @@ mod tests {
         // DC slot of every quant_ac block must be 0 (DC is in quant_dc).
         for c in 0..3 {
             for b in 0..n_blocks {
-                assert_eq!(out.quant_ac[c][b * 64], 0,
-                    "quant_ac[{c}] block {b} DC slot must be 0");
+                assert_eq!(
+                    out.quant_ac[c][b * 64],
+                    0,
+                    "quant_ac[{c}] block {b} DC slot must be 0"
+                );
             }
         }
         // float_dc must be finite + non-trivially varied.
@@ -391,7 +408,9 @@ mod tests {
             let v0 = out.float_dc[c][0];
             for &v in &out.float_dc[c] {
                 assert!(v.is_finite(), "float_dc[{c}] non-finite");
-                if (v - v0).abs() > 1e-9 { all_eq = false; }
+                if (v - v0).abs() > 1e-9 {
+                    all_eq = false;
+                }
             }
             assert!(!all_eq, "float_dc[{c}] should vary across blocks");
         }

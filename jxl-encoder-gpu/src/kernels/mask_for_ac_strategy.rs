@@ -12,11 +12,7 @@
 use cubecl::prelude::*;
 
 #[cube(launch_unchecked)]
-pub fn mask_for_ac_strategy_kernel(
-    aq_map: &Array<f32>,
-    out: &mut Array<f32>,
-    n: u32,
-) {
+pub fn mask_for_ac_strategy_kernel(aq_map: &Array<f32>, out: &mut Array<f32>, n: u32) {
     let idx = ABSOLUTE_POS;
     let total = n as usize;
     if idx >= total {

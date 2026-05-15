@@ -51,10 +51,8 @@ fn encode_from_pre_quantized_ac_matches_encode_from_precomputed() {
     let distance = 1.0_f32;
     let mut encoder = VarDctEncoder::new(distance);
     encoder.effort = 4;
-    encoder.profile = jxl_encoder::effort::EffortProfile::lossy(
-        4,
-        jxl_encoder::api::EncoderMode::Reference,
-    );
+    encoder.profile =
+        jxl_encoder::effort::EffortProfile::lossy(4, jxl_encoder::api::EncoderMode::Reference);
 
     let raw_quant_uniform: u8 = 16;
     let mut quant_field_a = vec![raw_quant_uniform; n_blocks];
@@ -63,22 +61,37 @@ fn encode_from_pre_quantized_ac_matches_encode_from_precomputed() {
         distance,
         &encoder.profile,
     )
-    .scale * raw_quant_uniform as f32;
+    .scale
+        * raw_quant_uniform as f32;
     let quant_field_float = vec![qac_uniform; n_blocks];
     let masking = vec![1.0_f32; n_blocks];
 
     let pc_a = EncoderPrecomputed::from_parts(
-        width, height, xsize_blocks, ysize_blocks, cpu_pw, cpu_ph,
-        xyb_x.clone(), xyb_y.clone(), xyb_b.clone(),
+        width,
+        height,
+        xsize_blocks,
+        ysize_blocks,
+        cpu_pw,
+        cpu_ph,
+        xyb_x.clone(),
+        xyb_y.clone(),
+        xyb_b.clone(),
         Vec::new(),
-        CflMap { ytox: cfl_map.ytox.clone(), ytob: cfl_map.ytob.clone(),
-                 xsize_tiles: 1, ysize_tiles: 1 },
+        CflMap {
+            ytox: cfl_map.ytox.clone(),
+            ytob: cfl_map.ytob.clone(),
+            xsize_tiles: 1,
+            ysize_tiles: 1,
+        },
         Option::<NoiseParams>::None,
         quant_field_float.clone(),
         masking.clone(),
         None,
         AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks),
-        true, distance, 0, 0,
+        true,
+        distance,
+        0,
+        0,
     );
 
     // Path A: encode_from_precomputed (runs transform_and_quantize internally)
@@ -89,17 +102,31 @@ fn encode_from_pre_quantized_ac_matches_encode_from_precomputed() {
     // Path B: manually run transform_and_quantize, feed result to encode_from_pre_quantized_ac.
     let mut quant_field_b = vec![raw_quant_uniform; n_blocks];
     let pc_b = EncoderPrecomputed::from_parts(
-        width, height, xsize_blocks, ysize_blocks, cpu_pw, cpu_ph,
-        xyb_x.clone(), xyb_y.clone(), xyb_b.clone(),
+        width,
+        height,
+        xsize_blocks,
+        ysize_blocks,
+        cpu_pw,
+        cpu_ph,
+        xyb_x.clone(),
+        xyb_y.clone(),
+        xyb_b.clone(),
         Vec::new(),
-        CflMap { ytox: cfl_map.ytox.clone(), ytob: cfl_map.ytob.clone(),
-                 xsize_tiles: 1, ysize_tiles: 1 },
+        CflMap {
+            ytox: cfl_map.ytox.clone(),
+            ytob: cfl_map.ytob.clone(),
+            xsize_tiles: 1,
+            ysize_tiles: 1,
+        },
         Option::<NoiseParams>::None,
         quant_field_float.clone(),
         masking,
         None,
         AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks),
-        true, distance, 0, 0,
+        true,
+        distance,
+        0,
+        0,
     );
 
     let params = jxl_encoder::__pre_quantized::DistanceParams::compute_for_profile(
@@ -145,8 +172,14 @@ fn encode_from_pre_quantized_ac_matches_encode_from_precomputed() {
         if let Some(i) = diff_at {
             let lo = i.saturating_sub(8);
             let hi = (i + 8).min(n);
-            eprintln!("encode_from_precomputed bytes [{lo}..{hi}]: {:02x?}", &bitstream_a[lo..hi]);
-            eprintln!("encode_from_pre_quantized_ac bytes [{lo}..{hi}]: {:02x?}", &bitstream_b[lo..hi]);
+            eprintln!(
+                "encode_from_precomputed bytes [{lo}..{hi}]: {:02x?}",
+                &bitstream_a[lo..hi]
+            );
+            eprintln!(
+                "encode_from_pre_quantized_ac bytes [{lo}..{hi}]: {:02x?}",
+                &bitstream_b[lo..hi]
+            );
         }
     }
     assert_eq!(bitstream_a, bitstream_b);

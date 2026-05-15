@@ -37,7 +37,11 @@ fn main() {
     let n = (w as usize) * (h as usize);
     let to_linear = |c: u8| -> f32 {
         let f = c as f32 / 255.0;
-        if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+        if f <= 0.04045 {
+            f / 12.92
+        } else {
+            ((f + 0.055) / 1.055).powf(2.4)
+        }
     };
     let mut r = Vec::with_capacity(n);
     let mut g = Vec::with_capacity(n);
@@ -56,8 +60,14 @@ fn main() {
     let plan = lossy.prepare_strategy_search_plan(&enc, &r, &g, &b, distance);
     let initial_aq = plan.quant_field_float.clone();
 
-    println!("buttloop_trace: {}x{} ({:.2} MP), distance={}, iters={}",
-        w, h, (w as f32 * h as f32) / 1e6, distance, iters);
+    println!(
+        "buttloop_trace: {}x{} ({:.2} MP), distance={}, iters={}",
+        w,
+        h,
+        (w as f32 * h as f32) / 1e6,
+        distance,
+        iters
+    );
 
     let mut iter_idx = 0;
     let trace = |t: jxl_encoder_gpu::forks::butteraugli_loop::RefineIterTrace| {
@@ -69,21 +79,45 @@ fn main() {
         for &d in &t.tile_dist {
             let r = d / distance;
             sum += r;
-            if r > mx { mx = r; }
-            if r < mn { mn = r; }
-            let bin = if r < 0.5 { 0 } else if r < 0.9 { 1 } else if r <= 1.0 { 2 } else if r <= 1.5 { 3 } else { 4 };
+            if r > mx {
+                mx = r;
+            }
+            if r < mn {
+                mn = r;
+            }
+            let bin = if r < 0.5 {
+                0
+            } else if r < 0.9 {
+                1
+            } else if r <= 1.0 {
+                2
+            } else if r <= 1.5 {
+                3
+            } else {
+                4
+            };
             hist[bin] += 1;
         }
         let avg = sum / n;
         println!(
             "iter {} score={:.3} pnorm3={:.3} | tile_dist/target: avg={:.3} min={:.3} max={:.3} | hist [<0.5:{} <0.9:{} <=1:{} <=1.5:{} >1.5:{}]",
-            t.iter, t.score, t.pnorm_3, avg, mn, mx,
-            hist[0], hist[1], hist[2], hist[3], hist[4],
+            t.iter, t.score, t.pnorm_3, avg, mn, mx, hist[0], hist[1], hist[2], hist[3], hist[4],
         );
         let _ = iter_idx;
     };
 
     let _refined = refine_aq_field_gpu_with_strategy_search_persistent(
-        &enc, &lossy, &mut bg, &r, &g, &b, &pixels_u8, &initial_aq, distance, iters, trace,
-    ).expect("refine");
+        &enc,
+        &lossy,
+        &mut bg,
+        &r,
+        &g,
+        &b,
+        &pixels_u8,
+        &initial_aq,
+        distance,
+        iters,
+        trace,
+    )
+    .expect("refine");
 }

@@ -7,11 +7,11 @@
 use std::time::Instant;
 
 use cubecl::cuda::CudaRuntime as Backend;
-use jxl_encoder_gpu::encoder::GpuEncoder;
-use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 use jxl_encoder::__pre_quantized::{
     AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, quantize_quant_field,
 };
+use jxl_encoder_gpu::encoder::GpuEncoder;
+use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 
 fn main() {
     let mut args = std::env::args().skip(1);

@@ -69,8 +69,7 @@ pub fn cfl_collect_kernel(
     let by_in_tile = block_in_tile_idx_u / TILE_DIM_IN_BLOCKS;
     let bx = tx * TILE_DIM_IN_BLOCKS + bx_in_tile;
     let by = ty * TILE_DIM_IN_BLOCKS + by_in_tile;
-    let tile_base = tile_idx_u * VALUES_PER_TILE
-        + block_in_tile_idx_u * COEFFS_PER_BLOCK;
+    let tile_base = tile_idx_u * VALUES_PER_TILE + block_in_tile_idx_u * COEFFS_PER_BLOCK;
     let active = bx < xsize_blocks && by < ysize_blocks;
     if active {
         let block_idx_u = by * gpu_xsize_blocks + bx;

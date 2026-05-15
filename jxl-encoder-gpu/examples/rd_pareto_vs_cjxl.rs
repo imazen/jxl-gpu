@@ -41,9 +41,7 @@
 
 #[cfg(not(all(feature = "cuda", feature = "encoder", feature = "butteraugli-loop")))]
 fn main() {
-    eprintln!(
-        "rd_pareto_vs_cjxl requires --features 'cuda encoder butteraugli-loop'"
-    );
+    eprintln!("rd_pareto_vs_cjxl requires --features 'cuda encoder butteraugli-loop'");
     std::process::exit(2);
 }
 
@@ -71,8 +69,7 @@ fn main() {
     let mut images: Vec<PathBuf> = Vec::new();
     let mut distances: Vec<f32> = Vec::new();
     let mut encoders: Vec<String> = Vec::new();
-    let mut cjxl_path: String =
-        "/home/lilith/work/jxl-efforts/libjxl/build/tools/cjxl".to_string();
+    let mut cjxl_path: String = "/home/lilith/work/jxl-efforts/libjxl/build/tools/cjxl".to_string();
     let mut out_path: Option<PathBuf> = None;
     let mut runs: usize = 1;
     let mut help = false;
@@ -218,8 +215,8 @@ fn main() {
         .unwrap_or_else(|| "unknown".into());
     let cmdline = std::env::args().collect::<Vec<_>>().join(" ");
 
-    let mut tsv = std::fs::File::create(&out_path)
-        .unwrap_or_else(|e| panic!("create {out_path:?}: {e}"));
+    let mut tsv =
+        std::fs::File::create(&out_path).unwrap_or_else(|e| panic!("create {out_path:?}: {e}"));
     writeln!(tsv, "# rd_pareto_vs_cjxl TSV").unwrap();
     writeln!(tsv, "# generated_utc\t{now_utc}").unwrap();
     writeln!(tsv, "# git_commit\t{git_commit}").unwrap();
@@ -310,17 +307,13 @@ fn main() {
 
         // ── Build GPU LossyEncoder once per image (per-size resource) ─
         let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, w, h);
-        let mut bg: ButteraugliLoopGpu<Backend> =
-            ButteraugliLoopGpu::new_multires(&enc, w, h);
+        let mut bg: ButteraugliLoopGpu<Backend> = ButteraugliLoopGpu::new_multires(&enc, w, h);
         bg.set_reference(&pixels_u8).expect("bg.set_reference");
 
         for &dist in &distances {
             for enc_name in &encoders {
                 done += 1;
-                eprintln!(
-                    "  [{done}/{total}] {} d={} {}",
-                    short_name, dist, enc_name
-                );
+                eprintln!("  [{done}/{total}] {} d={} {}", short_name, dist, enc_name);
 
                 // Encode N runs to get a stable time. Bytes are
                 // deterministic so we only need a single bitstream for
@@ -338,26 +331,12 @@ fn main() {
                             .map_err(|e| format!("{e:?}")),
                         "gpu_e8" => enc
                             .encode_lossy_to_bitstream_via_precomputed_with_butteraugli(
-                                &lossy,
-                                &mut bg,
-                                &r_lin,
-                                &g_lin,
-                                &b_lin,
-                                &pixels_u8,
-                                dist,
-                                2,
+                                &lossy, &mut bg, &r_lin, &g_lin, &b_lin, &pixels_u8, dist, 2,
                             )
                             .map_err(|e| format!("{e:?}")),
                         "gpu_e9" => enc
                             .encode_lossy_to_bitstream_via_precomputed_with_butteraugli(
-                                &lossy,
-                                &mut bg,
-                                &r_lin,
-                                &g_lin,
-                                &b_lin,
-                                &pixels_u8,
-                                dist,
-                                4,
+                                &lossy, &mut bg, &r_lin, &g_lin, &b_lin, &pixels_u8, dist, 4,
                             )
                             .map_err(|e| format!("{e:?}")),
                         cjxl @ ("cjxl_e7" | "cjxl_e8" | "cjxl_e9") => {
@@ -402,10 +381,7 @@ fn main() {
                     }
                 };
                 if dw != w as usize || dh != h as usize {
-                    eprintln!(
-                        "    WARN: decoded dims {dw}×{dh} != source {}×{}",
-                        w, h
-                    );
+                    eprintln!("    WARN: decoded dims {dw}×{dh} != source {}×{}", w, h);
                 }
 
                 // Butteraugli on linear RGB.
@@ -414,13 +390,10 @@ fn main() {
                     .map(|c| RGB::new(c[0], c[1], c[2]))
                     .collect();
                 let dec_lin_img = Img::new(dec_lin_pixels, dw, dh);
-                let bfly = butteraugli_linear(
-                    orig_lin_img.as_ref(),
-                    dec_lin_img.as_ref(),
-                    &bfly_params,
-                )
-                .map(|s| s.score as f64)
-                .unwrap_or(f64::NAN);
+                let bfly =
+                    butteraugli_linear(orig_lin_img.as_ref(), dec_lin_img.as_ref(), &bfly_params)
+                        .map(|s| s.score as f64)
+                        .unwrap_or(f64::NAN);
 
                 // SSIM2 on sRGB u8 (with correct sRGB TF).
                 let decoded_srgb: Vec<[u8; 3]> = decoded_linear
@@ -434,11 +407,9 @@ fn main() {
                     })
                     .collect();
                 let dec_srgb_img = Img::new(decoded_srgb, dw, dh);
-                let ssim2 = fast_ssim2::compute_ssimulacra2(
-                    orig_srgb_img.as_ref(),
-                    dec_srgb_img.as_ref(),
-                )
-                .unwrap_or(f64::NAN);
+                let ssim2 =
+                    fast_ssim2::compute_ssimulacra2(orig_srgb_img.as_ref(), dec_srgb_img.as_ref())
+                        .unwrap_or(f64::NAN);
 
                 let effort_num = encoder_effort(enc_name);
 
@@ -449,9 +420,7 @@ fn main() {
                 .unwrap();
                 tsv.flush().ok();
 
-                eprintln!(
-                    "      bytes={bs_len} bfly={bfly:.3} ssim2={ssim2:.2} t={min_ms:.1}ms"
-                );
+                eprintln!("      bytes={bs_len} bfly={bfly:.3} ssim2={ssim2:.2} t={min_ms:.1}ms");
             }
         }
     }
@@ -611,8 +580,7 @@ fn decode_via_jxl_rs(bytes: &[u8]) -> Option<(usize, usize, Vec<f32>)> {
         return None;
     }
 
-    let mut color_buf =
-        Image::<f32>::new_with_value((w * num_channels, h), f32::NAN).ok()?;
+    let mut color_buf = Image::<f32>::new_with_value((w * num_channels, h), f32::NAN).ok()?;
     let extra_count = pixel_format
         .extra_channel_format
         .iter()

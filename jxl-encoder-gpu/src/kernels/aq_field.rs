@@ -73,8 +73,8 @@ pub fn block_mask_mean_kernel(
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use crate::launch::aq_field::block_mask_mean;
-    use cubecl::cuda::CudaRuntime;
     use cubecl::Runtime;
+    use cubecl::cuda::CudaRuntime;
     extern crate alloc;
 
     fn cpu_reference(

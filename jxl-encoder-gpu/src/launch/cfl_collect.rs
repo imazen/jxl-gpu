@@ -24,7 +24,7 @@ pub fn cfl_collect<R: Runtime>(
     m_yb: Handle,
     s_b: Handle,
     num_tiles: u32,
-    in_floats: usize, // gpu_num_blocks * 64
+    in_floats: usize,  // gpu_num_blocks * 64
     out_floats: usize, // num_tiles * 4096
     xsize_blocks: u32,
     ysize_blocks: u32,

@@ -77,8 +77,7 @@ pub fn quantize_dc_chroma_dct8_kernel(
     let dc = coeffs_chroma[block_idx * 64usize];
     float_dc_chroma[block_idx] = dc;
     let y_dc_f = quant_dc_y[block_idx] as f32;
-    quant_dc_chroma[block_idx] =
-        round_dc_to_i16(dc * inv_factor - y_dc_f * dc_cfl_factor);
+    quant_dc_chroma[block_idx] = round_dc_to_i16(dc * inv_factor - y_dc_f * dc_cfl_factor);
 }
 
 #[cfg(all(test, feature = "cuda"))]
@@ -114,7 +113,12 @@ mod tests {
         let h_q = client.empty(n_blocks * 2);
         let h_f = client.empty(n_blocks * 4);
         quantize_dc_y_dct8::<CudaRuntime>(
-            &client, h_c, h_q.clone(), h_f, inv_factor, n_blocks as u32,
+            &client,
+            h_c,
+            h_q.clone(),
+            h_f,
+            inv_factor,
+            n_blocks as u32,
         );
         let mut bytes = client.read(alloc::vec![h_q]);
         let qb = bytes.pop().unwrap();
@@ -130,7 +134,13 @@ mod tests {
         let client = CudaRuntime::client(&device);
         let n_blocks = 23usize;
         let coeffs_x: Vec<f32> = (0..n_blocks * 64)
-            .map(|i| if i % 64 == 0 { ((i / 64) as f32) * 0.9 - 2.0 } else { 0.0 })
+            .map(|i| {
+                if i % 64 == 0 {
+                    ((i / 64) as f32) * 0.9 - 2.0
+                } else {
+                    0.0
+                }
+            })
             .collect();
         let inv_factor_x = 0.18_f32;
         let dc_cfl_factor_x = 0.0_f32;
@@ -140,8 +150,7 @@ mod tests {
             .map(|b| {
                 let dc = coeffs_x[b * 64];
                 let yd = quant_dc_y[b] as f32;
-                (dc * inv_factor_x - yd * dc_cfl_factor_x)
-                    .round() as i16
+                (dc * inv_factor_x - yd * dc_cfl_factor_x).round() as i16
             })
             .collect();
 
@@ -150,8 +159,14 @@ mod tests {
         let h_q = client.empty(n_blocks * 2);
         let h_f = client.empty(n_blocks * 4);
         quantize_dc_chroma_dct8::<CudaRuntime>(
-            &client, h_c, h_qy, h_q.clone(), h_f,
-            inv_factor_x, dc_cfl_factor_x, n_blocks as u32,
+            &client,
+            h_c,
+            h_qy,
+            h_q.clone(),
+            h_f,
+            inv_factor_x,
+            dc_cfl_factor_x,
+            n_blocks as u32,
         );
         let mut bytes = client.read(alloc::vec![h_q]);
         let qb = bytes.pop().unwrap();
@@ -162,7 +177,13 @@ mod tests {
 
         // Now B with dc_cfl_factor 0.5
         let coeffs_b: Vec<f32> = (0..n_blocks * 64)
-            .map(|i| if i % 64 == 0 { ((i / 64) as f32) * 1.2 - 3.0 } else { 0.0 })
+            .map(|i| {
+                if i % 64 == 0 {
+                    ((i / 64) as f32) * 1.2 - 3.0
+                } else {
+                    0.0
+                }
+            })
             .collect();
         let inv_factor_b = 0.21_f32;
         let dc_cfl_factor_b = 0.5_f32;
@@ -171,8 +192,7 @@ mod tests {
             .map(|b| {
                 let dc = coeffs_b[b * 64];
                 let yd = quant_dc_y[b] as f32;
-                (dc * inv_factor_b - yd * dc_cfl_factor_b)
-                    .round() as i16
+                (dc * inv_factor_b - yd * dc_cfl_factor_b).round() as i16
             })
             .collect();
 
@@ -181,8 +201,14 @@ mod tests {
         let h_q2 = client.empty(n_blocks * 2);
         let h_f2 = client.empty(n_blocks * 4);
         quantize_dc_chroma_dct8::<CudaRuntime>(
-            &client, h_c2, h_qy2, h_q2.clone(), h_f2,
-            inv_factor_b, dc_cfl_factor_b, n_blocks as u32,
+            &client,
+            h_c2,
+            h_qy2,
+            h_q2.clone(),
+            h_f2,
+            inv_factor_b,
+            dc_cfl_factor_b,
+            n_blocks as u32,
         );
         let mut bytes2 = client.read(alloc::vec![h_q2]);
         let qb2 = bytes2.pop().unwrap();

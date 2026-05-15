@@ -45,9 +45,8 @@ fn main() {
         RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
         RAW_STRATEGY_DCT, RAW_STRATEGY_DCT2X2, RAW_STRATEGY_DCT4X4, RAW_STRATEGY_DCT4X8,
         RAW_STRATEGY_DCT8X4, RAW_STRATEGY_DCT8X16, RAW_STRATEGY_DCT16X8, RAW_STRATEGY_DCT16X16,
-        RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
+        RAW_STRATEGY_DCT16X32, RAW_STRATEGY_DCT32X16, RAW_STRATEGY_DCT32X32, RAW_STRATEGY_DCT32X64,
         RAW_STRATEGY_DCT64X32, RAW_STRATEGY_DCT64X64, RAW_STRATEGY_IDENTITY,
-        RAW_STRATEGY_DCT16X32,
     };
     use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 
@@ -89,7 +88,10 @@ fn main() {
         g.push(to_linear(chunk[1]));
         b.push(to_linear(chunk[2]));
     }
-    println!("[afv-real-pick-diff] image dims: {w}×{h} ({} blocks 8x8)", n / 64);
+    println!(
+        "[afv-real-pick-diff] image dims: {w}×{h} ({} blocks 8x8)",
+        n / 64
+    );
 
     let enc: GpuEncoder<Backend> = GpuEncoder::new();
 
@@ -118,9 +120,12 @@ fn main() {
         }
     };
 
-    let run = |afv_on: bool| -> (std::collections::BTreeMap<u8, usize>, f64, std::time::Duration) {
-        let lossy: LossyEncoder<Backend> =
-            LossyEncoder::new(&enc, w, h).with_evaluate_afv(afv_on);
+    let run = |afv_on: bool| -> (
+        std::collections::BTreeMap<u8, usize>,
+        f64,
+        std::time::Duration,
+    ) {
+        let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, w, h).with_evaluate_afv(afv_on);
         // Warm up once to amortize first-call upload/kernel costs.
         let _ = lossy.prepare_strategy_search_plan(&enc, &r, &g, &b, distance);
         let t0 = std::time::Instant::now();
@@ -136,7 +141,10 @@ fn main() {
 
     println!("\n========== AFV OFF (production default) ==========");
     let (counts_off, total_off, dt_off) = run(false);
-    println!("[afv-real-pick-diff] prepare time: {:.1} ms", dt_off.as_secs_f64() * 1000.0);
+    println!(
+        "[afv-real-pick-diff] prepare time: {:.1} ms",
+        dt_off.as_secs_f64() * 1000.0
+    );
     println!("[afv-real-pick-diff] total assignments: {total_off}");
     for (k, n) in &counts_off {
         let pct = 100.0 * (*n as f64) / total_off;
@@ -156,7 +164,10 @@ fn main() {
 
     println!("\n========== AFV ON (with libjxl-faithful formula) ==========");
     let (counts_on, total_on, dt_on) = run(true);
-    println!("[afv-real-pick-diff] prepare time: {:.1} ms", dt_on.as_secs_f64() * 1000.0);
+    println!(
+        "[afv-real-pick-diff] prepare time: {:.1} ms",
+        dt_on.as_secs_f64() * 1000.0
+    );
     println!("[afv-real-pick-diff] total assignments: {total_on}");
     for (k, n) in &counts_on {
         let pct = 100.0 * (*n as f64) / total_on;

@@ -92,12 +92,8 @@ pub fn compute_cfl_map_gpu_persistent<R: Runtime>(
     // Step 3: tile-major scatter + zero-DC + scale.
     let inv_qm_x = inv_qm_table(0);
     let inv_qm_b = inv_qm_table(2);
-    let h_iqx = enc
-        .client_ref()
-        .create_from_slice(f32::as_bytes(&inv_qm_x));
-    let h_iqb = enc
-        .client_ref()
-        .create_from_slice(f32::as_bytes(&inv_qm_b));
+    let h_iqx = enc.client_ref().create_from_slice(f32::as_bytes(&inv_qm_x));
+    let h_iqb = enc.client_ref().create_from_slice(f32::as_bytes(&inv_qm_b));
     let out_floats = num_tiles * VALUES_PER_TILE;
     // No zero-init upload: the kernel writes EVERY slot (data for
     // active blocks, 0.0 for padding slots) so empty() suffices.
@@ -132,12 +128,8 @@ pub fn compute_cfl_map_gpu_persistent<R: Runtime>(
     // bases: 0.0 for X, 1.0 for B (matching compute_cfl_map line 363, 373).
     let bases_x = alloc::vec![0.0f32; num_tiles];
     let bases_b = alloc::vec![1.0f32; num_tiles];
-    let h_bx = enc
-        .client_ref()
-        .create_from_slice(f32::as_bytes(&bases_x));
-    let h_bb = enc
-        .client_ref()
-        .create_from_slice(f32::as_bytes(&bases_b));
+    let h_bx = enc.client_ref().create_from_slice(f32::as_bytes(&bases_x));
+    let h_bb = enc.client_ref().create_from_slice(f32::as_bytes(&bases_b));
     let h_out_x = enc
         .client_ref()
         .create_from_slice(i32::as_bytes(&alloc::vec![0_i32; num_tiles]));
@@ -194,9 +186,7 @@ pub fn compute_cfl_map_gpu_persistent<R: Runtime>(
     }
 
     // Step 5: ONE batched download of tiny i32 arrays (~12 KB total).
-    let mut bytes = enc
-        .client_ref()
-        .read(alloc::vec![h_out_x, h_out_b]);
+    let mut bytes = enc.client_ref().read(alloc::vec![h_out_x, h_out_b]);
     let bb = bytes.pop().expect("read[1]");
     let xb = bytes.pop().expect("read[0]");
     let xs = i32::from_bytes(&xb);
@@ -283,7 +273,9 @@ mod tests {
             gpu_xsize_blocks,
             xsize_tiles as u32,
         );
-        let mut bytes = enc.client_ref().read(alloc::vec![h_m_yx.clone(), h_s_x.clone()]);
+        let mut bytes = enc
+            .client_ref()
+            .read(alloc::vec![h_m_yx.clone(), h_s_x.clone()]);
         let sb = bytes.pop().expect("read[1]");
         let mb = bytes.pop().expect("read[0]");
         let m = f32::from_bytes(&mb);

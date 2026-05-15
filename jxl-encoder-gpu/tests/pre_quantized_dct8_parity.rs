@@ -19,8 +19,7 @@ use jxl_encoder::__pre_quantized::{
 };
 use jxl_encoder_gpu::encoder::GpuEncoder;
 use jxl_encoder_gpu::forks::pre_quantized_ac::{
-    PreQuantizedDct8Params, compute_pre_quantized_ac_dct8_persistent,
-    reshape_to_transform_output,
+    PreQuantizedDct8Params, compute_pre_quantized_ac_dct8_persistent, reshape_to_transform_output,
 };
 
 type B = cubecl::cuda::CudaRuntime;
@@ -79,10 +78,8 @@ fn pre_quantized_dct8_bitstream_parity_vs_cpu() {
     // effort would diverge by the AdjustQuantBlockAC delta even with
     // perfect AC quant matching.
     encoder.effort = 4;
-    encoder.profile = jxl_encoder::effort::EffortProfile::lossy(
-        4,
-        jxl_encoder::api::EncoderMode::Reference,
-    );
+    encoder.profile =
+        jxl_encoder::effort::EffortProfile::lossy(4, jxl_encoder::api::EncoderMode::Reference);
     let params = DistanceParams::compute_for_profile(distance, &encoder.profile);
 
     // Quant field — uniform raw_quant for simplicity. Apply
@@ -105,11 +102,22 @@ fn pre_quantized_dct8_bitstream_parity_vs_cpu() {
     // Build EncoderPrecomputed twice (it's not Clone), once for each
     // encode call.
     let precomputed_cpu = EncoderPrecomputed::from_parts(
-        width, height, xsize_blocks, ysize_blocks, cpu_pw, cpu_ph,
-        xyb_x.clone(), xyb_y.clone(), xyb_b.clone(),
+        width,
+        height,
+        xsize_blocks,
+        ysize_blocks,
+        cpu_pw,
+        cpu_ph,
+        xyb_x.clone(),
+        xyb_y.clone(),
+        xyb_b.clone(),
         Vec::new(),
-        CflMap { ytox: cfl_map.ytox.clone(), ytob: cfl_map.ytob.clone(),
-                 xsize_tiles, ysize_tiles },
+        CflMap {
+            ytox: cfl_map.ytox.clone(),
+            ytob: cfl_map.ytob.clone(),
+            xsize_tiles,
+            ysize_tiles,
+        },
         Option::<NoiseParams>::None,
         quant_field_float.clone(),
         masking.clone(),
@@ -117,14 +125,26 @@ fn pre_quantized_dct8_bitstream_parity_vs_cpu() {
         AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks),
         true, // gaborish_enabled
         distance,
-        0, 0,
+        0,
+        0,
     );
     let precomputed_gpu = EncoderPrecomputed::from_parts(
-        width, height, xsize_blocks, ysize_blocks, cpu_pw, cpu_ph,
-        xyb_x.clone(), xyb_y.clone(), xyb_b.clone(),
+        width,
+        height,
+        xsize_blocks,
+        ysize_blocks,
+        cpu_pw,
+        cpu_ph,
+        xyb_x.clone(),
+        xyb_y.clone(),
+        xyb_b.clone(),
         Vec::new(),
-        CflMap { ytox: cfl_map.ytox.clone(), ytob: cfl_map.ytob.clone(),
-                 xsize_tiles, ysize_tiles },
+        CflMap {
+            ytox: cfl_map.ytox.clone(),
+            ytob: cfl_map.ytob.clone(),
+            xsize_tiles,
+            ysize_tiles,
+        },
         Option::<NoiseParams>::None,
         quant_field_float.clone(),
         masking,
@@ -132,7 +152,8 @@ fn pre_quantized_dct8_bitstream_parity_vs_cpu() {
         AcStrategyMap::new_dct8(xsize_blocks, ysize_blocks),
         true,
         distance,
-        0, 0,
+        0,
+        0,
     );
 
     let _ = ac_strategy; // both precomputed instances have their own.
@@ -168,7 +189,10 @@ fn pre_quantized_dct8_bitstream_parity_vs_cpu() {
     let x_qm_mul = (1.25_f32).powf(params.x_qm_scale as f32 - 2.0);
     let b_qm_mul = (1.25_f32).powf(params.b_qm_scale as f32 - 2.0);
 
-    let qac_per_block: Vec<f32> = quant_field.iter().map(|&q| params.scale * q as f32).collect();
+    let qac_per_block: Vec<f32> = quant_field
+        .iter()
+        .map(|&q| params.scale * q as f32)
+        .collect();
     let qac_qm_x: Vec<f32> = qac_per_block.iter().map(|&q| q * x_qm_mul).collect();
     let qac_qm_y: Vec<f32> = qac_per_block.clone();
     let qac_qm_b: Vec<f32> = qac_per_block.iter().map(|&q| q * b_qm_mul).collect();
@@ -193,17 +217,27 @@ fn pre_quantized_dct8_bitstream_parity_vs_cpu() {
     };
 
     let pq = compute_pre_quantized_ac_dct8_persistent(
-        &enc, &xx_g, &xy_g, &xb_g,
-        xsize_blocks, ysize_blocks,
-        &dct8_weights_x, &dct8_weights_y, &dct8_weights_b,
+        &enc,
+        &xx_g,
+        &xy_g,
+        &xb_g,
+        xsize_blocks,
+        ysize_blocks,
+        &dct8_weights_x,
+        &dct8_weights_y,
+        &dct8_weights_b,
         &pq_params,
     );
     let r = reshape_to_transform_output(pq, xsize_blocks, ysize_blocks);
 
     let bitstream_gpu = encoder
         .encode_from_pre_quantized_ac(
-            &precomputed_gpu, &quant_field,
-            &r.quant_dc, &r.quant_ac, &r.nzeros, &r.raw_nzeros,
+            &precomputed_gpu,
+            &quant_field,
+            &r.quant_dc,
+            &r.quant_ac,
+            &r.nzeros,
+            &r.raw_nzeros,
         )
         .expect("GPU encode_from_pre_quantized_ac");
 
@@ -227,8 +261,18 @@ fn pre_quantized_dct8_bitstream_parity_vs_cpu() {
         if let Some(i) = diff_at {
             let lo = i.saturating_sub(8);
             let hi = (i + 8).min(n);
-            eprintln!("CPU bytes [{}..{}]: {:02x?}", lo, hi, &bitstream_cpu[lo..hi]);
-            eprintln!("GPU bytes [{}..{}]: {:02x?}", lo, hi, &bitstream_gpu[lo..hi]);
+            eprintln!(
+                "CPU bytes [{}..{}]: {:02x?}",
+                lo,
+                hi,
+                &bitstream_cpu[lo..hi]
+            );
+            eprintln!(
+                "GPU bytes [{}..{}]: {:02x?}",
+                lo,
+                hi,
+                &bitstream_gpu[lo..hi]
+            );
         }
     }
     assert_eq!(bitstream_cpu, bitstream_gpu);

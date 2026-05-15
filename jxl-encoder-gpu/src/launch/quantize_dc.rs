@@ -6,9 +6,7 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-use crate::kernels::quantize_dc::{
-    quantize_dc_chroma_dct8_kernel, quantize_dc_y_dct8_kernel,
-};
+use crate::kernels::quantize_dc::{quantize_dc_chroma_dct8_kernel, quantize_dc_y_dct8_kernel};
 
 const TPB: u32 = 256;
 

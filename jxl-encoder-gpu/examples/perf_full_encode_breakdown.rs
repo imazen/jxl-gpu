@@ -165,11 +165,8 @@ fn main() {
 
         // Match production path: batched 3-plane download (one
         // sync round-trip), then parallel repack via rayon::join×3.
-        let (xyb_x_gpu, xyb_y_gpu, xyb_b_gpu) = enc.download_planes_3ch(
-            &plan.xyb_x_gpu,
-            &plan.xyb_y_gpu,
-            &plan.xyb_b_gpu,
-        );
+        let (xyb_x_gpu, xyb_y_gpu, xyb_b_gpu) =
+            enc.download_planes_3ch(&plan.xyb_x_gpu, &plan.xyb_y_gpu, &plan.xyb_b_gpu);
         let t_download = t1.elapsed().as_secs_f64() * 1000.0;
         let t2 = Instant::now();
 

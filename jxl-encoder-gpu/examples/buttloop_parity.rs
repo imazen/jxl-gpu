@@ -57,9 +57,7 @@
 
 #[cfg(not(all(feature = "cuda", feature = "encoder", feature = "butteraugli-loop")))]
 fn main() {
-    eprintln!(
-        "buttloop_parity requires --features 'cuda encoder butteraugli-loop'"
-    );
+    eprintln!("buttloop_parity requires --features 'cuda encoder butteraugli-loop'");
     std::process::exit(2);
 }
 
@@ -69,8 +67,7 @@ fn main() {
     use cubecl::cuda::CudaRuntime as Backend;
     use jxl_encoder_gpu::encoder::GpuEncoder;
     use jxl_encoder_gpu::forks::butteraugli_loop::{
-        AcStrategyInfo, ButteraugliLoopGpu, K_TILE_NORM, compute_tile_distances,
-        dct8_only_storage,
+        AcStrategyInfo, ButteraugliLoopGpu, K_TILE_NORM, compute_tile_distances, dct8_only_storage,
     };
     use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 
@@ -81,9 +78,7 @@ fn main() {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--image" => image_path = args.next(),
-            "--distance" => {
-                distance = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0)
-            }
+            "--distance" => distance = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
             "--mode" => {
                 let m = args.next().unwrap_or_else(|| "srgb".to_string());
                 compare_mode = match m.as_str() {
@@ -128,7 +123,11 @@ fn main() {
     let t1 = std::time::Instant::now();
     let recon_lin_f32 = decode_jxl_rs_linear_f32(&bytes, w, h);
     let decode_dt = t1.elapsed();
-    println!("Decoded:  {} f32 samples in {:.2}s", recon_lin_f32.len(), decode_dt.as_secs_f64());
+    println!(
+        "Decoded:  {} f32 samples in {:.2}s",
+        recon_lin_f32.len(),
+        decode_dt.as_secs_f64()
+    );
 
     // ── Convert decoded linear → sRGB u8 (for both engines' input) ────
     let n_pix = (w as usize) * (h as usize);
@@ -149,7 +148,8 @@ fn main() {
         .compute_with_reference(&recon_srgb_u8)
         .expect("gpu compute_with_reference");
     let mut gpu_diffmap = vec![0.0_f32; n_pix];
-    bg.copy_diffmap_to(&mut gpu_diffmap).expect("gpu copy_diffmap");
+    bg.copy_diffmap_to(&mut gpu_diffmap)
+        .expect("gpu copy_diffmap");
     let gpu_dt = t2.elapsed();
     println!(
         "GPU:      score={:.4} pnorm_3={:.4} in {:.3}s",
@@ -173,8 +173,8 @@ fn main() {
     let mut params = ButteraugliParams::default();
     params = params.with_compute_diffmap(true);
     let t3 = std::time::Instant::now();
-    let cpu_result = butteraugli(src_img.as_ref(), recon_img.as_ref(), &params)
-        .expect("cpu butteraugli");
+    let cpu_result =
+        butteraugli(src_img.as_ref(), recon_img.as_ref(), &params).expect("cpu butteraugli");
     let cpu_dt = t3.elapsed();
     let cpu_diffmap_imgvec = cpu_result.diffmap.expect("compute_diffmap=true");
     println!(
@@ -403,16 +403,16 @@ fn decode_jxl_rs_linear_f32(bytes: &[u8], w: u32, h: u32) -> Vec<f32> {
 
     let pixel_format = decoder_with_image_info.current_pixel_format().clone();
     let num_channels = pixel_format.color_type.samples_per_pixel();
-    assert!(num_channels == 3, "expected 3-channel RGB output, got {num_channels}");
+    assert!(
+        num_channels == 3,
+        "expected 3-channel RGB output, got {num_channels}"
+    );
 
     let buffer_w = basic_info.size.0;
     let buffer_h = basic_info.size.1;
 
-    let mut color_buf = Image::<f32>::new_with_value(
-        (buffer_w * num_channels, buffer_h),
-        f32::NAN,
-    )
-    .expect("alloc color buf");
+    let mut color_buf = Image::<f32>::new_with_value((buffer_w * num_channels, buffer_h), f32::NAN)
+        .expect("alloc color buf");
 
     let extra_buf_count = pixel_format
         .extra_channel_format
@@ -420,13 +420,12 @@ fn decode_jxl_rs_linear_f32(bytes: &[u8], w: u32, h: u32) -> Vec<f32> {
         .filter(|x| x.is_some())
         .count();
     let mut extra_bufs: Vec<Image<f32>> = (0..extra_buf_count)
-        .map(|_| {
-            Image::<f32>::new_with_value((buffer_w, buffer_h), f32::NAN).expect("alloc extra")
-        })
+        .map(|_| Image::<f32>::new_with_value((buffer_w, buffer_h), f32::NAN).expect("alloc extra"))
         .collect();
 
-    let mut all_imgs: Vec<&mut Image<f32>> =
-        std::iter::once(&mut color_buf).chain(extra_bufs.iter_mut()).collect();
+    let mut all_imgs: Vec<&mut Image<f32>> = std::iter::once(&mut color_buf)
+        .chain(extra_bufs.iter_mut())
+        .collect();
     let mut api_buffers: Vec<JxlOutputBuffer<'_>> = all_imgs
         .iter_mut()
         .map(|b| {

@@ -1023,8 +1023,8 @@ pub fn estimate_entropy_full_dct8_batch_persistent<R: Runtime>(
     let inv_b_t: &[f32] = inv_weights_b_per_block.as_slice();
 
     // Step 2: fused 3-channel entropy + error-coef writeback (1 launch).
-    let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) =
-        enc.entropy_coeffs_pixel_blocks_3ch_persistent(
+    let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) = enc
+        .entropy_coeffs_pixel_blocks_3ch_persistent(
             &dct_x,
             &dct_y,
             &dct_b,
@@ -1537,8 +1537,8 @@ pub fn estimate_entropy_full_strategy_batch_persistent_with_handle<R: Runtime>(
     let dct_b = apply_dct_batch_persistent(enc, pixel_blocks_b, raw_strategy);
 
     // Step 2: fused 3-channel entropy + error-coef writeback (1 launch).
-    let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) =
-        enc.entropy_coeffs_pixel_blocks_3ch_persistent(
+    let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) = enc
+        .entropy_coeffs_pixel_blocks_3ch_persistent(
             &dct_x,
             &dct_y,
             &dct_b,
@@ -2434,7 +2434,7 @@ pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
         (cubecl::server::Handle, usize), // x_loss (f64), n_blocks
         (cubecl::server::Handle, usize), // y_loss (f64), n_blocks
         (cubecl::server::Handle, usize), // b_loss (f64), n_blocks
-        usize,                            // block_pixels
+        usize,                           // block_pixels
     )> = alloc::vec::Vec::with_capacity(specs.len());
     for spec in specs {
         let coeff_count = coeff_count_per_strategy(spec.raw_strategy);
@@ -2451,8 +2451,8 @@ pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
         let dct_y = apply_dct_batch_persistent(enc, pre_gathered_8x8_y, spec.raw_strategy);
         let dct_b = apply_dct_batch_persistent(enc, pre_gathered_8x8_b, spec.raw_strategy);
 
-        let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) =
-            enc.entropy_coeffs_pixel_blocks_3ch_persistent(
+        let (g_x_stats, g_y_stats, g_b_stats, g_x_err, g_y_err, g_b_err) = enc
+            .entropy_coeffs_pixel_blocks_3ch_persistent(
                 &dct_x,
                 &dct_y,
                 &dct_b,
@@ -2504,7 +2504,9 @@ pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
         );
 
         handle_sets.push((
-            g_x_stats, g_y_stats, g_b_stats,
+            g_x_stats,
+            g_y_stats,
+            g_b_stats,
             (h_loss_x, n_blocks),
             (h_loss_y, n_blocks),
             (h_loss_b, n_blocks),
@@ -2533,12 +2535,18 @@ pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
     // bytes are in submission order: [s0_x_stats, s0_y_stats, s0_b_stats, s0_x_loss, s0_y_loss, s0_b_loss, s1_x_stats, ...]
     let mut idx = 0usize;
     for (spec, (.., block_pixels)) in specs.iter().zip(handle_sets.iter()) {
-        let xs_b = &bytes[idx]; idx += 1;
-        let ys_b = &bytes[idx]; idx += 1;
-        let bs_b = &bytes[idx]; idx += 1;
-        let xl_b = &bytes[idx]; idx += 1;
-        let yl_b = &bytes[idx]; idx += 1;
-        let bl_b = &bytes[idx]; idx += 1;
+        let xs_b = &bytes[idx];
+        idx += 1;
+        let ys_b = &bytes[idx];
+        idx += 1;
+        let bs_b = &bytes[idx];
+        idx += 1;
+        let xl_b = &bytes[idx];
+        idx += 1;
+        let yl_b = &bytes[idx];
+        idx += 1;
+        let bl_b = &bytes[idx];
+        idx += 1;
         let x_stats = f32::from_bytes(xs_b);
         let y_stats = f32::from_bytes(ys_b);
         let b_stats = f32::from_bytes(bs_b);
@@ -2553,9 +2561,15 @@ pub fn strategy_search_costs_subblock_8x8_batch<R: Runtime>(
         apply_x_multiblock_weight_to_loss(&mut loss_x, covered_blocks);
 
         let pixel_loss_total = combine_pixel_loss_3channel(&loss_x, &loss_y, &loss_b);
-        let nzeros_x = (0..n_blocks).map(|b| x_stats[b * 4 + 1]).collect::<alloc::vec::Vec<_>>();
-        let nzeros_y = (0..n_blocks).map(|b| y_stats[b * 4 + 1]).collect::<alloc::vec::Vec<_>>();
-        let nzeros_b = (0..n_blocks).map(|b| b_stats[b * 4 + 1]).collect::<alloc::vec::Vec<_>>();
+        let nzeros_x = (0..n_blocks)
+            .map(|b| x_stats[b * 4 + 1])
+            .collect::<alloc::vec::Vec<_>>();
+        let nzeros_y = (0..n_blocks)
+            .map(|b| y_stats[b * 4 + 1])
+            .collect::<alloc::vec::Vec<_>>();
+        let nzeros_b = (0..n_blocks)
+            .map(|b| b_stats[b * 4 + 1])
+            .collect::<alloc::vec::Vec<_>>();
         let costs = per_block_upstream_cost(
             &entropy_x,
             &entropy_y,
