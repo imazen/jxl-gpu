@@ -4,6 +4,28 @@
 
 ### Added (May 15, 2026)
 
+- **CI: composite action `clone-siblings` + Cross.toml override unblocks
+  `build-cpu`, `build-i686`, `lint` jobs that had been red since the
+  workspace gained host-only path-deps**: the workspace `Cargo.toml`
+  carries path deps to sibling repos (`../jxl-encoder`,
+  `../zenmetrics`, `../fast-ssim2`, `../../butteraugli`) and an
+  absolute `/home/lilith/work/third-party/jxl-rs/jxl` reference. Cargo
+  refuses to parse the workspace manifest unless every path-dep
+  manifest can be loaded — true even for `--lib` builds and
+  `cargo fmt --check`. Extracted the sibling-clone logic the
+  `build-wgpu` job pioneered into a reusable composite action at
+  `.github/actions/clone-siblings/action.yml`. The action runs on
+  Linux, macOS, and Windows via `bash` (Git Bash on Windows; Cargo on
+  Windows treats Git-Bash-style `/home/lilith/...` as drive-relative
+  `C:\home\lilith\...` so the path-dep resolves identically). For the
+  `build-i686` job the action additionally writes a Cross.toml
+  override with `pre-build` commands that clone the same sibling
+  layout into the cross-rs container's filesystem so cargo inside the
+  container can resolve `../jxl-encoder` etc. Applied to all four
+  jobs: `build-cpu` (5-OS matrix), `build-i686`, `lint`, `build-wgpu`
+  (refactored to consume the same composite, removing the inline
+  duplicate). Workflow: `.github/workflows/ci.yml`,
+  `.github/actions/clone-siblings/action.yml`.
 - **CI: `build-wgpu` job that actually exercises the GPU kernels via
   Lavapipe**: previous CI only ran the `cubecl-cpu` fallback (kernels
   never compiled to a GPU compute pipeline) and the `cuda` job stayed

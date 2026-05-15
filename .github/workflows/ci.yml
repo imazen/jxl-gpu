@@ -28,6 +28,7 @@ jobs:
           - macos-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/clone-siblings
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -45,10 +46,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/clone-siblings
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cross
         run: cargo install cross --locked
       - name: cross build --target i686-unknown-linux-gnu
+        # The clone-siblings action wrote a Cross.toml with `pre-build`
+        # commands that clone the sibling path-deps inside the cross
+        # container so cargo can resolve them. The host clones are still
+        # needed because cargo's path-dep resolution runs on the host
+        # side too (workspace manifest parse).
         run: cross build --release --no-default-features --features cpu --lib --target i686-unknown-linux-gnu
 
   # Format + clippy gate on Linux (the canonical lint host).
@@ -57,6 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/clone-siblings
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -85,45 +93,10 @@ jobs:
       RUST_LOG: warn
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/clone-siblings
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: Clone sibling path-dep repos (jxl-encoder / zenmetrics / fast-ssim2 / butteraugli / jxl-rs)
-        # The workspace `Cargo.toml` carries path deps to sibling repos that
-        # only exist in the maintainer's local layout (`~/work/zen/...`).
-        # Cargo refuses to even parse the workspace manifest unless every
-        # path-dep manifest can be loaded — this is true for `--lib` builds
-        # too, even though those deps would not actually be compiled. Clone
-        # the public siblings into the layout the workspace expects.
-        # `lilith/jxl-rs` is referenced by an absolute path
-        # (`/home/lilith/work/third-party/jxl-rs/jxl`) — recreate that path
-        # under HOME so the runner doesn't need root.
-        run: |
-          set -euxo pipefail
-          # Layout (relative to GITHUB_WORKSPACE = /home/runner/work/jxl-gpu/jxl-gpu):
-          #   ../jxl-encoder        -> imazen/jxl-encoder
-          #   ../zenmetrics         -> imazen/zenmetrics
-          #   ../fast-ssim2         -> imazen/fast-ssim2
-          #   ../../butteraugli     -> imazen/butteraugli
-          # Plus an absolute /home/lilith/work/third-party/jxl-rs symlinked
-          # via a writable home dir.
-          parent="$(dirname "$GITHUB_WORKSPACE")"
-          gparent="$(dirname "$parent")"
-          git clone --depth 1 https://github.com/imazen/jxl-encoder "$parent/jxl-encoder"
-          # zenmetrics: workspace expects the `internals` feature on
-          # butteraugli-gpu (see comment in workspace Cargo.toml:42-45)
-          # which only exists on `feat/internals-from-linear-planes`.
-          git clone --depth 1 --branch feat/internals-from-linear-planes \
-            https://github.com/imazen/zenmetrics "$parent/zenmetrics"
-          git clone --depth 1 https://github.com/imazen/fast-ssim2 "$parent/fast-ssim2"
-          git clone --depth 1 https://github.com/imazen/butteraugli "$gparent/butteraugli"
-          # The absolute path /home/lilith/work/third-party/jxl-rs/jxl
-          # lives in workspace.dependencies for the `jxl` crate. Symlink it
-          # into existence on the CI runner. `lilith/jxl-rs` default branch
-          # is `develop`, not `main`.
-          sudo mkdir -p /home/lilith/work/third-party
-          sudo chown -R "$(id -u):$(id -g)" /home/lilith
-          git clone --depth 1 --branch develop https://github.com/lilith/jxl-rs /home/lilith/work/third-party/jxl-rs
       - name: Install Lavapipe + Vulkan tools (Mesa SW Vulkan ICD)
         run: |
           sudo apt-get update
