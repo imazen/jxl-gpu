@@ -4,6 +4,28 @@
 
 ### Added (May 15, 2026)
 
+- **Bench: cpu-vs-gpu apples-to-apples harness across e7/e8/e9 +
+  zensim-regress integration test**: new bench
+  `examples/cpu_vs_gpu_e7_e8_e9_bench.rs` iterates
+  `(image × effort × distance)` cells and records both CPU
+  (`jxl-encoder LossyConfig::with_effort`) and GPU
+  (`jxl-encoder-gpu encode_lossy_to_bitstream_via_precomputed{,_with_butteraugli}`)
+  encode time + bytes + decoded-via-jxl-oxide butteraugli + ssim2 +
+  zensim. Output TSV columns:
+  `image, megapixels, effort, distance, encoder, wallclock_ms, bytes,
+  butteraugli, ssim2, zensim`. Apples-to-apples mapping mirrors libjxl
+  exactly (e7 = no buttloop, e8 = 2 iters, e9 = 4 iters). Caveats
+  (gaborish gate, patches gate, DCT FP precision) documented in TSV
+  header. Companion regress test `tests/cpu_vs_gpu_zensim_regress.rs`
+  (gated by `--features gpu-zensim-regress`) asserts
+  `gpu_zensim >= cpu_zensim - tolerance_for_distance(d)` per cell with
+  distance-keyed tolerance (4.0 at d≤1, 7.0 at d>1). Bench TSV +
+  meta committed at `benchmarks/cpu_vs_gpu_e7_e8_e9_2026-05-15.{tsv,meta}`.
+  The regress test currently FAILS on this baseline due to a real GPU
+  bug discovered by the bench (see `.meta` for details: the
+  all-DCT8 fast path `run_gpu_dct8_pre_quantized_path` produces
+  out-of-range linear pixels on some images). Filing follow-up to
+  fix the underlying corruption.
 - **CI: composite action `clone-siblings` + Cross.toml override unblocks
   `build-cpu`, `build-i686`, `lint` jobs that had been red since the
   workspace gained host-only path-deps**: the workspace `Cargo.toml`
