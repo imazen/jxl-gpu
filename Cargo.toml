@@ -37,6 +37,13 @@ jxl = { path = "/home/lilith/work/third-party/jxl-rs/jxl" }
 fast-ssim2 = { path = "../fast-ssim2/fast-ssim2", default-features = true, features = ["imgref"] }
 imgref = "1"
 
+# zensim — psychovisual similarity metric (faster sibling to SSIMULACRA2).
+# Used by the cpu-vs-gpu bench harness + the cpu_vs_gpu_zensim_regress
+# integration test as the principal "did GPU output regress quality"
+# gate. Path-dep on the local zensim repo; pulls the trained MLP weights
+# baked into the crate (PreviewV0_3 by default).
+zensim = { path = "../zensim/zensim", default-features = false, features = ["imgref"] }
+
 # GPU butteraugli for the (opt-in) butteraugli-loop quant refinement.
 # Pinned to the zenmetrics workspace path; same cubecl version as us.
 # `internals` feature gives us compute_with_reference_from_linear_planes

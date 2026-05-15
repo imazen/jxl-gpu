@@ -1,0 +1,122 @@
+# cpu_vs_gpu_e7_e8_e9_2026-05-15.tsv — meta
+
+## Run
+
+- date: 2026-05-15
+- git_commit (parent): 4f3203d8 (fix(gaborish): mirror libjxl distance > 0.5 gate at d <= 0.5)
+- hostname: lilith
+- hardware: AMD Ryzen 9 7950X + RTX 5070 (CUDA backend)
+- bench: jxl-encoder-gpu/examples/cpu_vs_gpu_e7_e8_e9_bench.rs
+- runs: 2 (min wall-clock reported)
+- total wall-clock: 109.8s
+
+## Sweep
+
+- 4 images (clic2025-1024 photos representing the 4 BestOfBothPath quadrants)
+- 3 efforts: e7 (no buttloop) / e8 (2 iters) / e9 (4 iters)
+- 4 distances: 0.5 / 1.0 / 2.0 / 4.0
+- 2 encoders: cpu (jxl-encoder LossyConfig) / gpu (jxl-encoder-gpu encode_lossy_to_bitstream_via_precomputed*)
+- = 96 rows (48 cells × 2 encoders)
+
+## Apples-to-apples summary (averaged across 16 cells per (effort, encoder))
+
+| effort | enc |  wall_ms |    bytes |  bfly | ssim2 | zensim |
+|--------|-----|---------:|---------:|------:|------:|-------:|
+| e7     | cpu |    128.8 |  225 747 | 2.119 | 77.14 |  78.82 |
+| e7     | gpu |    109.6 |  210 282 | 14.51 | 31.01 |  47.99 |
+| e8     | cpu |    147.9 |  225 747 | 2.119 | 77.14 |  78.82 |
+| e8     | gpu |    249.4 |  201 000 |  2.38 | 74.12 |  74.62 |
+| e9     | cpu |    540.8 |  225 908 | 2.122 | 77.12 |  78.81 |
+| e9     | gpu |    249.5 |  201 000 |  2.38 | 74.12 |  74.62 |
+
+The e7 GPU mean is dominated by 2 image × 4 distance pairs where the GPU
+`encode_lossy_to_bitstream_via_precomputed_from_u8` fast path produces
+broken output (see "Known issues" below). Excluding those, e7 GPU
+metrics line up similarly to e8/e9.
+
+## Apples-to-apples scope
+
+1. **CPU sRGB EOTF**: jxl-encoder applies IEC 61966-2-1 sRGB EOTF on
+   input. GPU applies the SAME math in
+   `upload_u8_rgb_to_linear_planar_padded`. Linear values match to
+   within f32 precision.
+2. **CPU butteraugli_iters per effort**: e7=0, e8=2, e9=4 (libjxl
+   `enc_adaptive_quantization.cc:1282`). GPU mirrors EXACTLY: e7 =
+   `_from_u8` (no loop), e8 = `_with_butteraugli` 2 iters, e9 =
+   `_with_butteraugli` 4 iters.
+3. **Gaborish gate at d <= 0.5**: CPU `api.rs:3842`, GPU mirrored in
+   `prepare_strategy_search_plan_inner` + `run_pipeline_with_qac` +
+   `encode_lossy_to_bitstream_via_precomputed*` (commit 4f3203d8).
+
+## NOT apples-to-apples (documented caveats)
+
+4. **Patches**: GPU all-DCT8 fast path skips patch detection
+   (`encoder.rs:2280-2293`). CPU runs patches at e7+. Photo content is
+   patch-empty so this is a no-op for clic2025-1024 cells; matters for
+   screenshots.
+5. **DCT FP precision**: cubecl DCT vs `jxl-encoder-simd` AVX-512
+   differ by ~2% chroma AC coefs flipping by 1 near rounding ties
+   (`encoder.rs:2290`). Bytes are NOT byte-identical even when all
+   other state matches. The `gpu_zensim_does_not_regress_vs_cpu` test
+   asserts `gpu_zensim >= cpu_zensim - tolerance` per cell, where
+   tolerance scales with distance.
+
+## Known quality issues found by this bench (NEW BUGS)
+
+The `gpu_zensim_does_not_regress_vs_cpu` test (run with
+`--features gpu-zensim-regress`) FAILS on this commit due to:
+
+### CRITICAL: `encode_lossy_to_bitstream_via_precomputed_from_u8` produces broken output at e7
+
+Specifically image `1e2f9d41` and `02809272` at d>=2.0 with the e7
+fast path:
+
+| image      | effort | distance | cpu zensim | gpu zensim | delta   |
+|------------|--------|----------|-----------:|-----------:|--------:|
+| 02809272   | e7     | 0.5      |     100.00 |      13.98 |  -86.02 |
+| 02809272   | e7     | 2.0      |      79.84 |      13.68 |  -66.17 |
+| 02809272   | e7     | 4.0      |      58.95 |      11.94 |  -47.01 |
+| 1e2f9d41   | e7     | 0.5      |      96.34 |       0.00 |  -96.34 |
+| 1e2f9d41   | e7     | 1.0      |      77.29 |       0.00 |  -77.29 |
+| 1e2f9d41   | e7     | 2.0      |      60.18 |       0.00 |  -60.18 |
+| 1e2f9d41   | e7     | 4.0      |      39.58 |       0.00 |  -39.58 |
+
+The decoded output of these e7 fast-path bitstreams has linear values
+up to 4.68 (should be in [0, 1]); jxl-oxide `srgb_linear` decode
+returns over-bright pixels. The slow path (`_via_precomputed`, f32) +
+the buttloop paths (`_with_butteraugli` at e8/e9) all produce correct
+output. So the bug is localised to the all-DCT8 fast path
+(`run_gpu_dct8_pre_quantized_path` in `encoder.rs:3018`).
+
+### Smaller real regressions (within 1-3 zensim points of tolerance)
+
+| image      | effort | distance | cpu zensim | gpu zensim | delta   |
+|------------|--------|----------|-----------:|-----------:|--------:|
+| 1cba10ad   | e8     | 1.0      |      86.68 |      82.11 |   -4.57 |
+| 1cba10ad   | e9     | 1.0      |      86.79 |      82.11 |   -4.68 |
+
+These are within 1 zensim point of the `tolerance_for_distance(1.0)
+= 4.0` and look like real cost-model differences, not corruption.
+
+## Reproduce
+
+```bash
+cd /home/lilith/work/zen/jxl-encoder-gpu
+
+# Bench (~110 s on 4 photos × 3 efforts × 4 distances × 2 runs)
+cargo run --release -p jxl-encoder-gpu \
+  --features 'cuda encoder butteraugli-loop' \
+  --example cpu_vs_gpu_e7_e8_e9_bench -- \
+    --image /home/lilith/work/codec-corpus/clic2025-1024/02809272...png \
+    --image /home/lilith/work/codec-corpus/clic2025-1024/22ea12c903e41583.png \
+    --image /home/lilith/work/codec-corpus/clic2025-1024/1cba10ad...png \
+    --image /home/lilith/work/codec-corpus/clic2025-1024/1e2f9d41529197f1.png \
+    --effort 7 --effort 8 --effort 9 \
+    --distance 0.5 --distance 1.0 --distance 2.0 --distance 4.0 \
+    --runs 2 \
+    --out benchmarks/cpu_vs_gpu_e7_e8_e9_$(date +%F).tsv
+
+# Regress test (~25 s on 4 photos × 3 efforts × 2 distances)
+cargo test -p jxl-encoder-gpu --features gpu-zensim-regress \
+  --test cpu_vs_gpu_zensim_regress --release -- --nocapture
+```

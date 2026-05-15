@@ -30,6 +30,13 @@ butteraugli-loop = ["dep:butteraugli-gpu"]
 # Required to RUN the corpus regression suite — build/CI default
 # leaves it off so CI doesn't need the corpus tree.
 corpus = ["cuda", "encoder", "butteraugli-loop"]
+# `gpu-zensim-regress` enables the
+# `tests/cpu_vs_gpu_zensim_regress.rs` integration test that asserts
+# `gpu_zensim >= cpu_zensim - TOLERANCE` for every (image, effort,
+# distance) cell. Same dependency stack as `corpus`; off by default
+# so CI machines without GPU+corpus don't try to run it. Run with
+# `cargo test --features gpu-zensim-regress --test cpu_vs_gpu_zensim_regress`.
+gpu-zensim-regress = ["cuda", "encoder", "butteraugli-loop"]
 
 [dependencies]
 cubecl = { workspace = true }
@@ -53,6 +60,10 @@ image = { workspace = true }
 jxl = { workspace = true }
 fast-ssim2 = { workspace = true }
 imgref = { workspace = true }
+# zensim — psychovisual similarity metric. Used by the bench harness
+# (`examples/cpu_vs_gpu_e7_e8_e9_bench.rs`) and the corresponding
+# regress integration test (`tests/cpu_vs_gpu_zensim_regress.rs`).
+zensim = { workspace = true }
 # CPU butteraugli — for buttloop_parity diagnostic comparing GPU vs CPU
 # per-tile distance maps. Per-image dev-dep, not part of the runtime.
 butteraugli = { workspace = true }
