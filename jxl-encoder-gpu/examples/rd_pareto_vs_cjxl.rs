@@ -513,9 +513,11 @@ fn linear_to_srgb_u8(linear: f32) -> u8 {
 /// Falls back to jxl-rs (the PRIMARY decoder per project CLAUDE.md) if
 /// jxl-oxide rejects the bitstream — this catches the known jxl-oxide
 /// 0.12.5 limitation with ANS in multi-group modular frames (unexpected
-/// EOF). jxl-rs's `JxlDataFormat::f32()` decodes to LINEAR f32 by
-/// default (per `examples/jxl_rs_roundtrip.rs:186`), so the output is
-/// already in the format butteraugli + our SSIM2 path expect.
+/// EOF on e.g. imac_g3 at 2940×1912). The fallback path applies the
+/// inverse sRGB OETF in `decode_via_jxl_rs` so both branches return
+/// **linear** RGB; the previous version forgot this and silently fed
+/// sRGB-encoded f32 to butteraugli_linear, producing bfly = 66 on every
+/// jxl-oxide-failure case.
 ///
 /// Returns (width, height, interleaved RGB f32 in linear light).
 #[cfg(all(feature = "cuda", feature = "encoder", feature = "butteraugli-loop"))]
@@ -538,11 +540,24 @@ fn decode_via_jxl_oxide(bytes: &[u8]) -> Option<(usize, usize, Vec<f32>)> {
     Some((fb.width(), fb.height(), fb.buf().to_vec()))
 }
 
-/// jxl-rs fallback decode. Returns interleaved linear f32 RGB. Mirrors
-/// the pattern in `examples/jxl_rs_roundtrip.rs` exactly — the
-/// `JxlDataFormat::f32()` request gives LINEAR f32 (not sRGB) per the
-/// comment at line 186 of that file. We only handle the color channels
-/// (no extras) since metric measurement doesn't need alpha here.
+/// jxl-rs fallback decode. Returns interleaved **linear** f32 RGB.
+///
+/// `JxlDataFormat::f32()` returns the bitstream's signaled colorspace —
+/// for our encoder that's `TransferFunction::Srgb`, so jxl-rs hands us
+/// **sRGB-encoded** (nonlinear) f32 values, NOT linear. The previous
+/// version of this comment claimed linear and never linearized: that
+/// silently fed sRGB nonlinear values to `butteraugli_linear()` and
+/// produced bfly = 66 / SSIM2 = 6 on every image where jxl-oxide chose
+/// to fall back to this path (notably imac_g3 at 2940×1912, which trips
+/// jxl-oxide 0.12.5's known multi-group ANS bug — see project CLAUDE.md).
+/// Verified: linear 1.6666 → sRGB-encoded 1.2502 (the value jxl-rs
+/// reports), exact match for the standard sRGB OETF.
+///
+/// Fix: apply the inverse sRGB EOTF (`srgb_eotf_f32`) per channel here
+/// so the returned values are linear, matching what
+/// `decode_via_jxl_oxide` returns via `srgb_linear` color encoding
+/// request. We only handle the color channels (no extras) since metric
+/// measurement doesn't need alpha here.
 #[cfg(all(feature = "cuda", feature = "encoder", feature = "butteraugli-loop"))]
 fn decode_via_jxl_rs(bytes: &[u8]) -> Option<(usize, usize, Vec<f32>)> {
     use jxl::api::{
@@ -635,10 +650,31 @@ fn decode_via_jxl_rs(bytes: &[u8]) -> Option<(usize, usize, Vec<f32>)> {
             if !r.is_finite() || !g.is_finite() || !b.is_finite() {
                 return None;
             }
-            out.push(r);
-            out.push(g);
-            out.push(b);
+            // Apply inverse sRGB OETF — jxl-rs returns the bitstream's
+            // signaled colorspace (Srgb TF for our encoder), and
+            // `butteraugli_linear` + the SSIM2 sRGB encoder both expect
+            // **linear** light. Without this, jxl-rs-fallback paths
+            // produced bfly = 66.
+            out.push(srgb_eotf_f32(r));
+            out.push(srgb_eotf_f32(g));
+            out.push(srgb_eotf_f32(b));
         }
     }
     Some((w, h, out))
+}
+
+/// Inverse sRGB OETF (sRGB EOTF) applied per channel. Maps the
+/// IEC 61966-2-1 sRGB encoded f32 (output of jxl-rs when the bitstream
+/// signals `TransferFunction::Srgb`) back to linear light. Negative
+/// input is clamped to 0 to keep the result well-defined; values >1
+/// are extrapolated via the gamma branch (matches what `butteraugli`'s
+/// own EOTF helper does on out-of-gamut decoded pixels).
+#[cfg(all(feature = "cuda", feature = "encoder", feature = "butteraugli-loop"))]
+#[inline]
+fn srgb_eotf_f32(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }

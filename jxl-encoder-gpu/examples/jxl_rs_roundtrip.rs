@@ -183,16 +183,22 @@ fn main() {
         ys
     );
     assert_eq!(nan_count, 0, "decoder left NaN pixels in the output");
-    // Note: with JxlDataFormat::f32() jxl-rs decodes to LINEAR f32 by default
-    // (not sRGB), so values can slightly exceed [0, 1] due to gamut/lossy
-    // recovery. We just check that values are bounded and finite.
+    // Note: jxl-rs `JxlDataFormat::f32()` returns the bitstream's
+    // signaled colorspace — for our encoder that's
+    // `TransferFunction::Srgb`, so values are sRGB-encoded
+    // **nonlinear** f32 (NOT linear). Values can slightly exceed
+    // [0, 1] due to gamut / lossy recovery. We just check the range
+    // is bounded and finite. (Previous comment incorrectly claimed
+    // linear; this misled `rd_pareto_vs_cjxl.rs` and the regress
+    // test into feeding sRGB to butteraugli_linear, producing
+    // bfly = 66 on imac_g3 — fixed 2026-05-15.)
     assert!(
         min_v >= -0.5 && max_v <= 1.5,
         "decoded f32 range wildly out of bounds: [{min_v}, {max_v}]"
     );
 
     println!(
-        "\n✓ jxl-rs decoded our encoder's output cleanly. {w}×{h} → {} bytes → decoded in\n  {:.2}s with no NaN, finite output in linear-RGB f32.",
+        "\n✓ jxl-rs decoded our encoder's output cleanly. {w}×{h} → {} bytes → decoded in\n  {:.2}s with no NaN, finite output in sRGB-encoded f32.",
         bytes.len(),
         decode_dt.as_secs_f64()
     );

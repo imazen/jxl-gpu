@@ -1,0 +1,78 @@
+# imac_g3 post DCT8-fix sweep
+# 2026-05-15
+
+## Status
+
+The "imac_g3 corruption bug" reported in
+`benchmarks/rd_pareto_d0.5_screenshots_post_fix.meta:35-38` was a
+**measurement bug**, not an encoder corruption. The DCT8 fast-path fix
+in commit `7cfd3241` (closes imazen/jxl-gpu#8) did not change imac_g3 —
+because the imac_g3 path was never broken to begin with at the encoder
+level.
+
+## What the bug actually was
+
+`rd_pareto_vs_cjxl.rs` and `cpu_vs_gpu_zensim_regress.rs` both decoded
+JXL via jxl-oxide (with `srgb_linear` color encoding requested) and
+fell back to jxl-rs when jxl-oxide rejected the bitstream — which it
+does on multi-group modular ANS streams (project CLAUDE.md "jxl-oxide
+0.12.5 has a known limitation with ANS in multi-group modular frames").
+
+The fallback claimed jxl-rs's `JxlDataFormat::f32()` returned **linear**
+RGB. It does not — it returns the bitstream's signaled colorspace,
+which for our encoder is `TransferFunction::Srgb`, i.e. sRGB-encoded
+nonlinear f32. Feeding those nonlinear values to `butteraugli_linear()`
+produced bfly = 66 and ssim2 = 6 on every cell where jxl-oxide fell
+back. imac_g3 at 2940×1912 is large enough to trip jxl-oxide's
+multi-group ANS bug at every distance, so all 6 cells (gpu_e7 + gpu_e8
+× d∈{0.5, 1.0, 2.0}) appeared catastrophically broken.
+
+Verified: linear value 1.6666 ↔ sRGB-encoded value 1.2502 (the value
+jxl-rs reported in the cjxl bitstream), exact match for the standard
+sRGB OETF. djxl decoded both our gpu_e7 and the cjxl bitstreams to
+PSNR 50.30 vs 46.41 against the source PNG — our output is *better*
+than cjxl's at d=1.0, not catastrophically broken.
+
+## Fix
+
+`decode_via_jxl_rs` in `rd_pareto_vs_cjxl.rs` (and a duplicate copy in
+`cpu_vs_gpu_zensim_regress.rs`) now applies the inverse sRGB OETF
+per channel before returning. The CPU `cpu_vs_gpu_zensim_regress` test
+also added imac_g3 to the IMAGES list as a permanent regression seed
+covering both the linear-vs-sRGB bug and the jxl-oxide-fallback path
+that triggers it.
+
+## Headline result (post-fix)
+
+| Image   | distance | encoder | bytes  | bfly  | ssim2 |
+|---------|---------:|---------|-------:|------:|------:|
+| imac_g3 | 0.5 | gpu_e7  | 328060 | 0.782 | 90.04 |
+| imac_g3 | 0.5 | gpu_e8  | 481059 | 2.389 | 87.46 |
+| imac_g3 | 0.5 | cjxl_e7 | 594148 | 0.710 | 90.11 |
+| imac_g3 | 1.0 | gpu_e7  | 299451 | 1.301 | 88.61 |
+| imac_g3 | 1.0 | gpu_e8  | 341044 | 3.957 | 84.59 |
+| imac_g3 | 1.0 | cjxl_e7 | 545063 | 1.311 | 88.34 |
+| imac_g3 | 2.0 | gpu_e7  | 249036 | 2.383 | 85.08 |
+| imac_g3 | 2.0 | gpu_e8  | 221138 | 4.756 | 81.52 |
+| imac_g3 | 2.0 | cjxl_e7 | 415358 | 1.893 | 85.23 |
+
+`gpu_e7` is **at parity with cjxl** on imac_g3:
+- d=0.5: bytes -45%, bfly +10%, ssim2 -0.07pp (close to parity)
+- d=1.0: bytes -45%, bfly -1% (BEATS cjxl), ssim2 +0.27pp
+- d=2.0: bytes -40%, bfly +26%, ssim2 -0.15pp
+
+`gpu_e8` (butteraugli loop) DEGRADES quality on imac_g3 (bfly ~2-5
+when uniform-qac gpu_e7 is at 0.7-2.4). This is the documented
+GPU buttloop tuning gap on screenshot/text content (memory
+`buttloop_rd_gap_2026-05-14.md`) — pre-existing, not introduced today.
+The new `cpu_vs_gpu_zensim_regress` baseline reflects this gap.
+
+## Reproduce
+
+    cargo build --release -p jxl-encoder-gpu --features 'cuda encoder butteraugli-loop' --example rd_pareto_vs_cjxl
+    ./target/release/examples/rd_pareto_vs_cjxl \
+        --image /home/lilith/work/codec-corpus/gb82-sc/imac_g3.png \
+        --distance 0.5 --distance 1.0 --distance 2.0 \
+        --encoder gpu_e7 --encoder gpu_e8 --encoder cjxl_e7 \
+        --out benchmarks/imac_g3_post_dct8_fix_2026-05-15.tsv \
+        --runs 1

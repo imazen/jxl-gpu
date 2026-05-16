@@ -1,0 +1,19 @@
+# rd_pareto_vs_cjxl TSV
+# generated_utc	2026-05-16T01:26:47Z
+# git_commit	7cfd324
+# hostname	lilith
+# cmdline	./target/release/examples/rd_pareto_vs_cjxl --image /home/lilith/work/codec-corpus/gb82-sc/imac_g3.png --distance 0.5 --distance 1.0 --distance 2.0 --encoder gpu_e7 --encoder gpu_e8 --encoder cjxl_e7 --out /tmp/imac_g3_post_fix.tsv --runs 1
+# n_images	1
+# distances	[0.5, 1.0, 2.0]
+# encoders	["gpu_e7", "gpu_e8", "cjxl_e7"]
+# runs	1
+image	width	height	encoder	effort	distance	bytes	measured_bfly	measured_ssim2	encode_ms
+imac_g3	2940	1912	gpu_e7	7	0.5	328060	0.782154	90.035308	4779.31
+imac_g3	2940	1912	gpu_e8	8	0.5	481059	2.389148	87.460162	1377.92
+imac_g3	2940	1912	cjxl_e7	7	0.5	594148	0.710297	90.105357	218.75
+imac_g3	2940	1912	gpu_e7	7	1	299451	1.300881	88.612054	793.30
+imac_g3	2940	1912	gpu_e8	8	1	341044	3.957372	84.591447	1004.02
+imac_g3	2940	1912	cjxl_e7	7	1	545063	1.311114	88.336552	327.42
+imac_g3	2940	1912	gpu_e7	7	2	249036	2.382658	85.077739	774.21
+imac_g3	2940	1912	gpu_e8	8	2	221138	4.756388	81.516921	948.02
+imac_g3	2940	1912	cjxl_e7	7	2	415358	1.892595	85.233444	324.60

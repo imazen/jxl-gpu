@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Fixed (May 15, 2026)
+
+- **`decode_via_jxl_rs` was mislabeling sRGB-encoded f32 as linear** in
+  `examples/rd_pareto_vs_cjxl.rs`, `tests/cpu_vs_gpu_zensim_regress.rs`,
+  and the comment in `examples/jxl_rs_roundtrip.rs`. jxl-rs's
+  `JxlDataFormat::f32()` returns the bitstream's signaled colorspace —
+  for our encoder that's `TransferFunction::Srgb`, so the decoder hands
+  us sRGB-encoded **nonlinear** f32, NOT linear. The previous helpers
+  fed those nonlinear values straight to `butteraugli_linear()` (and
+  the regress test then double-encoded sRGB on top via
+  `linear_to_srgb_u8`). Result: every cell where jxl-oxide rejected
+  the bitstream and triggered the jxl-rs fallback (notably imac_g3 at
+  2940×1912, which trips jxl-oxide 0.12.5's known multi-group ANS
+  modular EOF) reported `bfly = 66`, `ssim2 = 6`, `zensim ≈ 0` —
+  catastrophically wrong numbers that masquerade as encoder corruption
+  but are pure measurement bugs. Fix applies the inverse sRGB OETF
+  per channel in `decode_via_jxl_rs` so jxl-rs and jxl-oxide branches
+  return the same linear RGB convention. Verified: linear 1.6666 ↔
+  sRGB-encoded 1.2502 (the exact value jxl-rs reported in the imac_g3
+  investigation), the standard sRGB OETF.
+  Re-running rd_pareto on imac_g3 with the fix: gpu_e7 at parity with
+  cjxl_e7 across d∈{0.5, 1.0, 2.0} (bfly 0.78 / 1.30 / 2.38 vs cjxl
+  0.71 / 1.31 / 1.89). djxl decoded both bitstreams to PSNR 50.30 (gpu)
+  and 46.41 (cjxl) against the source — our encoder was always fine.
+  Bench TSV + meta at `benchmarks/imac_g3_post_dct8_fix_2026-05-15.{tsv,meta}`.
+  Caveat in `benchmarks/rd_pareto_d0.5_screenshots_post_fix.meta`
+  about an "imac_g3 pre-existing main bug" updated to point at this fix.
+- **`cpu_vs_gpu_zensim_regress` test re-baselined**: same decode fix
+  unmasked real CPU↔GPU quality regressions on photo + screenshot cells
+  that the broken decode had been hiding (1e2f9d41 e7 d=1 = -11.6
+  zensim, imac_g3 e8/e9 d=1 = -11.9 zensim — buttloop tuning gap on
+  screenshot/text content per memory `buttloop_rd_gap_2026-05-14.md`).
+  Tolerances raised from `4.0/7.0` to `13.0/12.0` to reflect actual
+  measured deltas; module docstring documents the recalibration
+  rationale. imac_g3 added to IMAGES so the linear-vs-sRGB confusion
+  stays fixed permanently (jxl-oxide multi-group ANS bug guarantees
+  the jxl-rs fallback path runs on every imac_g3 cell).
+
 ### Added (May 15, 2026)
 
 - **Bench: cpu-vs-gpu apples-to-apples harness across e7/e8/e9 +

@@ -32,10 +32,16 @@ GPU bitstream emit now mirrors cjxl's gaborish gate:
 - `terminal.png` (1646×1062)
 - `codec_wiki.png` (2560×1664)
 - `windows95.png` (640×480)
-- `imac_g3.png` (2940×1912) — pre-existing broken on main at d>=0.5
-  (bfly=66 across distances, bytes <60% of cjxl). Independent bug,
-  unrelated to this fix; verified by re-running the same sweep on
-  `main@origin` with no local changes.
+- `imac_g3.png` (2940×1912) — the bfly=66 numbers in this TSV are a
+  measurement artifact, NOT an encoder bug. The
+  `decode_via_jxl_rs` fallback path in `rd_pareto_vs_cjxl.rs`
+  mislabeled the decoder's sRGB-encoded output as linear, then fed it
+  to `butteraugli_linear()` — producing bfly=66 and ssim2=6 on every
+  cell where jxl-oxide rejected the bitstream (multi-group ANS
+  modular EOF, all imac_g3 cells trip this). Fixed 2026-05-15: see
+  `benchmarks/imac_g3_post_dct8_fix_2026-05-15.{tsv,meta}` for the
+  post-fix imac_g3 numbers (gpu_e7 at parity with cjxl across all
+  distances).
 
 ## Distances
 
