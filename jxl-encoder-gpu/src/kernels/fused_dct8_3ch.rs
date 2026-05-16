@@ -40,6 +40,30 @@ const BIAS_RECIP: f32 = 0.145;
 
 #[cube]
 fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
+    // Mirrors `jxl_encoder_simd::dct8::dct1d_8_scalar` and the
+    // standalone `kernels::dct8::dct1d_8` exactly:
+    // - Split inputs into 4 sums (t0..t3) + 4 diffs (t4..t7)
+    // - DCT-4 on sums (inline butterfly) → even output positions
+    // - WC8 multiply on diffs, then DCT-4, **then** the post-DCT4
+    //   cascade `[SQRT2*r4+r5, r5+r6, r6+r7, r7]` → odd output positions
+    //
+    // Two bugs in earlier versions of this kernel — both fixed in
+    // jxl-gpu#8:
+    //
+    // 1. The post-DCT4 cascade on the diff half was missing entirely,
+    //    so odd output positions held the raw DCT-4 output instead of
+    //    the cascaded `[SQRT2*r4+r5, r5+r6, r6+r7, r7]` pattern.
+    //
+    // 2. Even output positions [2] and [4] were swapped vs CPU
+    //    (`t2 = b1v; t1 = c0_post;` then `mem[2]=t2; mem[4]=t1;` →
+    //    `mem[2]=T1, mem[4]=c0_post`, but CPU writes `mem[2]=c0_post,
+    //    mem[4]=T1`).
+    //
+    // Together these meant every odd row+col position and the
+    // mem[2]/mem[4] band were wrong; quantization of those positions
+    // applied the wrong weight + threshold, and the decoder
+    // reconstructed garbage values (max linear pixel ~8.1 vs ~1.5 on
+    // the slow path on the gold-glitter image at d=1.0 e7).
     let b0 = base as usize;
     let m0 = mem[b0];
     let m1 = mem[b0 + 1usize];
@@ -57,48 +81,66 @@ fn dct1d_8(mem: &mut SharedMemory<f32>, base: u32) {
     let mut t5 = m1 - m6;
     let mut t6 = m2 - m5;
     let mut t7 = m3 - m4;
-    let a0 = t0 + t3;
-    let a1 = t1 + t2;
-    let a2 = t0 - t3;
-    let a3 = t1 - t2;
-    let b0v = a0 + a1;
-    let b1v = a0 - a1;
-    let a2s = a2 * WC_M4_0;
-    let a3s = a3 * WC_M4_1;
-    let c0 = a2s + a3s;
-    let c1 = a2s - a3s;
-    let c0_post = SQRT2 * c0 + c1;
-    t0 = b0v;
-    t2 = b1v;
-    t1 = c0_post;
-    t3 = c1;
+    // ── First half: DCT-4 on the 4 sums (→ even output positions) ──
+    {
+        let a0 = t0 + t3;
+        let a1 = t1 + t2;
+        let a2 = t0 - t3;
+        let a3 = t1 - t2;
+        let b0v = a0 + a1;
+        let b1v = a0 - a1;
+        let a2s = a2 * WC_M4_0;
+        let a3s = a3 * WC_M4_1;
+        let c0 = a2s + a3s;
+        let c1 = a2s - a3s;
+        let c0_post = SQRT2 * c0 + c1;
+        // dct1d_4 output ordering: tmp[0..4] = [b0v, c0_post, b1v, c1].
+        // Map back into named t-vars so the storage step below matches
+        // the standalone `kernels::dct8::dct1d_8` form.
+        t0 = b0v;
+        t1 = c0_post;
+        t2 = b1v;
+        t3 = c1;
+    }
+    // ── Second half: WC8 multiply, DCT-4, then post-DCT4 cascade ──
     t4 *= WC_M8_0;
     t5 *= WC_M8_1;
     t6 *= WC_M8_2;
     t7 *= WC_M8_3;
-    let a0 = t4 + t7;
-    let a1 = t5 + t6;
-    let a2 = t4 - t7;
-    let a3 = t5 - t6;
-    let b0v = a0 + a1;
-    let b1v = a0 - a1;
-    let a2s = a2 * WC_M4_0;
-    let a3s = a3 * WC_M4_1;
-    let c0 = a2s + a3s;
-    let c1 = a2s - a3s;
-    let c0_post = SQRT2 * c0 + c1;
-    let r4 = b0v;
-    let r5 = c0_post;
-    let r6 = b1v;
-    let r7 = c1;
+    {
+        let a0 = t4 + t7;
+        let a1 = t5 + t6;
+        let a2 = t4 - t7;
+        let a3 = t5 - t6;
+        let b0v = a0 + a1;
+        let b1v = a0 - a1;
+        let a2s = a2 * WC_M4_0;
+        let a3s = a3 * WC_M4_1;
+        let c0 = a2s + a3s;
+        let c1 = a2s - a3s;
+        let c0_post = SQRT2 * c0 + c1;
+        // dct1d_4 output ordering on the diff half: same as above
+        // (tmp[4..8] = [b0v, c0_post, b1v, c1]).
+        t4 = b0v;
+        t5 = c0_post;
+        t6 = b1v;
+        t7 = c1;
+    }
+    // Post-DCT4 cascade for the diff (odd-position) half — matches
+    // CPU scalar `tmp[4]=SQRT2*tmp[4]+tmp[5]; tmp[5]+=tmp[6]; tmp[6]+=tmp[7];`.
+    t4 = SQRT2 * t4 + t5;
+    t5 = t5 + t6;
+    t6 = t6 + t7;
+    // Final storage: even positions from sums, odd positions from
+    // (cascaded) diffs.
     mem[b0] = t0;
-    mem[b0 + 2usize] = t2;
-    mem[b0 + 4usize] = t1;
+    mem[b0 + 1usize] = t4;
+    mem[b0 + 2usize] = t1;
+    mem[b0 + 3usize] = t5;
+    mem[b0 + 4usize] = t2;
+    mem[b0 + 5usize] = t6;
     mem[b0 + 6usize] = t3;
-    mem[b0 + 1usize] = r4;
-    mem[b0 + 3usize] = r5;
-    mem[b0 + 5usize] = r6;
-    mem[b0 + 7usize] = r7;
+    mem[b0 + 7usize] = t7;
 }
 
 #[cube]
