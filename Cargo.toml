@@ -90,3 +90,23 @@ codegen-units = 1
 # See local-cubecl-cuda/src/compute/command.rs (FORK PATCH comment).
 [patch.crates-io]
 cubecl-cuda = { path = "local-cubecl-cuda" }
+
+# imazen/jxl-oxide fork — picks up the empty-modular-section EOF fix
+# (commit fd4e2c3) so jxl-oxide accepts the multi-group VarDCT/patches
+# bitstreams our encoder produces. Without this, decode_via_jxl_oxide
+# fell back to jxl-rs for imac_g3 and any other multi-group output with
+# a deferred extra channel or patches reference frame. Drop these once
+# the fix lands in a published jxl-oxide release.
+jxl-oxide = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-color = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-image = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-bitstream = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-coding = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-frame = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-grid = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-modular = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-render = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-vardct = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-threadpool = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-jbr = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
+jxl-oxide-common = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3" }
