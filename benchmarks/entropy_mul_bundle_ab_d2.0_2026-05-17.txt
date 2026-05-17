@@ -1,0 +1,105 @@
+warning: enum `IwWeightKind` is never used
+  --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:39:10
+   |
+39 | pub enum IwWeightKind {
+   |          ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `IwWeightConfig` is never constructed
+  --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:73:12
+   |
+73 | pub struct IwWeightConfig {
+   |            ^^^^^^^^^^^^^^
+
+warning: function `compute_iw_weights` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:123:8
+    |
+123 | pub fn compute_iw_weights(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `compute_local_variance` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:194:4
+    |
+194 | fn compute_local_variance(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `compute_directional_max_variance` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:251:4
+    |
+251 | fn compute_directional_max_variance(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `local_variance_into` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:321:4
+    |
+321 | fn local_variance_into(plane: &[f32], width: usize, height: usize, half: usize, out: &mut [f32]) {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: enum `GradNorm` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:345:6
+    |
+345 | enum GradNorm {
+    |      ^^^^^^^^
+
+warning: function `compute_gradient` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:350:4
+    |
+350 | fn compute_gradient(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: struct `WeightedPool` is never constructed
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:379:12
+    |
+379 | pub struct WeightedPool;
+    |            ^^^^^^^^^^^^
+
+warning: associated functions `mean`, `l2`, and `l4` are never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:384:12
+    |
+381 | impl WeightedPool {
+    | ----------------- associated functions in this implementation
+...
+384 |     pub fn mean(values: &[f32], weights: &[f32]) -> f64 {
+    |            ^^^^
+...
+398 |     pub fn l2(values: &[f32], weights: &[f32]) -> f64 {
+    |            ^^
+...
+412 |     pub fn l4(values: &[f32], weights: &[f32]) -> f64 {
+    |            ^^
+
+warning: struct `IwSsimFeatures` is never constructed
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:434:12
+    |
+434 | pub struct IwSsimFeatures {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated items `FEATURES_PER_CALL`, `as_array`, and `pool_from_maps` are never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:451:15
+    |
+449 | impl IwSsimFeatures {
+    | ------------------- associated items in this implementation
+450 |     /// Number of features per call — matches `FEATURES_PER_CHANNEL_*_MASKED` in `metric.rs`.
+451 |     pub const FEATURES_PER_CALL: usize = 6;
+    |               ^^^^^^^^^^^^^^^^^
+...
+454 |     pub fn as_array(&self) -> [f64; 6] {
+    |            ^^^^^^^^
+...
+474 |     pub fn pool_from_maps(
+    |            ^^^^^^^^^^^^^^
+
+warning: `zensim` (lib) generated 12 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.17s
+     Running `target/release/examples/auto_entropy_mul_bytes_ab --distance 2.0`
+[auto_entropy_mul_bytes_ab] distance=2 images=6 (auto-dispatch OFF baseline vs ON)
+image                                                           MP      off_b       on_b      Δb  Δb_pct  bfly_o  bfly_n  Δbfly  ss2_o  ss2_n   Δss2
+terminal.png                                                  1.75      51197      51197      +0  +0.00%   1.372   1.372 +0.000  88.86  88.86  +0.00
+imac_g3.png                                                   5.62     249040     249040      +0  +0.00%   2.383   2.383 +0.000  85.12  85.12  +0.00
+windows95.png                                                 0.31      39796      39796      +0  +0.00%   2.251   2.251 +0.000  81.89  81.89  +0.00
+02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png  1.05     188616     213193  +24577 +13.03%   2.656   2.652 -0.004  76.91  76.62  -0.28
+07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png  1.05     112682     122850  +10168  +9.02%   2.849   2.850 +0.002  68.34  68.62  +0.28
+22ea12c903e41583b7c469cb86040157.png                          1.05      58545      65866   +7321 +12.50%   2.524   3.661 +1.137  77.58  77.49  -0.10
+
+TOTAL (n=6 images, 10.82 MP): 699876 → 741942 bytes (+42066 bytes, +6.010%)

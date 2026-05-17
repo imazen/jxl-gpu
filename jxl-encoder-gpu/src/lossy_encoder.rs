@@ -324,6 +324,63 @@ pub struct LossyEncoder<R: Runtime> {
     /// recover strict default-off AFV behavior (e.g., for byte-exact
     /// reproducibility against a pre-2026-05-17 baseline).
     auto_evaluate_afv_on_screenshots: bool,
+    /// Opt-in dispatch of per-strategy `entropy_mul` and `dist_bias`
+    /// between libjxl-faithful and GPU-lifted values based on a content
+    /// discriminator (median per-block `mask1x1`).
+    ///
+    /// **Default `false`** — measured photo regression on the
+    /// validation set (see
+    /// `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
+    /// item #3+#10). The audit hypothesised that on photo content the
+    /// libjxl-faithful entropy_mul values + dropped `dist_bias` would
+    /// "let larger transforms win on smooth regions where they are
+    /// actually optimal — measured to save bytes on photos at slight
+    /// bfly cost." An A/B run on three CLIC photos at d=1.0 measured the
+    /// opposite: **bytes +2.5% to +8.5%, butteraugli +0.11 to +0.24,
+    /// SSIM2 −0.17 to −0.42** — strictly Pareto-worse on every axis.
+    /// The root cause is the original drop reason re-validated: this
+    /// GPU encoder lacks `kAvoidEntropyOfTransforms` and the
+    /// X-channel multi-block weight, so removing the GPU-lifted
+    /// entropy_mul + `dist_bias` counterweights causes over-pick of
+    /// large transforms regardless of content class.
+    ///
+    /// Kept as an opt-in (rather than removed) because the dispatch
+    /// infrastructure is reusable: once `kAvoidEntropyOfTransforms` +
+    /// the X-channel multi-block weight land in the GPU cost grids
+    /// (cross-reference dropped log item #4 — multi-week project),
+    /// this branch becomes the right shape for re-validation against
+    /// libjxl-faithful values. Until then, leave at `false`.
+    ///
+    /// When enabled, [`Self::prepare_strategy_search_plan_inner`]
+    /// picks one of two cost-model branches once per encode based on
+    /// the same screenshot discriminator that powers
+    /// [`Self::auto_evaluate_afv_on_screenshots`]:
+    ///
+    /// 1. **Screenshot branch** (`median(per-block mask1x1) >
+    ///    Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD`): keep the GPU-lifted
+    ///    `entropy_mul` for IDENTITY (1.85) and DCT4x8/DCT8x4 (0.98)
+    ///    plus the current distance-scaled `dist_bias` multipliers.
+    ///    Screenshot output is byte-identical to the default-off path
+    ///    (the discriminator picks this branch on screenshots).
+    ///
+    /// 2. **Photo branch** (median ≤ threshold): switch IDENTITY and
+    ///    DCT4x8/DCT8x4 to libjxl reference values (1.0428 and 0.859316
+    ///    respectively, from [`crate::forks::cost::EntropyMulTable::reference`])
+    ///    and drop the distance-scaled `dist_bias` multipliers
+    ///    (`dist_bias = dist_bias_32 = dist_bias_64 = 1.0`). **Currently
+    ///    Pareto-worse vs the default** — see paragraph above.
+    ///
+    /// The dispatch is **bundled** (entropy_mul + `dist_bias` together)
+    /// because the GPU-lifted values were tuned as a counterweight
+    /// suite; replacing one without the other unbalances the cost
+    /// model further. See
+    /// `dropped_optimizations_for_parity_2026-05-15.md` items #3
+    /// (entropy_mul) and #10 (`dist_bias`) for the original drop
+    /// rationale and
+    /// `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
+    /// item #3 for the conditional-dispatch hypothesis that the
+    /// 2026-05-17 A/B run refuted.
+    auto_libjxl_entropy_mul_on_photos: bool,
 }
 
 /// Round `n` up to the next multiple of `align`.
@@ -662,6 +719,17 @@ impl<R: Runtime> LossyEncoder<R> {
             // photos (gate never fires), modest bytes win on screenshots.
             // See `Self::auto_evaluate_afv_on_screenshots` field docs.
             auto_evaluate_afv_on_screenshots: true,
+            // Opt-in dispatch of entropy_mul / dist_bias bundle.
+            // **Default `false`** — measured photo regression
+            // (Pareto-worse on bytes + butteraugli + SSIM2) blocks
+            // default-on. Kept as opt-in for re-validation once the
+            // missing `kAvoidEntropyOfTransforms` + X-channel
+            // multi-block weight counterweights land in the GPU cost
+            // grids (cross-ref dropped log item #4). See
+            // `Self::auto_libjxl_entropy_mul_on_photos` field docs
+            // for the audit hypothesis + the A/B measurement that
+            // refuted it.
+            auto_libjxl_entropy_mul_on_photos: false,
         }
     }
 
@@ -726,6 +794,36 @@ impl<R: Runtime> LossyEncoder<R> {
     /// [field]: #structfield.auto_evaluate_afv_on_screenshots
     pub fn auto_evaluate_afv_on_screenshots(&self) -> bool {
         self.auto_evaluate_afv_on_screenshots
+    }
+
+    /// Opt-in dispatch of per-strategy `entropy_mul` and `dist_bias`
+    /// between libjxl-faithful (photo branch) and GPU-lifted
+    /// (screenshot branch) values based on the per-block `mask1x1`
+    /// median.
+    ///
+    /// **Default `false`** — see the
+    /// [`Self::auto_libjxl_entropy_mul_on_photos`][field] field for
+    /// the audit hypothesis and the 2026-05-17 A/B measurement that
+    /// refuted it (Pareto-worse on bytes + butteraugli + SSIM2 on
+    /// photos). Use `with_auto_libjxl_entropy_mul_on_photos(true)`
+    /// only for re-validation experiments — production should stay
+    /// at the default.
+    ///
+    /// [field]: #structfield.auto_libjxl_entropy_mul_on_photos
+    pub fn with_auto_libjxl_entropy_mul_on_photos(mut self, on: bool) -> Self {
+        self.auto_libjxl_entropy_mul_on_photos = on;
+        self
+    }
+
+    /// Whether the encoder will dispatch the entropy_mul + dist_bias
+    /// bundle by content. **Default `false`** (opt-in). See the
+    /// [`Self::auto_libjxl_entropy_mul_on_photos`][field] field for
+    /// gate semantics and the measured photo regression that blocks
+    /// default-on.
+    ///
+    /// [field]: #structfield.auto_libjxl_entropy_mul_on_photos
+    pub fn auto_libjxl_entropy_mul_on_photos(&self) -> bool {
+        self.auto_libjxl_entropy_mul_on_photos
     }
 
     /// Original (un-padded) dimensions the caller sees.
@@ -1438,31 +1536,38 @@ impl<R: Runtime> LossyEncoder<R> {
         let aq_field = block_means_to_qac_field(&aq_field_means, distance);
         mark("aq_field");
 
+        // Compute the screenshot-discriminator median ONCE per encode
+        // and reuse for both AFV auto-dispatch and the entropy_mul +
+        // dist_bias auto-dispatch bundle (`auto_libjxl_entropy_mul_on_photos`).
+        //
+        // Median is over `aq_field_means` directly — per-padded-block
+        // mask1x1 means already produced on GPU (block_mask_mean
+        // kernel). Same value space and threshold as
+        // `content_looks_like_screenshot` (95.0 floor).
+        //
+        // partial_cmp NaN-safe: NaN sorts to the end via Equal
+        // fallback; production mask1x1 values never produce NaN, but
+        // the fallback matches the rest of the codebase.
+        let mask1x1_block_median: Option<f32> = if !aq_field_means.is_empty() {
+            let mut sorted = aq_field_means.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+            Some(sorted[sorted.len() / 2])
+        } else {
+            None
+        };
+        let screenshot_likely: bool = mask1x1_block_median
+            .map(|m| m > Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD)
+            .unwrap_or(false);
+
         // Auto-AFV dispatch: enable AFV cost-grid evaluation when the
         // input passes the same screenshot discriminator that
         // `LossyEncoder::content_looks_like_screenshot` uses, and
         // effort allows it. See `Self::auto_evaluate_afv_on_screenshots`
         // field docs for full rationale.
-        //
-        // The median is taken over `aq_field_means` directly — these
-        // are the per-padded-block mask1x1 means already produced on
-        // GPU (block_mask_mean kernel). Same value space and threshold
-        // as `content_looks_like_screenshot` (95.0 floor).
-        //
-        // partial_cmp NaN-safe: NaN sorts to the end via Equal fallback;
-        // production mask1x1 values never produce NaN, but the fallback
-        // matches the rest of the codebase.
         let effective_evaluate_afv = if self.evaluate_afv {
             // Explicit opt-in always wins.
             true
-        } else if self.auto_evaluate_afv_on_screenshots
-            && self.effort >= 7
-            && !aq_field_means.is_empty()
-        {
-            let mut sorted = aq_field_means.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
-            let median = sorted[sorted.len() / 2];
-            let fired = median > Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD;
+        } else if self.auto_evaluate_afv_on_screenshots && self.effort >= 7 && screenshot_likely {
             // Diagnostic: set JXL_GPU_DEBUG_AUTO_AFV=1 to log the dispatch
             // decision per encode (host-side only; the `encoder` feature
             // brings std in transitively).
@@ -1470,16 +1575,57 @@ impl<R: Runtime> LossyEncoder<R> {
             {
                 extern crate std;
                 if std::env::var("JXL_GPU_DEBUG_AUTO_AFV").is_ok() {
+                    let median = mask1x1_block_median.unwrap_or(f32::NAN);
                     std::eprintln!(
-                        "[auto_afv] mask1x1 block-mean median={:.3}, threshold={:.3}, effort={}, fired={}",
-                        median, Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD, self.effort, fired
+                        "[auto_afv] mask1x1 block-mean median={:.3}, threshold={:.3}, effort={}, fired=true",
+                        median,
+                        Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD,
+                        self.effort,
                     );
                 }
             }
-            fired
+            true
         } else {
             false
         };
+
+        // Auto-dispatch of the entropy_mul + dist_bias bundle. See
+        // `Self::auto_libjxl_entropy_mul_on_photos` field docs for the
+        // rationale + rationale for keeping the two values bundled.
+        //
+        // `use_libjxl_entropy_mul_branch == true` means the encoder
+        // picks libjxl-faithful per-strategy `entropy_mul` for IDENTITY
+        // and DCT4x8/DCT8x4 AND drops the distance-scaled `dist_bias`
+        // multipliers (set to 1.0). Used on the photo branch.
+        //
+        // `false` keeps the GPU-lifted values + `dist_bias` (used on
+        // the screenshot branch). Screenshot output stays byte-identical
+        // to the pre-2026-05-17 single-branch behavior.
+        let use_libjxl_entropy_mul_branch = self.auto_libjxl_entropy_mul_on_photos
+            && mask1x1_block_median.is_some()
+            && !screenshot_likely;
+        #[cfg(any(test, feature = "encoder"))]
+        {
+            extern crate std;
+            if std::env::var("JXL_GPU_DEBUG_AUTO_ENTROPY_MUL").is_ok() {
+                let median = mask1x1_block_median.unwrap_or(f32::NAN);
+                std::eprintln!(
+                    "[auto_entropy_mul] mask1x1 block-mean median={:.3}, threshold={:.3}, branch={}, dist_bias={}",
+                    median,
+                    Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD,
+                    if use_libjxl_entropy_mul_branch {
+                        "libjxl-faithful (photo)"
+                    } else {
+                        "GPU-lifted (screenshot/fallback)"
+                    },
+                    if use_libjxl_entropy_mul_branch {
+                        "1.0 (off)"
+                    } else {
+                        "(distance-scaled, on)"
+                    },
+                );
+            }
+        }
 
         // Deferred host XYB download for the AFV branch in
         // `encode_and_reconstruct_mixed_strategy_single_channel`
@@ -1576,7 +1722,20 @@ impl<R: Runtime> LossyEncoder<R> {
         // wins on smooth content. Quality at parity confirmed at
         // d ∈ {1, 2, 4} on CLIC test image (1.3456 / 2.1525 / 3.4407,
         // all matching uniform-qac exactly).
-        let bias_scale = (distance - 1.0).max(0.0) * 0.3;
+        //
+        // Bundle with `entropy_mul` dispatch (see
+        // `Self::auto_libjxl_entropy_mul_on_photos` field docs): on
+        // the libjxl-faithful branch (photo content), `dist_bias` is
+        // disabled (= 1.0). The GPU-lifted entropy_mul + dist_bias
+        // were tuned together as a counterweight suite; the
+        // libjxl-reference entropy_mul values do not need the
+        // distance-scaled bias when used on photo content (libjxl
+        // itself ships without it).
+        let bias_scale = if use_libjxl_entropy_mul_branch {
+            0.0
+        } else {
+            (distance - 1.0).max(0.0) * 0.3
+        };
         let dist_bias = 1.0 + bias_scale;
         for c in cost_dct16.iter_mut() {
             *c *= dist_bias;
@@ -1655,11 +1814,38 @@ impl<R: Runtime> LossyEncoder<R> {
         let inv_d2_y: Vec<f32> = d2_y.iter().map(|w| 1.0 / w).collect();
         let inv_d2_b: Vec<f32> = d2_b.iter().map(|w| 1.0 / w).collect();
 
-        // entropy_mul tuning history per strategy:
-        //   DCT4x4   (libjxl 1.08)   — bisected to 1.08 (May 9 2026)
-        //   DCT4x8/8x4 (libjxl 0.86) — held at 0.98 (path-flip below 0.95)
-        //   IDENTITY (libjxl 1.0428) — held at 1.85 (path-flip on strat-wins)
-        //   DCT2x2   (libjxl 0.95)   — at libjxl reference 0.95
+        // entropy_mul tuning per strategy. Bundled with the
+        // content-discriminated `dist_bias` dispatch (see
+        // `Self::auto_libjxl_entropy_mul_on_photos` field docs):
+        //
+        //   DCT4x4   — 1.08 (matches libjxl reference 1.08 in both branches)
+        //   DCT2x2   — 0.95 (matches libjxl reference 0.95 in both branches)
+        //   DCT4x8/8x4
+        //     libjxl-faithful branch (photo): 0.859316
+        //       (= `EntropyMulTable::reference().dct4x8`)
+        //     GPU-lifted branch (screenshot): 0.98 (bisected; path-flip below 0.95)
+        //   IDENTITY
+        //     libjxl-faithful branch (photo): 1.0428
+        //       (= `EntropyMulTable::reference().identity`)
+        //     GPU-lifted branch (screenshot): 1.85 (bisected; path-flip on strat-wins)
+        //
+        // The GPU-lifted values exist because the GPU cost-grid path
+        // lacks libjxl's `kAvoidEntropyOfTransforms` and X-channel
+        // multi-block weight counterweights, so lifted entropy_mul
+        // values stand in for the missing penalties. On photo content
+        // the dropped counterweights matter less (large transforms
+        // genuinely win on smooth regions), so the libjxl-faithful
+        // values produce smaller bytes at slight bfly cost.
+        let entropy_mul_dct4x8 = if use_libjxl_entropy_mul_branch {
+            0.859_316_37_f32
+        } else {
+            0.98_f32
+        };
+        let entropy_mul_identity = if use_libjxl_entropy_mul_branch {
+            1.0428_f32
+        } else {
+            1.85_f32
+        };
         let mut specs: Vec<SubblockStratSpec> = Vec::new();
         if evaluate_subblock_costs {
             specs.push(SubblockStratSpec {
@@ -1682,7 +1868,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 inv_weights_x: &inv_4x8_x,
                 inv_weights_y: &inv_4x8_y,
                 inv_weights_b: &inv_4x8_b,
-                entropy_mul: 0.98,
+                entropy_mul: entropy_mul_dct4x8,
             });
             specs.push(SubblockStratSpec {
                 raw_strategy: RAW_STRATEGY_DCT8X4,
@@ -1692,7 +1878,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 inv_weights_x: &inv_4x8_x,
                 inv_weights_y: &inv_4x8_y,
                 inv_weights_b: &inv_4x8_b,
-                entropy_mul: 0.98,
+                entropy_mul: entropy_mul_dct4x8,
             });
         }
         if evaluate_subblock_costs {
@@ -1704,7 +1890,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 inv_weights_x: &inv_id_x,
                 inv_weights_y: &inv_id_y,
                 inv_weights_b: &inv_id_b,
-                entropy_mul: 1.85,
+                entropy_mul: entropy_mul_identity,
             });
             specs.push(SubblockStratSpec {
                 raw_strategy: RAW_STRATEGY_DCT2X2,
@@ -2417,25 +2603,25 @@ impl<R: Runtime> LossyEncoder<R> {
         // (evaluate_afv = false) — the GPU LLF fast paths (DCT8 /
         // DCT16x16 / DCT16x8 / DCT8x16) use g_dc_*_gpu directly via
         // set_llf_*_indexed_persistent, so the host slice is unused.
-        let (dc_grid_x, dc_grid_y, dc_grid_b): (Vec<f32>, Vec<f32>, Vec<f32>) = if effective_evaluate_afv
-        {
-            let mut bytes = enc.client_ref().read(alloc::vec![
-                g_dc_x.handle().clone(),
-                g_dc_y.handle().clone(),
-                g_dc_b.handle().clone(),
-            ]);
-            use cubecl::prelude::*;
-            let b_bytes = bytes.pop().expect("read[2]");
-            let y_bytes = bytes.pop().expect("read[1]");
-            let x_bytes = bytes.pop().expect("read[0]");
-            (
-                f32::from_bytes(&x_bytes).to_vec(),
-                f32::from_bytes(&y_bytes).to_vec(),
-                f32::from_bytes(&b_bytes).to_vec(),
-            )
-        } else {
-            (Vec::new(), Vec::new(), Vec::new())
-        };
+        let (dc_grid_x, dc_grid_y, dc_grid_b): (Vec<f32>, Vec<f32>, Vec<f32>) =
+            if effective_evaluate_afv {
+                let mut bytes = enc.client_ref().read(alloc::vec![
+                    g_dc_x.handle().clone(),
+                    g_dc_y.handle().clone(),
+                    g_dc_b.handle().clone(),
+                ]);
+                use cubecl::prelude::*;
+                let b_bytes = bytes.pop().expect("read[2]");
+                let y_bytes = bytes.pop().expect("read[1]");
+                let x_bytes = bytes.pop().expect("read[0]");
+                (
+                    f32::from_bytes(&x_bytes).to_vec(),
+                    f32::from_bytes(&y_bytes).to_vec(),
+                    f32::from_bytes(&b_bytes).to_vec(),
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
         // Keep the GPU dc_grid handles too — encode_with_strategy_plan_adaptive
         // threads them into encode_and_reconstruct_* via the
         // `dc_grid_*_gpu` Option params, skipping the per-iter

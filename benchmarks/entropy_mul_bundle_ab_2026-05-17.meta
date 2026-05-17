@@ -1,0 +1,49 @@
+# A/B: entropy_mul + dist_bias content-discriminated bundle (jxl-encoder-gpu)
+# Date: 2026-05-17 UTC
+# Commit: see jj log -r @ in jxl-encoder-gpu--entropy-mul-bundle/
+# Host: $(hostname) — water-cooled AMD Ryzen 9 7950X, 128 GB RAM, CUDA
+# Bench: cargo run --release -p jxl-encoder-gpu --features 'cuda encoder' \
+#        --example auto_entropy_mul_bytes_ab -- --distance {1.0,2.0}
+# Images:
+#   Screenshots (GB82-SC): terminal.png, imac_g3.png, windows95.png
+#   Photos (CLIC2025-1024): 02809272..., 07b9f93f..., 22ea12c9...
+#
+# Path A (off — production default): LossyEncoder::new(...)
+#   .with_auto_evaluate_afv_on_screenshots(false)  // hold AFV constant
+#   (default: with_auto_libjxl_entropy_mul_on_photos == false)
+#
+# Path B (on — experimental opt-in): LossyEncoder::new(...)
+#   .with_auto_evaluate_afv_on_screenshots(false)
+#   .with_auto_libjxl_entropy_mul_on_photos(true)
+#
+# Decode: jxl-oxide srgb_linear(Relative) → butteraugli_linear (linear RGB)
+#         + fast_ssim2::compute_ssimulacra2 (sRGB u8 — re-linearized)
+#
+# Audit hypothesis (vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md, item #3+#10):
+#   "On photo content the libjxl-faithful values let larger transforms
+#    win on smooth regions where they are actually optimal — measured
+#    to save bytes on photos at slight bfly cost."
+#
+# Measured outcome at d=1.0 (entropy_mul_bundle_ab_d1.0_2026-05-17.txt):
+#   Screenshots: byte-identical, bfly identical, ssim2 identical. OK.
+#   Photos:      bytes +2.5% to +8.5%
+#                butteraugli +0.11 to +0.24 (worse)
+#                SSIM2 −0.17 to −0.42 (worse)
+#   → strictly Pareto-worse on every axis; audit hypothesis REFUTED.
+#
+# Measured outcome at d=2.0 (entropy_mul_bundle_ab_d2.0_2026-05-17.txt):
+#   Screenshots: byte-identical.
+#   Photos:      bytes +9% to +13%
+#                butteraugli mixed (−0.004 / +0.002 / +1.137 catastrophic on 22ea12c9)
+#                SSIM2 −0.10 to −0.28 (one image +0.28)
+#   → still strictly worse on bytes; quality degrades catastrophically
+#     on detailed content (high d).
+#
+# Disposition: default to `false`. Dispatch infrastructure kept as
+# opt-in for re-validation once `kAvoidEntropyOfTransforms` and the
+# X-channel multi-block weight land in GPU cost grids (cross-ref
+# dropped log item #4 — multi-week project). The original drop
+# rationale stands: removing the GPU-lifted entropy_mul + dist_bias
+# counterweights causes over-pick of large transforms regardless of
+# content class, because the libjxl heuristics that justify the
+# libjxl-faithful values are not present on the GPU encoder.

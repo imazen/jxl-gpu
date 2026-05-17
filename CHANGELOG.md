@@ -32,6 +32,35 @@
   item #1 and `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
   top-3 conditional resurrection.
 
+- **Opt-in entropy_mul + dist_bias content-discriminated bundle dispatch
+  (default `false` — measured-and-verified Pareto-worse on photos)**.
+  `LossyEncoder::with_auto_libjxl_entropy_mul_on_photos(bool)` /
+  `auto_libjxl_entropy_mul_on_photos()` plumbed through
+  `prepare_strategy_search_plan_inner`. When enabled and the per-block
+  `mask1x1` median is below `SCREENSHOT_MEDIAN_MASK_THRESHOLD = 95.0`
+  (photo branch), per-strategy `entropy_mul` for IDENTITY swaps
+  `1.85 → 1.0428` and DCT4x8/DCT8x4 swaps `0.98 → 0.859316` (matching
+  `forks::cost::EntropyMulTable::reference()`), AND the distance-scaled
+  `dist_bias`/`dist_bias_32`/`dist_bias_64` multipliers are dropped
+  (`= 1.0`). On screenshots (median > 95), both branches resolve to
+  the current GPU-lifted values (byte-identical). Default is OFF
+  because A/B at d=1.0 on 3 CLIC photos + 3 GB82-SC screenshots
+  showed photos strictly Pareto-worse on every axis (bytes +2.5%
+  to +8.5%, butteraugli +0.11 to +0.24, SSIM2 −0.17 to −0.42).
+  Screenshots byte-identical as expected. Root cause is the original
+  drop rationale re-validated: this GPU encoder lacks
+  `kAvoidEntropyOfTransforms` + X-channel multi-block weight
+  counterweights, so removing the GPU-lifted entropy_mul + dist_bias
+  causes over-pick of large transforms regardless of content class.
+  Dispatch infrastructure kept as an opt-in for re-validation once
+  the missing counterweights land (cross-ref
+  `dropped_optimizations_for_parity_2026-05-15.md` item #4 — multi-week
+  GPU port). Bench at
+  `benchmarks/entropy_mul_bundle_ab_d{1.0,2.0}*_2026-05-17.txt`.
+  Example: `examples/auto_entropy_mul_bytes_ab.rs`. Reference:
+  `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md` item
+  #3+#10 (audit hypothesis refuted).
+
 ### Fixed (May 15, 2026)
 
 - **`decode_via_jxl_rs` was mislabeling sRGB-encoded f32 as linear** in
