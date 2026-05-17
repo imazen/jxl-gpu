@@ -381,6 +381,43 @@ pub struct LossyEncoder<R: Runtime> {
     /// item #3 for the conditional-dispatch hypothesis that the
     /// 2026-05-17 A/B run refuted.
     auto_libjxl_entropy_mul_on_photos: bool,
+    /// Auto-enable patches detection on the all-DCT8 GPU pre-quantized
+    /// fast path.
+    ///
+    /// Default `true`. When set,
+    /// [`GpuEncoder::encode_lossy_to_bitstream_via_precomputed_from_u8`]
+    /// inspects the per-block `mask1x1` median on the pre-gaborish Y plane
+    /// and **disables** the fast path (forcing the slow path)
+    /// when:
+    ///
+    /// 1. The strategy selector picked all-DCT8 (otherwise the fast path
+    ///    wouldn't fire anyway),
+    /// 2. The image is small (`pixel_count < 1_000_000`),
+    /// 3. The content is screenshot-like
+    ///    (`median(per-block mask1x1) > Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD`),
+    /// 4. `effort >= 5` (libjxl gates FindTextLikePatches at speed_tier
+    ///    <= kHare).
+    ///
+    /// Why: the fast path
+    /// (`jxl_encoder::__pre_quantized::VarDctEncoder::encode_from_pre_quantized_ac`)
+    /// ignores `EncoderPrecomputed::patches_data` — it always passes
+    /// `None` for patches into `encode_two_pass`
+    /// (jxl-encoder/src/vardct/encoder.rs:2602). Without forcing the
+    /// slow path, an all-DCT8 screenshot that would benefit from
+    /// patches (terminal glyphs, repeated UI buttons) compresses
+    /// at 30-50% worse bitrate than the slow-path counterpart.
+    ///
+    /// Cost when gate fires: one mask1x1 GPU pass + one block-mask-mean
+    /// reduction + a `num_blocks` f32 download + a median sort. Sub-MP
+    /// images: a few ms. Plus the slow-path pre-gab XYB download +
+    /// CPU `find_and_build_patches`. Photos never trigger the gate
+    /// (`median(mask1x1) ≤ 87` on all 16 CLIC photos), so wall-clock
+    /// cost is contained to the gated subset.
+    ///
+    /// Disable via [`Self::with_auto_patches_on_fast_path`] to keep
+    /// the fast path unconditional (e.g., for benchmarking the fast
+    /// path in isolation).
+    auto_patches_on_fast_path: bool,
 }
 
 /// Round `n` up to the next multiple of `align`.
@@ -730,6 +767,14 @@ impl<R: Runtime> LossyEncoder<R> {
             // for the audit hypothesis + the A/B measurement that
             // refuted it.
             auto_libjxl_entropy_mul_on_photos: false,
+            // Auto-disable the GPU pre-quantized AC fast path on small
+            // screenshot content so the slow path runs patches detection
+            // and writes the patches reference frame (the fast path's
+            // entry point hardcodes `None` for patches). Default `true`
+            // — zero impact on photos (gate never fires), 30-50% bytes
+            // win on the gated subset (small + screenshot + all-DCT8).
+            // See `Self::auto_patches_on_fast_path` field docs.
+            auto_patches_on_fast_path: true,
         }
     }
 
@@ -824,6 +869,36 @@ impl<R: Runtime> LossyEncoder<R> {
     /// [field]: #structfield.auto_libjxl_entropy_mul_on_photos
     pub fn auto_libjxl_entropy_mul_on_photos(&self) -> bool {
         self.auto_libjxl_entropy_mul_on_photos
+    }
+
+    /// Auto-disable the GPU pre-quantized AC fast path on small
+    /// screenshot content so the slow path can run patches detection.
+    /// Default `true`. See the
+    /// [`Self::auto_patches_on_fast_path`][field] field for gate
+    /// semantics and rationale.
+    ///
+    /// Pass `false` to keep the fast path unconditional (e.g., for
+    /// benchmarking the fast path in isolation, or for byte-exact
+    /// reproducibility against a pre-2026-05-17 baseline).
+    ///
+    /// [field]: #structfield.auto_patches_on_fast_path
+    pub fn with_auto_patches_on_fast_path(mut self, on: bool) -> Self {
+        self.auto_patches_on_fast_path = on;
+        self
+    }
+
+    /// Whether the encoder will auto-disable the fast path on small
+    /// screenshot content to run patches detection. Default `true`.
+    /// See [`Self::auto_patches_on_fast_path`][field] for semantics.
+    ///
+    /// [field]: #structfield.auto_patches_on_fast_path
+    pub fn auto_patches_on_fast_path(&self) -> bool {
+        self.auto_patches_on_fast_path
+    }
+
+    /// The current effort level. See [`Self::with_effort`].
+    pub fn effort(&self) -> u8 {
+        self.effort
     }
 
     /// Original (un-padded) dimensions the caller sees.

@@ -1,0 +1,10 @@
+[auto_patches_fast_path_bytes_ab] distance=0.5 images=6 (auto-patches OFF baseline vs ON)
+image                                                           MP    off_bytes     on_bytes   Δ_bytes    Δ_pct    ms_on
+windows95.png                                                 0.31        50482        50482        +0  +0.000%    50.5
+graph.png                                                     0.38        34759        34759        +0  +0.000%    57.6
+terminal.png                                                  1.75        60546        60546        +0  +0.000%   202.6
+02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png  1.05       471717       471717        +0  +0.000%    60.5
+07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png  1.05       332335       332335        +0  +0.000%   141.4
+22ea12c903e41583b7c469cb86040157.png                          1.05       187989       187989        +0  +0.000%   140.1
+
+TOTAL (n=6 images, 5.58 MP): 1137828 → 1137828 bytes (+0 bytes, +0.000%)

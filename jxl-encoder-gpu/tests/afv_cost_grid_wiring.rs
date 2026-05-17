@@ -234,10 +234,7 @@ fn test_auto_afv_default_on_but_synthetic_does_not_fire() {
         .filter(|a| {
             matches!(
                 a.raw_strategy,
-                RAW_STRATEGY_AFV0
-                    | RAW_STRATEGY_AFV1
-                    | RAW_STRATEGY_AFV2
-                    | RAW_STRATEGY_AFV3
+                RAW_STRATEGY_AFV0 | RAW_STRATEGY_AFV1 | RAW_STRATEGY_AFV2 | RAW_STRATEGY_AFV3
             )
         })
         .count();
@@ -272,10 +269,7 @@ fn test_auto_afv_opt_out_disables_dispatch() {
         .filter(|a| {
             matches!(
                 a.raw_strategy,
-                RAW_STRATEGY_AFV0
-                    | RAW_STRATEGY_AFV1
-                    | RAW_STRATEGY_AFV2
-                    | RAW_STRATEGY_AFV3
+                RAW_STRATEGY_AFV0 | RAW_STRATEGY_AFV1 | RAW_STRATEGY_AFV2 | RAW_STRATEGY_AFV3
             )
         })
         .count();

@@ -2291,9 +2291,100 @@ impl<R: Runtime> GpuEncoder<R> {
         // DCT FP precision (~2% chroma AC coefs flip by 1 near rounding
         // ties); corpus_regression at 0.5% score tolerance covers it.
         const ENABLE_GPU_DCT8_FAST_PATH: bool = true;
-        let all_dct8 = ENABLE_GPU_DCT8_FAST_PATH
+        let mut all_dct8 = ENABLE_GPU_DCT8_FAST_PATH
             && (0..ysize_blocks)
                 .all(|by| (0..xsize_blocks).all(|bx| ac_strategy.raw_strategy(bx, by) == 0));
+
+        // Auto-patches dispatch on fast path: when the input is small AND
+        // screenshot-like, force-disable the fast path so control falls
+        // through to the slow path, which already runs patches
+        // detect/subtract and emits the patches reference frame via
+        // `encode_from_precomputed` (the fast path's
+        // `encode_from_pre_quantized_ac` ignores `precomputed.patches_data`
+        // — see jxl-encoder/src/vardct/encoder.rs:2602 where the call site
+        // hardcodes `None` for the patches param).
+        //
+        // Gate: `pixel_count < 1_000_000 AND median(per-block mask1x1) > 95
+        // AND effort >= 5`.
+        //
+        // - `pixel_count < 1MP`: limits the pre-gab XYB download cost the
+        //   slow path will pay. Patches matter most on UI/screenshot
+        //   content which tends to be small (terminal.png, imac_g3,
+        //   codec_wiki are all sub-MP).
+        // - `median(mask1x1) > 95`: same screenshot discriminator as
+        //   `auto_evaluate_afv_on_screenshots`
+        //   (`SCREENSHOT_MEDIAN_MASK_THRESHOLD = 95.0`) and
+        //   `content_looks_like_screenshot`. On 16 CLIC photos all
+        //   medians ≤ 87; on 9 of 10 gb82-sc screenshots medians ≥ 100.
+        //   Photos never trip the gate → zero impact on photo wall-clock.
+        // - `effort >= 5`: patches detection in
+        //   `__pre_quantized::find_and_build_patches` is the same FindTextLikePatches
+        //   path libjxl gates at speed_tier <= kHare (effort >= 5).
+        //
+        // Mask1x1 is computed on the pre-gab Y plane already on GPU
+        // (`plan.xyb_y_pre_gab_gpu`) — the only extra cost is one
+        // mask1x1 GPU pass + one block_mask_mean reduction + a host
+        // download of `num_blocks` f32 means + a median sort. At
+        // sub-MP that's a few ms.
+        //
+        // Opt-out: `LossyEncoder::with_auto_patches_on_fast_path(false)`.
+        // Per-image saving when the gate fires AND patches detect on
+        // an all-DCT8 image: ~30-50% bytes (per dropped log item #5).
+        // The gate's intersection is narrow (small + screenshot +
+        // all-DCT8 picks) but the per-image saving is large.
+        if all_dct8
+            && lossy.auto_patches_on_fast_path()
+            && lossy.effort() >= 5
+            && (width as u64) * (height as u64) < 1_000_000
+        {
+            // Run mask1x1 on the persistent pre-gab Y plane (no DtoH
+            // for the field — the per-block mean is what comes off the
+            // GPU). Same primitive `compute_block_mask_means` uses.
+            let mask_plane = self.mask1x1_persistent(&plan.xyb_y_pre_gab_gpu);
+            let n_blocks_padded = (gpu_pw as usize / 8) * (gpu_ph as usize / 8);
+            let h_means = self
+                .client
+                .create_from_slice(f32::as_bytes(&alloc::vec![0.0_f32; n_blocks_padded]));
+            crate::launch::aq_field::block_mask_mean::<R>(
+                &self.client,
+                mask_plane.handle().clone(),
+                h_means.clone(),
+                width,
+                height,
+                gpu_pw,
+                gpu_ph,
+            );
+            let means_bytes = self.client.read_one(h_means).expect("read mask-means");
+            let block_means: Vec<f32> = f32::from_bytes(&means_bytes).to_vec();
+            if !block_means.is_empty() {
+                let mut sorted = block_means;
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+                let median = sorted[sorted.len() / 2];
+                let fired = median
+                    > crate::lossy_encoder::LossyEncoder::<R>::SCREENSHOT_MEDIAN_MASK_THRESHOLD;
+                #[cfg(any(test, feature = "encoder"))]
+                {
+                    extern crate std;
+                    if std::env::var("JXL_GPU_DEBUG_AUTO_PATCHES").is_ok() {
+                        std::eprintln!(
+                            "[auto_patches_fast_path] mask1x1 block-mean median={:.3}, \
+                             threshold={:.3}, pixel_count={}, effort={}, fired={}",
+                            median,
+                            crate::lossy_encoder::LossyEncoder::<R>::SCREENSHOT_MEDIAN_MASK_THRESHOLD,
+                            (width as u64) * (height as u64),
+                            lossy.effort(),
+                            fired,
+                        );
+                    }
+                }
+                if fired {
+                    // Fall through to the slow path: it runs
+                    // find_and_build_patches and emits via
+                    // encode_from_precomputed (which writes patches).
+                    all_dct8 = false;
+                }
+            }
+        }
 
         // Mirror libjxl's gaborish gate: at d <= 0.5, gaborish is
         // disabled (enc_frame.cc:281 → CPU api.rs:3842). The bitstream

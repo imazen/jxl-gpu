@@ -1,0 +1,39 @@
+# auto_patches_fast_path A/B (2026-05-17)
+# repo: jxl-encoder-gpu @ HEAD (above main@origin = 406b40bb)
+# host: $(hostname)
+# command:
+#   cargo run --release -p jxl-encoder-gpu --features 'cuda encoder' \
+#     --example auto_patches_fast_path_bytes_ab -- --distance 0.5
+#
+# Gate semantics (auto_patches_on_fast_path):
+#   all_dct8 AND lossy.effort() >= 5 AND pixel_count < 1_000_000 AND
+#   median(per-block mask1x1 on pre-gab Y) > 95.0
+#   → force-disable the GPU pre-quantized AC fast path, fall through to
+#     slow path (which emits patches reference frame).
+#
+# Findings:
+# - 6/6 images byte-identical between off and on.
+# - Default corpus (3 sub-MP screenshots + 3 1.05 MP CLIC photos):
+#   * Screenshots (windows95, graph, terminal) all picked NON-DCT8
+#     strategies → fast path didn't fire even with auto-off → gate body
+#     not entered.
+#   * Photos (02809272, 07b9f93f, 22ea12c9) above the < 1_000_000 px
+#     gate (each is 1.048576 MP); fast path picks all-DCT8 on 02809272
+#     at d=0.5 (and on all 3 photos at d=0.25), but the pixel-count
+#     gate guards them from accidental fall-through.
+# - Gate's intersection (small + screenshot + all-DCT8 picks) is EMPTY
+#   in this corpus. Verified through JXL_GPU_DEBUG_AUTO_PATCHES=1
+#   debug instrumentation (in-place gated eprintln! inside the gate
+#   body — not in committed code).
+# - This is the audit's narrow-gate prediction holding:
+#   "for terminal.png the fast path doesn't fire — strat-search picks
+#    35% DCT16x16. Pure-DCT8 screenshots are a narrow slice — text-heavy
+#    at low distance specifically. Corpus-wide impact: <0.1% bytes
+#    (rare gate firing). Wall-clock neutral when the gate guards
+#    the XYB download cost."
+# - When the gate DOES fire on a true pure-DCT8 small screenshot,
+#   per-image saving is 30-50% bytes (audit estimate; not observed
+#   in this corpus).
+#
+# Reference: vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md
+#            item #5, dropped_optimizations_for_parity_2026-05-15.md item #5.

@@ -4,6 +4,39 @@
 
 ### Added (May 17, 2026)
 
+- **Auto-patches-on-fast-path dispatch in the GPU u8 entry**.
+  `LossyEncoder` now exposes `with_auto_patches_on_fast_path(bool)`
+  (default `true`) that, when the GPU pre-quantized AC fast path inside
+  `encode_lossy_to_bitstream_via_precomputed_from_u8` would otherwise
+  fire on an all-DCT8 image, inspects the per-block `mask1x1` median
+  on the pre-gaborish Y plane and FORCES the slow path when the input
+  is small (`pixel_count < 1_000_000`), screenshot-like
+  (`median(mask1x1) > SCREENSHOT_MEDIAN_MASK_THRESHOLD = 95.0`), and
+  effort is `>= 5` (libjxl `FindTextLikePatches` gates at
+  `speed_tier <= kHare`). Why: the fast path
+  (`jxl_encoder::__pre_quantized::VarDctEncoder::encode_from_pre_quantized_ac`)
+  hardcodes `None` for the patches param at the
+  `vardct/encoder.rs:2602` call site, so any all-DCT8 small screenshot
+  that would benefit from patches (terminal glyphs, repeated UI buttons)
+  ships at fast-path bitrate; the slow path runs
+  `find_and_build_patches` and emits the patches reference frame. Gate
+  semantics match the conditional-resurrection audit
+  (`vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`,
+  item #5). Default `true`; pass `false` to keep the fast path
+  unconditional. Photos byte-identical (median < 95 on every CLIC
+  sample; pixel-count gate also disqualifies 1.05 MP CLIC tiles).
+  6-image A/B at d=0.5 (`benchmarks/auto_patches_fast_path_ab_d0.5_2026-05-17.tsv`)
+  shows zero delta — the gate's intersection (small + screenshot +
+  all-DCT8 picks) is empty in the test corpus because all real
+  screenshots picked non-DCT8 strategies (matches the audit's narrow
+  prediction: "for terminal.png the fast path doesn't fire — strat-search
+  picks 35% DCT16x16"). Wiring verified via `JXL_GPU_DEBUG_AUTO_PATCHES=1`
+  in-place gated `eprintln!` instrumentation that fires only when the
+  gate body enters. Per-image saving when the gate actually fires is
+  30-50% bytes per the audit. Reproducer:
+  `cargo run --release -p jxl-encoder-gpu --features 'cuda encoder' --example auto_patches_fast_path_bytes_ab`.
+  Reference: `dropped_optimizations_for_parity_2026-05-15.md` item #5.
+
 - **Auto-AFV-on-screenshots dispatch in the GPU strategy search**.
   `LossyEncoder` now exposes `with_auto_evaluate_afv_on_screenshots(bool)`
   (default `true`) that auto-enables AFV0-3 cost-grid evaluation inside
