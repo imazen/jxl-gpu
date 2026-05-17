@@ -1,0 +1,45 @@
+=== distance=1.0 ===
+[auto_afv_bytes_ab] distance=1 images=10 (auto-AFV OFF baseline vs ON)
+image                                                           MP    off_bytes     on_bytes   Δ_bytes    Δ_pct afv_o afv_n    ms_on
+codec_wiki.png                                                4.26       116673       116673        +0  +0.000%     0     0   782.9
+gmessages.png                                                 4.45       151002       149812     -1190  -0.788%     0   184   746.9
+graph.png                                                     0.38        26832        26724      -108  -0.403%     0    13    62.5
+gui.png                                                       1.53        38663        38618       -45  -0.116%     0     9   228.9
+imac_dark.png                                                 5.62       305481       305481        +0  +0.000%     0     0  1150.0
+imac_g3.png                                                   5.62       299455       299455        +0  +0.000%     0     0  1152.5
+imessage.png                                                  3.16       149771       149771        +0  +0.000%     0     0   542.2
+terminal.png                                                  1.75        63175        63175        +0  +0.000%     0    40   249.3
+windows95.png                                                 0.31        51672        51672        +0  +0.000%     0     0    61.1
+windows.png                                                   3.56       269079       269079        +0  +0.000%     0   264   619.1
+
+TOTAL (n=10 images, 30.65 MP): 1471803 → 1470460 bytes (-1343 bytes, -0.091%)
+=== distance=2.0 ===
+[auto_afv_bytes_ab] distance=2 images=10 (auto-AFV OFF baseline vs ON)
+image                                                           MP    off_bytes     on_bytes   Δ_bytes    Δ_pct afv_o afv_n    ms_on
+codec_wiki.png                                                4.26        93748        93748        +0  +0.000%     0     0   877.3
+gmessages.png                                                 4.45       113909       113450      -459  -0.403%     0    46   755.1
+graph.png                                                     0.38        20640        20640        +0  +0.000%     0     0    67.9
+gui.png                                                       1.53        28739        28733        -6  -0.021%     0     1   231.0
+imac_dark.png                                                 5.62       235459       235459        +0  +0.000%     0     0  1262.3
+imac_g3.png                                                   5.62       249040       249040        +0  +0.000%     0     0  1154.2
+imessage.png                                                  3.16       114258       114258        +0  +0.000%     0     0   560.5
+terminal.png                                                  1.75        51197        51197        +0  +0.000%     0     0   281.2
+windows95.png                                                 0.31        39650        39650        +0  +0.000%     0     0    62.7
+windows.png                                                   3.56       193757       193757        +0  +0.000%     0    53   674.5
+
+TOTAL (n=10 images, 30.65 MP): 1140397 → 1139932 bytes (-465 bytes, -0.041%)
+=== distance=3.0 ===
+[auto_afv_bytes_ab] distance=3 images=10 (auto-AFV OFF baseline vs ON)
+image                                                           MP    off_bytes     on_bytes   Δ_bytes    Δ_pct afv_o afv_n    ms_on
+codec_wiki.png                                                4.26        81876        81876        +0  +0.000%     0     0   837.2
+gmessages.png                                                 4.45        92662        92662        +0  +0.000%     0     0   773.4
+graph.png                                                     0.38        16911        16911        +0  +0.000%     0     0    64.5
+gui.png                                                       1.53        23922        23922        +0  +0.000%     0     0   228.2
+imac_dark.png                                                 5.62       201030       201030        +0  +0.000%     0     0  1203.5
+imac_g3.png                                                   5.62       223092       223092        +0  +0.000%     0     0  1196.1
+imessage.png                                                  3.16        98410        98410        +0  +0.000%     0     0   530.9
+terminal.png                                                  1.75        43012        43012        +0  +0.000%     0     0   249.9
+windows95.png                                                 0.31        33827        33827        +0  +0.000%     0     0    60.6
+windows.png                                                   3.56       159138       159138        +0  +0.000%     0     0   632.6
+
+TOTAL (n=10 images, 30.65 MP): 973880 → 973880 bytes (+0 bytes, +0.000%)

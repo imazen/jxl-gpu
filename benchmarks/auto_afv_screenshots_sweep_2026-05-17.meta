@@ -1,0 +1,63 @@
+Auto-AFV-on-screenshots dispatch — bytes A/B sweep
+====================================================
+
+Date: 2026-05-17
+Commit (will be set at commit time)
+Host: water-cooled AMD Ryzen 9 7950X + RTX 5070 (CUDA backend)
+Workspace: ~/work/zen/jxl-encoder-gpu--afv-cost-grid (jj on main)
+
+Sweep
+-----
+Corpus: codec-corpus/gb82-sc (10 PNG screenshots)
+Distances: 1.0, 2.0, 3.0
+Encoder entry: GpuEncoder::encode_lossy_to_bitstream_via_precomputed
+Effort: 7 (default)
+Knob under test: LossyEncoder::with_auto_evaluate_afv_on_screenshots(bool)
+  - PATH A (off): explicit override `with_auto_evaluate_afv_on_screenshots(false)` to
+    reproduce pre-2026-05-17 default-off behavior
+  - PATH B (on): new default; auto-AFV gates on `mask1x1 median > 95 AND effort >= 7`
+
+Driver:    cargo run --release -p jxl-encoder-gpu --features 'cuda encoder' \
+              --example auto_afv_bytes_ab -- --distance <D> [--image PATH ...]
+
+Headline
+--------
+d=1.0  (10 screenshots, 30.65 MP total): -1343 bytes / -0.091%
+d=2.0  (10 screenshots, 30.65 MP total):  -465 bytes / -0.041%
+d=3.0  (10 screenshots, 30.65 MP total):  +0 bytes  /  +0.000%
+
+Per-image winners at d=1.0:
+  gmessages.png  -1190 bytes  (-0.788%)   184 AFV picks survive case-1 path
+  graph.png      -108  bytes  (-0.403%)    13 AFV picks survive
+  gui.png         -45  bytes  (-0.116%)     9 AFV picks survive
+
+Per-image byte-identical (AFV picks were wiped by patches case-1 recompute):
+  terminal.png   40 picks → 0 bytes change
+  windows.png    264 picks → 0 bytes change
+  windows95.png  median 48.8 → gate correctly skips
+
+Photos (default candidate set, 3 CLIC images at d=1.0): all byte-identical.
+  median per image: 46.3, 60.0, 77.3 (all < 95 threshold → gate stays off)
+
+Interaction with patches case-1 path
+-------------------------------------
+On screenshots that trigger `find_and_build_patches`, the CPU patches-subtracted
+recompute (`compute_ac_strategy` at encoder.rs:2120) overwrites our GPU AFV picks
+with a CPU-only DCT8-dominant assignment. This is the libjxl-parity contract and
+applies to terminal.png + windows.png in our sweep. The auto-AFV win only realizes
+on screenshots where patches DON'T fire OR where the CPU recompute still picks AFV.
+
+A future chunk could merge the GPU's AFV picks into the patches-subtracted CPU
+assignment (or port the AFV cost-grid into the CPU `compute_ac_strategy`); that's
+out of scope for this 1-2 day chunk.
+
+Photo verification (corpus_regression analog)
+----------------------------------------------
+3 CLIC photos at d=1.0 with new default (`auto_evaluate_afv_on_screenshots = true`)
+produce byte-identical bitstream to pre-2026-05-17 (off-AFV) baseline. Auto dispatch
+threshold (median > 95) is well above all measured photo medians (46-77), so the
+gate never fires on photo content. `corpus_regression` test (gated `corpus` feature)
+should continue to pass byte-for-byte on its photo rows. Screenshot rows in
+`corpus_regression` flow through `refine_and_encode_smart` →
+`SkippedStratSearchAsScreenshot` (no strat-search), so they are also unaffected
+by this dispatch.

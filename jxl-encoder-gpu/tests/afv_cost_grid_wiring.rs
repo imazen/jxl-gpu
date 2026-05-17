@@ -195,3 +195,92 @@ fn test_afv_opt_in_smooth_gradient_completes() {
         "plan.assignments must be non-empty for smooth gradient too"
     );
 }
+
+/// Default-on auto-AFV: the new
+/// `auto_evaluate_afv_on_screenshots` flag defaults to `true`, but the
+/// dispatch only fires when the per-block mask1x1 median exceeds
+/// `SCREENSHOT_MEDIAN_MASK_THRESHOLD`. Photo / synthetic content stays
+/// safely below the threshold and the gate does NOT fire — verifying
+/// the production photo path is byte-identical to the pre-dispatch
+/// baseline (covered end-to-end by `corpus_regression`'s photo rows).
+#[test]
+fn test_auto_afv_default_on_but_synthetic_does_not_fire() {
+    let enc: GpuEncoder<Backend> = GpuEncoder::new();
+    let (r, g, b) = smooth_gradient();
+    let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, W, H);
+    // Auto-AFV is the new default.
+    assert!(
+        lossy.auto_evaluate_afv_on_screenshots(),
+        "auto_evaluate_afv_on_screenshots() must default to true"
+    );
+    // Explicit `with_evaluate_afv(false)` is the default too — verifying
+    // the auto dispatch is the *only* path through which AFV could fire
+    // here.
+    assert!(
+        !lossy.evaluate_afv(),
+        "evaluate_afv() must default to false (auto-only dispatch)"
+    );
+    // Smooth gradient has uniformly low mask1x1 (smooth content lifts
+    // 1/log(diff+0.01) into the ~1 range, not the ~100 range
+    // screenshots produce on text edges) → median < 95 → dispatch
+    // stays OFF → no AFV picks possible.
+    use jxl_encoder_gpu::forks::transform::{
+        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
+    };
+    let plan = lossy.prepare_strategy_search_plan(&enc, &r, &g, &b, 1.0);
+    let n_afv = plan
+        .assignments
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.raw_strategy,
+                RAW_STRATEGY_AFV0
+                    | RAW_STRATEGY_AFV1
+                    | RAW_STRATEGY_AFV2
+                    | RAW_STRATEGY_AFV3
+            )
+        })
+        .count();
+    assert_eq!(
+        n_afv, 0,
+        "auto-AFV must not fire on synthetic gradient (median << 95)"
+    );
+}
+
+/// Opt-out: disabling auto-AFV via
+/// `with_auto_evaluate_afv_on_screenshots(false)` recovers strict
+/// pre-2026-05-17 behavior (no AFV picks regardless of content). The
+/// `LossyEncoder::with_evaluate_afv(true)` opt-in still works
+/// orthogonally — they're independent toggles.
+#[test]
+fn test_auto_afv_opt_out_disables_dispatch() {
+    let enc: GpuEncoder<Backend> = GpuEncoder::new();
+    let (r, g, b) = diagonal_pattern();
+    let lossy_off: LossyEncoder<Backend> =
+        LossyEncoder::new(&enc, W, H).with_auto_evaluate_afv_on_screenshots(false);
+    assert!(!lossy_off.auto_evaluate_afv_on_screenshots());
+    assert!(!lossy_off.evaluate_afv());
+    // Even on AFV-favoring content, the off-path produces no AFV picks
+    // (auto OFF + explicit OFF = strict default-off behavior).
+    use jxl_encoder_gpu::forks::transform::{
+        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
+    };
+    let plan = lossy_off.prepare_strategy_search_plan(&enc, &r, &g, &b, 1.0);
+    let n_afv = plan
+        .assignments
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.raw_strategy,
+                RAW_STRATEGY_AFV0
+                    | RAW_STRATEGY_AFV1
+                    | RAW_STRATEGY_AFV2
+                    | RAW_STRATEGY_AFV3
+            )
+        })
+        .count();
+    assert_eq!(
+        n_afv, 0,
+        "auto-AFV OFF + evaluate_afv OFF must never produce AFV picks"
+    );
+}

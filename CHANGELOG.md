@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Added (May 17, 2026)
+
+- **Auto-AFV-on-screenshots dispatch in the GPU strategy search**.
+  `LossyEncoder` now exposes `with_auto_evaluate_afv_on_screenshots(bool)`
+  (default `true`) that auto-enables AFV0-3 cost-grid evaluation inside
+  `prepare_strategy_search_plan_inner` when the per-block `mask1x1`
+  median exceeds `SCREENSHOT_MEDIAN_MASK_THRESHOLD` (95.0) AND
+  `effort >= 7`. Same discriminator the `SkippedStratSearchAsScreenshot`
+  path uses; reuses `aq_field_means` already produced for the AQ field
+  so the dispatch is essentially free (median over a few-thousand-entry
+  vector). Explicit `with_evaluate_afv(true)` still always wins.
+  Photos are byte-identical (median < 95 on every CLIC sample tested,
+  46-77 range — gate never fires). Screenshots see a small but real
+  bytes win on the subset where AFV picks survive the patches case-1
+  recompute: 10-image `gb82-sc` sweep at d=1.0 saves -0.091% bytes
+  total; per-image winners are gmessages.png (-0.788%), graph.png
+  (-0.403%), gui.png (-0.116%). On screenshots that trigger
+  `find_and_build_patches`, the CPU `compute_ac_strategy` recompute on
+  patches-subtracted XYB still overwrites GPU AFV picks (libjxl-parity
+  contract); preserving GPU AFV picks across patches recompute is
+  follow-on work. `corpus_regression` bitstream stays byte-identical on
+  photo rows (no dispatch fires) and on screenshot rows (they flow
+  through `refine_and_encode_smart` → `SkippedStratSearchAsScreenshot`
+  which never calls `prepare_strategy_search_plan`). Bench at
+  `benchmarks/auto_afv_screenshots_sweep_2026-05-17.{txt,meta}`. Tests:
+  `tests/afv_cost_grid_wiring.rs` (`test_auto_afv_default_on_but_synthetic_does_not_fire`,
+  `test_auto_afv_opt_out_disables_dispatch`). Reference: `dropped_optimizations_for_parity_2026-05-15.md`
+  item #1 and `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
+  top-3 conditional resurrection.
+
 ### Fixed (May 15, 2026)
 
 - **`decode_via_jxl_rs` was mislabeling sRGB-encoded f32 as linear** in

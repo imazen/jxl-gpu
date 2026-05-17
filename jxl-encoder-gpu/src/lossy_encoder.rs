@@ -294,6 +294,36 @@ pub struct LossyEncoder<R: Runtime> {
     /// cost-grid integration end-to-end. The default-off path keeps
     /// `corpus_regression` byte-identical.
     evaluate_afv: bool,
+    /// Auto-enable AFV0-3 cost-grid evaluation on screenshot-like content.
+    ///
+    /// Default `true`. When set, [`Self::prepare_strategy_search_plan_inner`]
+    /// inspects the per-block `mask1x1` median (already computed for the
+    /// adaptive-quant field) and treats `evaluate_afv` as locally enabled
+    /// when:
+    ///
+    /// 1. `evaluate_afv == false` (explicit opt-in via
+    ///    [`Self::with_evaluate_afv`] always wins),
+    /// 2. `median(per-block mask1x1) > Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD`
+    ///    (`95.0` — same screenshot discriminator used by
+    ///    [`Self::content_looks_like_screenshot`] and the
+    ///    `SkippedStratSearchAsScreenshot` path in
+    ///    [`forks::butteraugli_loop::refine_and_encode_smart`]), and
+    /// 3. `effort >= 7` (libjxl gates DCT32+ + AFV at speed_tier <= kSquirrel;
+    ///    AFV picks only become available at e>=7 anyway because the strategy
+    ///    selector treats them as sub-blocks of a DCT16 / DCT32 region).
+    ///
+    /// Rationale: screenshot/text content is exactly where AFV picks fire
+    /// (text glyphs at sub-block alignment) — empirically 0 picks on photos
+    /// (no impact when gate doesn't fire). Wall-clock cost (~46 ms / MP for
+    /// the AFV cost-grid pipeline + a one-time ~150 MB lazy `xyb_x/y/b`
+    /// host download) is contained to the gated subset. Photo
+    /// `corpus_regression` bitstream stays byte-identical because the gate
+    /// never fires on photos.
+    ///
+    /// Disable via [`Self::with_auto_evaluate_afv_on_screenshots`] to
+    /// recover strict default-off AFV behavior (e.g., for byte-exact
+    /// reproducibility against a pre-2026-05-17 baseline).
+    auto_evaluate_afv_on_screenshots: bool,
 }
 
 /// Round `n` up to the next multiple of `align`.
@@ -627,6 +657,11 @@ impl<R: Runtime> LossyEncoder<R> {
             // `Self::evaluate_afv` field docs for semantics. Production
             // bitstream stays byte-identical with this off.
             evaluate_afv: false,
+            // Auto-enable AFV on screenshot-like content (mask1x1 median
+            // > 95 AND effort >= 7). Default `true` — zero impact on
+            // photos (gate never fires), modest bytes win on screenshots.
+            // See `Self::auto_evaluate_afv_on_screenshots` field docs.
+            auto_evaluate_afv_on_screenshots: true,
         }
     }
 
@@ -656,8 +691,41 @@ impl<R: Runtime> LossyEncoder<R> {
 
     /// Whether AFV0-3 cost grids will be evaluated by
     /// [`Self::prepare_strategy_search_plan_traced`]. Default `false`.
+    ///
+    /// Note this reports the **explicit opt-in** flag only. The
+    /// effective per-encode decision may still enable AFV evaluation
+    /// when this returns `false` if
+    /// [`Self::auto_evaluate_afv_on_screenshots`] is set (default)
+    /// AND the input passes the screenshot discriminator at runtime.
+    /// See [`Self::auto_evaluate_afv_on_screenshots`] for semantics.
     pub fn evaluate_afv(&self) -> bool {
         self.evaluate_afv
+    }
+
+    /// Auto-enable AFV0-3 cost-grid evaluation on screenshot-like
+    /// content (default `true`). See the
+    /// [`Self::auto_evaluate_afv_on_screenshots`][field] field for
+    /// gate semantics and rationale.
+    ///
+    /// Pass `false` to recover strict default-off AFV behavior (e.g.,
+    /// for byte-exact reproducibility against a pre-2026-05-17 baseline).
+    /// Explicit [`Self::with_evaluate_afv`] always wins regardless of
+    /// this setting.
+    ///
+    /// [field]: #structfield.auto_evaluate_afv_on_screenshots
+    pub fn with_auto_evaluate_afv_on_screenshots(mut self, on: bool) -> Self {
+        self.auto_evaluate_afv_on_screenshots = on;
+        self
+    }
+
+    /// Whether the encoder will auto-enable AFV cost-grid evaluation on
+    /// screenshot-like content. Default `true`. See the
+    /// [`Self::auto_evaluate_afv_on_screenshots`][field] field for
+    /// gate semantics.
+    ///
+    /// [field]: #structfield.auto_evaluate_afv_on_screenshots
+    pub fn auto_evaluate_afv_on_screenshots(&self) -> bool {
+        self.auto_evaluate_afv_on_screenshots
     }
 
     /// Original (un-padded) dimensions the caller sees.
@@ -1321,17 +1389,17 @@ impl<R: Runtime> LossyEncoder<R> {
         // any caller that indexes them will panic — the existing
         // debug_assert checking len was removed.
         let g_mask = enc.mask1x1_persistent(&xy_g);
-        // Lazy host download of post-gaborish XYB planes — needed by
-        // the AFV branch in encode_and_reconstruct_mixed_strategy_single_channel
-        // (forks/reconstruct.rs:601 reads xyb_channel[src_off..src_off+tile_w]
-        // per AFV-selected block). When AFV evaluation is OFF (production
-        // default), we skip the download to avoid the 170 ms PCIe stall
-        // at 16 MP that download_planes_3ch would force.
-        let (xyb_x, xyb_y, xyb_b): (Vec<f32>, Vec<f32>, Vec<f32>) = if self.evaluate_afv {
-            enc.download_planes_3ch(&xx_g, &xy_g, &xb_g)
-        } else {
-            (Vec::new(), Vec::new(), Vec::new())
-        };
+        // NOTE: the host XYB download (xyb_x/y/b) used to live HERE,
+        // but the screenshot-gated auto-AFV path (see
+        // `Self::auto_evaluate_afv_on_screenshots`) needs the
+        // per-block mask1x1 means to compute the median screenshot
+        // discriminator BEFORE we know whether the AFV branch will
+        // need the host XYB planes. The download is deferred to right
+        // after `aq_field_means` is computed (see `aq_field` mark
+        // below), where the `effective_evaluate_afv` decision has
+        // been made. When the gate stays off (photos), the download
+        // is still skipped — preserving the 170 ms / 16 MP PCIe-stall
+        // saving that the lazy path was introduced for.
         mark("xyb_gab");
         mark("mask1x1");
 
@@ -1369,6 +1437,61 @@ impl<R: Runtime> LossyEncoder<R> {
         // Convert mean → adaptive qac per block.
         let aq_field = block_means_to_qac_field(&aq_field_means, distance);
         mark("aq_field");
+
+        // Auto-AFV dispatch: enable AFV cost-grid evaluation when the
+        // input passes the same screenshot discriminator that
+        // `LossyEncoder::content_looks_like_screenshot` uses, and
+        // effort allows it. See `Self::auto_evaluate_afv_on_screenshots`
+        // field docs for full rationale.
+        //
+        // The median is taken over `aq_field_means` directly — these
+        // are the per-padded-block mask1x1 means already produced on
+        // GPU (block_mask_mean kernel). Same value space and threshold
+        // as `content_looks_like_screenshot` (95.0 floor).
+        //
+        // partial_cmp NaN-safe: NaN sorts to the end via Equal fallback;
+        // production mask1x1 values never produce NaN, but the fallback
+        // matches the rest of the codebase.
+        let effective_evaluate_afv = if self.evaluate_afv {
+            // Explicit opt-in always wins.
+            true
+        } else if self.auto_evaluate_afv_on_screenshots
+            && self.effort >= 7
+            && !aq_field_means.is_empty()
+        {
+            let mut sorted = aq_field_means.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+            let median = sorted[sorted.len() / 2];
+            let fired = median > Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD;
+            // Diagnostic: set JXL_GPU_DEBUG_AUTO_AFV=1 to log the dispatch
+            // decision per encode (host-side only; the `encoder` feature
+            // brings std in transitively).
+            #[cfg(any(test, feature = "encoder"))]
+            {
+                extern crate std;
+                if std::env::var("JXL_GPU_DEBUG_AUTO_AFV").is_ok() {
+                    std::eprintln!(
+                        "[auto_afv] mask1x1 block-mean median={:.3}, threshold={:.3}, effort={}, fired={}",
+                        median, Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD, self.effort, fired
+                    );
+                }
+            }
+            fired
+        } else {
+            false
+        };
+
+        // Deferred host XYB download for the AFV branch in
+        // `encode_and_reconstruct_mixed_strategy_single_channel`
+        // (forks/reconstruct.rs:601 reads `xyb_channel[src_off..src_off+tile_w]`
+        // per AFV-selected block). Only paid when AFV evaluation is
+        // active (explicit opt-in OR auto-dispatch fired on screenshots).
+        // Production photo path stays at zero PCIe bytes for these planes.
+        let (xyb_x, xyb_y, xyb_b): (Vec<f32>, Vec<f32>, Vec<f32>) = if effective_evaluate_afv {
+            enc.download_planes_3ch(&xx_g, &xy_g, &xb_g)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
 
         // Stage 4: cost grids — DCT8, DCT16x16, DCT16x8, DCT8x16
         let (dct8_x, dct8_y, dct8_b) = dct8_weights_per_channel();
@@ -1673,7 +1796,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // libjxl reference (0.818 / 0.8 ≈ 1.022) to match the
         // empirical bias other 8x8 sub-blocks carry in this encoder.
         // Sweep first; the corpus_regression test catches drift.
-        let afv_costs_full: Vec<f32> = if self.evaluate_afv {
+        let afv_costs_full: Vec<f32> = if effective_evaluate_afv {
             use crate::forks::afv::afv_per_block_upstream_cost_xyb_host;
             use crate::forks::cost::{EntropyMulTable, afv_entropy_mul};
             use crate::kernels::afv::AFV4X4_BASIS_TRANSPOSE;
@@ -2294,7 +2417,7 @@ impl<R: Runtime> LossyEncoder<R> {
         // (evaluate_afv = false) — the GPU LLF fast paths (DCT8 /
         // DCT16x16 / DCT16x8 / DCT8x16) use g_dc_*_gpu directly via
         // set_llf_*_indexed_persistent, so the host slice is unused.
-        let (dc_grid_x, dc_grid_y, dc_grid_b): (Vec<f32>, Vec<f32>, Vec<f32>) = if self.evaluate_afv
+        let (dc_grid_x, dc_grid_y, dc_grid_b): (Vec<f32>, Vec<f32>, Vec<f32>) = if effective_evaluate_afv
         {
             let mut bytes = enc.client_ref().read(alloc::vec![
                 g_dc_x.handle().clone(),
