@@ -1,0 +1,56 @@
+# kAvoidEntropyOfTransforms chunk-2 GPU port A/B bench
+date: 2026-05-17
+host: lilith
+parent_commit: f5d3703 (chunk-1 POC)
+chunk2_commit: 457e3702 (this commit) — final hash after rebase TBD
+command: |
+  cargo build --release --features 'cuda encoder' \
+    --example kavoid_entropy_chunk2_bytes_ab -p jxl-encoder-gpu
+  for d in 1.0 5.0 8.0; do
+    cargo run --release --features 'cuda encoder' -p jxl-encoder-gpu \
+      --example kavoid_entropy_chunk2_bytes_ab -- --distance ${d}
+  done
+images:
+  - clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png  (1.05 MP CLIC photo)
+  - clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png  (1.05 MP CLIC photo)
+  - clic2025-1024/22ea12c903e41583b7c469cb86040157.png                                  (1.05 MP CLIC photo)
+  - gb82-sc/terminal.png      (1.75 MP screenshot)
+  - gb82-sc/codec_wiki.png    (4.26 MP screenshot)
+  - gb82-sc/imac_g3.png       (5.62 MP screenshot)
+distances_swept: [1.0, 5.0, 8.0]
+flag_off_default: enable_kavoid_entropy_of_transforms = false (chunks 1+2 OFF, AFV evaluation force-ON)
+flag_on:          with_enable_kavoid_entropy_of_transforms(true) (chunks 1+2 ON, AFV evaluation force-ON)
+afv_evaluation:   with_evaluate_afv(true) on BOTH paths — exercises chunk-2 wiring on top of chunk-1
+result:
+  - All 18 cells (6 images × 3 distances) byte-identical between OFF and ON
+  - Δbfly = 0.000, Δss2 = 0.00 on every cell
+  - At d=1.0: formula returns 0.0 — both chunks 1+2 are structural no-ops (expected per chunk-1 contract)
+  - At d=5.0: chunk-1 penalty = 0.5 * (12-4)/(5-4) = 4.0 added to DCT4X4/DCT4X8/DCT8X4 entropy_mul,
+    chunk-2 adds same 4.0 to AFV0-3 entropy_mul. But the GPU strategy selector on these images
+    already picks DCT8/DCT16/DCT32 — AFV picks would only flip if `auto_libjxl_entropy_mul_on_photos`
+    were active (it's default-off pending the full chunk-3 sweep). Bytes stay identical.
+  - At d=8.0: chunk-1 penalty = 0.5 * (12-4)/(8-4) = 1.0; chunk-2 adds same 1.0 to AFV. Same conclusion
+    as d=5.0 — no block picks flip on this corpus.
+chunk2_layer1_invariant_test:
+  - `forks::afv::tests::test_afv_per_block_upstream_cost_adjust_boost_increases_costs` (lib test, GPU
+    required): asserts that `entropy_mul_adjust=4.0` STRICTLY increases per-block AFV costs vs
+    `entropy_mul_adjust=0.0` on a synthetic 16-block input. Result: mean cost 6.166e3 → 3.003e4
+    (~4.9× lift, matches the expected ~5x effective entropy_mul lift from 1.022 → 5.022), median
+    per-position delta 2.413e4. Locks the chunk-2 wiring as proven Layer-1.
+interpretation:
+  - Chunk-2 contract upheld: production-range encodes (default flag OFF) AND chunk-1-on encodes
+    are both byte-identical regardless of `with_evaluate_afv` state.
+  - The byte-identity at d=5.0 / d=8.0 with the flag ON is the *desired* outcome: chunk-2 adds the
+    missing counterweight; it doesn't (and shouldn't) flip block picks on its own. The flip would
+    happen if `auto_libjxl_entropy_mul_on_photos` were also re-enabled, which lowers AFV's base
+    `entropy_mul` from 1.022 (reference) toward libjxl's lower value (~0.86). That re-enable is
+    chunk-3 scope.
+  - The Layer-1 invariant test directly proves the entropy_mul_adjust parameter is correctly folded
+    into the effective AFV entropy multiplier. We don't need a corpus-wide byte-Δ measurement to
+    validate chunk-2 wiring — the test does it deterministically.
+followup:
+  - Chunk 3: A/B sweep with `auto_libjxl_entropy_mul_on_photos` re-enabled. Expected: chunks 1+2's
+    counterweight prevents the over-selection that originally pareto-refuted the auto-enable. Then
+    consider making auto-enable the default if photos win on bytes.
+  - Reference: vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md item #3 (bundle context)
+    + dropped_optimizations_for_parity_2026-05-15.md item #3.

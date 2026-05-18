@@ -459,21 +459,23 @@ pub struct LossyEncoder<R: Runtime> {
     auto_patches_on_fast_path: bool,
     /// Opt-in: apply libjxl's `kAvoidEntropyOfTransforms` heuristic to
     /// the GPU cost-grid's sub-block strategies (DCT4X4, DCT4X8,
-    /// DCT8X4). When enabled, adds
+    /// DCT8X4) **and AFV0-3 (chunk 2)**. When enabled, adds
     /// `K_AVOID_TRANSFORMS_BASE * avoid_entropy_of_transforms_mul(distance)`
     /// to those strategies' `entropy_mul` so the cost-grid penalizes
-    /// sub-block picks at very high distances (`distance > 4.0`) where
-    /// DCT8 dominates on rate-distortion anyway.
+    /// small / sub-block picks at very high distances (`distance > 4.0`)
+    /// where DCT8 dominates on rate-distortion anyway.
     ///
-    /// **Default `false`** — chunk-1 POC of the multi-week GPU port of
-    /// libjxl's `kAvoidEntropyOfTransforms` counterweight. The full port
-    /// will unlock the libjxl-faithful entropy_mul branch on photos
-    /// (see [`Self::auto_libjxl_entropy_mul_on_photos`] field docs +
-    /// `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
-    /// item #3 for the rationale). This chunk-1 ships only the
-    /// formula + a narrow gate (`distance > 4.0`) so production at
-    /// `distance ≤ 4.0` stays byte-identical (the formula returns 0.0
-    /// inside the gated band and is therefore a no-op).
+    /// **Default `false`** — multi-chunk POC of the GPU port of
+    /// libjxl's `kAvoidEntropyOfTransforms` counterweight. Chunk 1
+    /// shipped DCT4X4 / DCT4X8 / DCT8X4 wiring; chunk 2 extends the
+    /// same per-distance penalty into AFV's cost path via
+    /// `afv_per_block_upstream_cost_xyb_host`'s `entropy_mul_adjust`
+    /// parameter. Together they cover every non-DCT8 / non-DCT2X2 /
+    /// non-IDENTITY 8×8-class strategy libjxl penalizes. The narrow
+    /// `distance > 4.0` gate keeps production at `distance ≤ 4.0`
+    /// byte-identical (formula returns 0.0 inside the gated band).
+    /// See `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
+    /// item #3 for the bundle rationale.
     ///
     /// Gate semantics (mirrors libjxl `enc_ac_strategy.cc::FindBest8x8Transform`):
     ///
@@ -482,10 +484,11 @@ pub struct LossyEncoder<R: Runtime> {
     ///   flag is a structural no-op outside the gated band).
     /// - `target_distance > 4.0` and `effort >= 5`: add
     ///   `0.5 * (12 - 4) / (distance - 4)` (clamped at `d >= 12` to
-    ///   `0.5 * 1.0 = 0.5`) to the `entropy_mul` of DCT4X4,
-    ///   DCT4X8, and DCT8X4 cost-grid specs. AFV is not touched by
-    ///   this chunk because AFV picks flow through a separate cost
-    ///   path (`forks::afv`) and the GPU AFV grid is opt-in.
+    ///   `0.5 * 1.0 = 0.5`) to the `entropy_mul` of DCT4X4, DCT4X8,
+    ///   DCT8X4, and AFV0-3 cost-grid specs. AFV only sees the
+    ///   penalty when its cost grid is active (`with_evaluate_afv` or
+    ///   auto-enable via the screenshot-content gate); otherwise the
+    ///   parameter is unused.
     ///
     /// IDENTITY and DCT2X2 are excluded from the penalty per libjxl
     /// (they receive the `kFavor2X2` bonus instead at low distances).
@@ -2305,6 +2308,30 @@ impl<R: Runtime> LossyEncoder<R> {
             // shifts.
             let entropy_mul = afv_entropy_mul(&EntropyMulTable::reference());
 
+            // Chunk-2 of the kAvoidEntropyOfTransforms GPU port:
+            // forward the same per-distance penalty
+            // (`K_AVOID_TRANSFORMS_BASE * avoid_entropy_of_transforms_mul(d)`)
+            // that the sub-block DCT4X4 / DCT4X8 / DCT8X4 specs receive
+            // to AFV's cost path so AFV picks aren't artificially cheap
+            // at very high distances (`distance > 4.0`) where DCT8
+            // dominates on rate-distortion anyway.
+            //
+            // Mirrors the CPU encoder's libjxl-faithful gate: AFV is a
+            // non-DCT8 / non-DCT2X2 / non-IDENTITY 8×8-class strategy and
+            // therefore receives the penalty in
+            // `enc_ac_strategy.cc::FindBest8x8Transform`. The shared
+            // `avoid_transforms_adjust` was computed above (alongside the
+            // sub-block branch) and is 0.0 in the no-op band so this
+            // call stays byte-identical at `distance <= 4.0` regardless
+            // of `enable_kavoid_entropy_of_transforms`.
+            //
+            // AFV's cost-grid `afv_per_block_upstream_cost_xyb_host` folds
+            // the adjustment into `entropy_mul` via
+            // `(entropy_mul + entropy_mul_adjust).max(0.01)`, matching the
+            // CPU encoder's shape in
+            // `vardct/ac_strategy.rs::estimate_entropy_with_mask`.
+            let afv_entropy_mul_adjust = avoid_transforms_adjust;
+
             // Per-block quant: same as the other 8x8 sub-blocks (aq_field
             // for adaptive, qac for uniform). For AFV (covered_blocks=1),
             // this is the per-8x8-block adaptive_quant value directly.
@@ -2333,6 +2360,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 0.0, // cmap_factor_x (no CfL refinement at strat-search time)
                 0.0, // cmap_factor_b
                 entropy_mul,
+                afv_entropy_mul_adjust,
                 scaled_constants,
                 quant_for_coeffs_per_block,
             )

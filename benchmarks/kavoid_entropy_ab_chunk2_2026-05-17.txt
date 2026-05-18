@@ -1,0 +1,123 @@
+=== d=1.0 ===
+warning: enum `IwWeightKind` is never used
+39 | pub enum IwWeightKind {
+warning: struct `IwWeightConfig` is never constructed
+73 | pub struct IwWeightConfig {
+warning: function `compute_iw_weights` is never used
+123 | pub fn compute_iw_weights(
+warning: function `compute_local_variance` is never used
+194 | fn compute_local_variance(
+warning: function `compute_directional_max_variance` is never used
+251 | fn compute_directional_max_variance(
+warning: function `local_variance_into` is never used
+321 | fn local_variance_into(plane: &[f32], width: usize, height: usize, half: usize, out: &mut [f32]) {
+warning: enum `GradNorm` is never used
+345 | enum GradNorm {
+warning: function `compute_gradient` is never used
+350 | fn compute_gradient(
+warning: struct `WeightedPool` is never constructed
+379 | pub struct WeightedPool;
+warning: associated functions `mean`, `l2`, and `l4` are never used
+381 | impl WeightedPool {
+384 |     pub fn mean(values: &[f32], weights: &[f32]) -> f64 {
+398 |     pub fn l2(values: &[f32], weights: &[f32]) -> f64 {
+412 |     pub fn l4(values: &[f32], weights: &[f32]) -> f64 {
+warning: struct `IwSsimFeatures` is never constructed
+434 | pub struct IwSsimFeatures {
+warning: associated items `FEATURES_PER_CALL`, `as_array`, and `pool_from_maps` are never used
+449 | impl IwSsimFeatures {
+450 |     /// Number of features per call — matches `FEATURES_PER_CHANNEL_*_MASKED` in `metric.rs`.
+451 |     pub const FEATURES_PER_CALL: usize = 6;
+454 |     pub fn as_array(&self) -> [f64; 6] {
+474 |     pub fn pool_from_maps(
+warning: `zensim` (lib) generated 12 warnings
+image                                                           MP      off_b       on_b      Δb  Δb_pct  bfly_o  bfly_n  Δbfly  ss2_o  ss2_n   Δss2
+02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png  1.05     303083     303083      +0  +0.00%   1.653   1.653 +0.000  85.46  85.46  +0.00
+07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png  1.05     194897     194897      +0  +0.00%   1.823   1.823 +0.000  79.39  79.39  +0.00
+22ea12c903e41583b7c469cb86040157.png                          1.05      98655      98655      +0  +0.00%   1.536   1.536 +0.000  85.80  85.80  +0.00
+terminal.png                                                  1.75      63175      63175      +0  +0.00%   0.789   0.789 +0.000  91.87  91.87  +0.00
+codec_wiki.png                                                4.26     116673     116673      +0  +0.00%   1.055   1.055 +0.000  90.18  90.18  +0.00
+imac_g3.png                                                   5.62     299455     299455      +0  +0.00%   1.301   1.301 +0.000  88.69  88.69  +0.00
+TOTAL (n=6 images, 14.77 MP): 1075938 → 1075938 bytes (+0 bytes, +0.000%)
+=== d=5.0 ===
+warning: enum `IwWeightKind` is never used
+39 | pub enum IwWeightKind {
+warning: struct `IwWeightConfig` is never constructed
+73 | pub struct IwWeightConfig {
+warning: function `compute_iw_weights` is never used
+123 | pub fn compute_iw_weights(
+warning: function `compute_local_variance` is never used
+194 | fn compute_local_variance(
+warning: function `compute_directional_max_variance` is never used
+251 | fn compute_directional_max_variance(
+warning: function `local_variance_into` is never used
+321 | fn local_variance_into(plane: &[f32], width: usize, height: usize, half: usize, out: &mut [f32]) {
+warning: enum `GradNorm` is never used
+345 | enum GradNorm {
+warning: function `compute_gradient` is never used
+350 | fn compute_gradient(
+warning: struct `WeightedPool` is never constructed
+379 | pub struct WeightedPool;
+warning: associated functions `mean`, `l2`, and `l4` are never used
+381 | impl WeightedPool {
+384 |     pub fn mean(values: &[f32], weights: &[f32]) -> f64 {
+398 |     pub fn l2(values: &[f32], weights: &[f32]) -> f64 {
+412 |     pub fn l4(values: &[f32], weights: &[f32]) -> f64 {
+warning: struct `IwSsimFeatures` is never constructed
+434 | pub struct IwSsimFeatures {
+warning: associated items `FEATURES_PER_CALL`, `as_array`, and `pool_from_maps` are never used
+449 | impl IwSsimFeatures {
+450 |     /// Number of features per call — matches `FEATURES_PER_CHANNEL_*_MASKED` in `metric.rs`.
+451 |     pub const FEATURES_PER_CALL: usize = 6;
+454 |     pub fn as_array(&self) -> [f64; 6] {
+474 |     pub fn pool_from_maps(
+warning: `zensim` (lib) generated 12 warnings
+image                                                           MP      off_b       on_b      Δb  Δb_pct  bfly_o  bfly_n  Δbfly  ss2_o  ss2_n   Δss2
+02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png  1.05      93779      93779      +0  +0.00%   5.519   5.519 +0.000  56.07  56.07  +0.00
+07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png  1.05      56645      56645      +0  +0.00%   5.864   5.864 +0.000  45.41  45.41  +0.00
+22ea12c903e41583b7c469cb86040157.png                          1.05      30910      30910      +0  +0.00%   5.595   5.595 +0.000  59.16  59.16  +0.00
+terminal.png                                                  1.75      36180      36180      +0  +0.00%   3.167   3.167 +0.000  83.96  83.96  +0.00
+codec_wiki.png                                                4.26      67025      67025      +0  +0.00%   4.098   4.098 +0.000  79.30  79.30  +0.00
+imac_g3.png                                                   5.62     190664     190664      +0  +0.00%   4.811   4.811 +0.000  78.03  78.03  +0.00
+TOTAL (n=6 images, 14.77 MP): 475203 → 475203 bytes (+0 bytes, +0.000%)
+=== d=8.0 ===
+warning: enum `IwWeightKind` is never used
+39 | pub enum IwWeightKind {
+warning: struct `IwWeightConfig` is never constructed
+73 | pub struct IwWeightConfig {
+warning: function `compute_iw_weights` is never used
+123 | pub fn compute_iw_weights(
+warning: function `compute_local_variance` is never used
+194 | fn compute_local_variance(
+warning: function `compute_directional_max_variance` is never used
+251 | fn compute_directional_max_variance(
+warning: function `local_variance_into` is never used
+321 | fn local_variance_into(plane: &[f32], width: usize, height: usize, half: usize, out: &mut [f32]) {
+warning: enum `GradNorm` is never used
+345 | enum GradNorm {
+warning: function `compute_gradient` is never used
+350 | fn compute_gradient(
+warning: struct `WeightedPool` is never constructed
+379 | pub struct WeightedPool;
+warning: associated functions `mean`, `l2`, and `l4` are never used
+381 | impl WeightedPool {
+384 |     pub fn mean(values: &[f32], weights: &[f32]) -> f64 {
+398 |     pub fn l2(values: &[f32], weights: &[f32]) -> f64 {
+412 |     pub fn l4(values: &[f32], weights: &[f32]) -> f64 {
+warning: struct `IwSsimFeatures` is never constructed
+434 | pub struct IwSsimFeatures {
+warning: associated items `FEATURES_PER_CALL`, `as_array`, and `pool_from_maps` are never used
+449 | impl IwSsimFeatures {
+450 |     /// Number of features per call — matches `FEATURES_PER_CHANNEL_*_MASKED` in `metric.rs`.
+451 |     pub const FEATURES_PER_CALL: usize = 6;
+454 |     pub fn as_array(&self) -> [f64; 6] {
+474 |     pub fn pool_from_maps(
+warning: `zensim` (lib) generated 12 warnings
+image                                                           MP      off_b       on_b      Δb  Δb_pct  bfly_o  bfly_n  Δbfly  ss2_o  ss2_n   Δss2
+02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png  1.05      61851      61851      +0  +0.00%   7.967   7.967 +0.000  37.24  37.24  +0.00
+07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png  1.05      35233      35233      +0  +0.00%   8.017   8.017 +0.000  25.29  25.29  +0.00
+22ea12c903e41583b7c469cb86040157.png                          1.05      21107      21107      +0  +0.00%   7.997   7.997 +0.000  43.17  43.17  +0.00
+terminal.png                                                  1.75      30147      30147      +0  +0.00%   4.473   4.473 +0.000  77.80  77.80  +0.00
+codec_wiki.png                                                4.26      54606      54606      +0  +0.00%   6.511   6.511 +0.000  72.23  72.23  +0.00
+imac_g3.png                                                   5.62     166868     166868      +0  +0.00%   6.508   6.508 +0.000  72.08  72.08  +0.00
+TOTAL (n=6 images, 14.77 MP): 369812 → 369812 bytes (+0 bytes, +0.000%)

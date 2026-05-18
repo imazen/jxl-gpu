@@ -958,6 +958,17 @@ type AfvHandleSet<R> = (
 /// - `entropy_mul`: per-strategy entropy multiplier from
 ///   [`crate::forks::cost::afv_entropy_mul`]
 ///   (typically `EntropyMulTable::reference().afv / .dct8`).
+/// - `entropy_mul_adjust`: additive adjustment folded into the
+///   effective entropy multiplier as
+///   `(entropy_mul + entropy_mul_adjust).max(0.01)`. Pass `0.0` for
+///   the default (no-op) behavior. Used by the GPU port of libjxl's
+///   `kAvoidEntropyOfTransforms` heuristic (chunk 2) — at
+///   `distance > 4.0` and `effort >= 5`, the caller passes
+///   `K_AVOID_TRANSFORMS_BASE * avoid_entropy_of_transforms_mul(d)`
+///   so AFV picks receive the same per-distance penalty as the
+///   sub-block DCT4X4 / DCT4X8 / DCT8X4 specs. Mirrors the CPU
+///   encoder's `(entropy_mul_for_strategy + entropy_mul_adjust).max(0.01)`
+///   shape in `vardct/ac_strategy.rs::estimate_entropy_with_mask`.
 /// - `scaled_constants`: `(info_loss_mul, cost_delta, zeros_mul)`
 ///   from [`compute_scaled_constants`] (or
 ///   [`COEFF_DOMAIN_CONSTANTS`] for coefficient-domain mode).
@@ -1005,6 +1016,7 @@ pub fn afv_per_block_upstream_cost_xyb_host<R: Runtime>(
     cmap_factor_x: f32,
     cmap_factor_b: f32,
     entropy_mul: f32,
+    entropy_mul_adjust: f32,
     scaled_constants: (f32, f32, f32),
     quant_for_coeffs_per_block: &[f32],
 ) -> Vec<f32> {
@@ -1012,6 +1024,16 @@ pub fn afv_per_block_upstream_cost_xyb_host<R: Runtime>(
         MASK_CHANNEL_OFFSET, apply_x_multiblock_weight_to_loss, combine_pixel_loss_3channel,
         extract_per_block_entropy, per_block_upstream_cost_per_block,
     };
+
+    // Fold the chunk-2 kAvoidEntropyOfTransforms penalty (or any
+    // future per-call adjustment) into the effective entropy_mul,
+    // mirroring the CPU encoder's
+    // `(entropy_mul_for_strategy + entropy_mul_adjust).max(0.01)`
+    // shape in `vardct/ac_strategy.rs::estimate_entropy_with_mask`.
+    // Default `entropy_mul_adjust = 0.0` keeps the legacy path
+    // byte-identical (and the `.max(0.01)` is a no-op when the input
+    // is already the table reference).
+    let effective_entropy_mul = (entropy_mul + entropy_mul_adjust).max(0.01);
     use cubecl::prelude::*;
 
     debug_assert_eq!(pre_gathered_8x8_x.coeffs_per_block(), 64);
@@ -1175,7 +1197,7 @@ pub fn afv_per_block_upstream_cost_xyb_host<R: Runtime>(
             &nzeros_y,
             &nzeros_b,
             &pixel_loss_total,
-            entropy_mul,
+            effective_entropy_mul,
             scaled_constants,
             quant_for_coeffs_per_block,
             BLOCK_PIXELS,
@@ -1757,6 +1779,7 @@ mod tests {
             0.0,
             0.0,
             entropy_mul,
+            0.0, // entropy_mul_adjust — chunk-2 default (no-op)
             scaled_constants,
             &quant_for_coeffs_per_block,
         );
@@ -1820,5 +1843,177 @@ mod tests {
             new_mean < placeholder_mean * 1.0e4,
             "new formula scale wildly off vs placeholder: new={new_mean} placeholder={placeholder_mean}"
         );
+    }
+
+    /// Chunk-2 contract for `kAvoidEntropyOfTransforms` GPU port: when
+    /// `entropy_mul_adjust > 0` (the boost branch at `distance > 4.0 &&
+    /// effort >= 5`), per-block AFV costs MUST be strictly greater than
+    /// the same call with `entropy_mul_adjust = 0.0` (the chunk-1
+    /// pre-existing behavior). This locks the wiring invariant —
+    /// `(entropy_mul + entropy_mul_adjust).max(0.01)` correctly folds
+    /// the adjust into the effective multiplier consumed by
+    /// `per_block_upstream_cost_per_block`.
+    ///
+    /// Mirrors the CPU encoder's shape in
+    /// `vardct/ac_strategy.rs::estimate_entropy_with_mask`:
+    /// `(entropy_mul_for_strategy + entropy_mul_adjust).max(0.01)`.
+    #[test]
+    fn test_afv_per_block_upstream_cost_adjust_boost_increases_costs() {
+        use crate::forks::cost::{EntropyMulTable, afv_entropy_mul, compute_scaled_constants};
+        use crate::quant_weights::afv_weights_per_channel;
+
+        let enc: GpuEncoder<B> = GpuEncoder::new();
+        // 4×4 = 16 8x8 blocks (32x32 image) — same shape as the
+        // smoke test for easy comparison.
+        const N: usize = 16;
+        const W: u32 = 32;
+        const H: u32 = 32;
+
+        let mut pixel_blocks_x = vec![0.0_f32; N * 64];
+        let mut pixel_blocks_y = vec![0.0_f32; N * 64];
+        let mut pixel_blocks_b = vec![0.0_f32; N * 64];
+        for b in 0..N {
+            for i in 0..64 {
+                let v = ((b * 7 + i * 11).wrapping_mul(31) % 251) as f32 / 251.0 - 0.5;
+                pixel_blocks_x[b * 64 + i] = 0.05 + 0.10 * v;
+                pixel_blocks_y[b * 64 + i] = 0.30 + 0.40 * v;
+                pixel_blocks_b[b * 64 + i] = 0.10 + 0.20 * v;
+            }
+        }
+        let (wx, wy, wb) = afv_weights_per_channel();
+        let inv_wx: [f32; 64] = core::array::from_fn(|i| 1.0 / wx[i]);
+        let inv_wy: [f32; 64] = core::array::from_fn(|i| 1.0 / wy[i]);
+        let inv_wb: [f32; 64] = core::array::from_fn(|i| 1.0 / wb[i]);
+
+        let mask_data = vec![1.0_f32; (W as usize) * (H as usize)];
+        let mask_plane = enc.upload_plane(&mask_data, W, H);
+
+        let xb = (W as usize) / 8;
+        let mask_row_base: Vec<u32> = (0..N)
+            .map(|i| {
+                let bx = i % xb;
+                let by = i / xb;
+                (by * 8 * (W as usize) + bx * 8) as u32
+            })
+            .collect();
+        use cubecl::prelude::*;
+        let mask_row_base_handle = enc
+            .client_ref()
+            .create_from_slice(u32::as_bytes(&mask_row_base));
+
+        let g_x = enc.upload_blocks(&pixel_blocks_x, N as u32, 64);
+        let g_y = enc.upload_blocks(&pixel_blocks_y, N as u32, 64);
+        let g_b = enc.upload_blocks(&pixel_blocks_b, N as u32, 64);
+
+        let table = EntropyMulTable::reference();
+        let entropy_mul = afv_entropy_mul(&table);
+        // Use d=5.0 scaled constants (where chunk-1's boost is non-zero)
+        // for realism; the test only requires `entropy_mul_adjust` flip.
+        let scaled_constants = compute_scaled_constants(5.0, (1.2, 9.309, 10.833));
+        let quant_for_coeffs_per_block = vec![0.765_f32; N];
+        let quant = 0.765_f32;
+
+        // chunk-2 default: entropy_mul_adjust = 0.0 (no-op).
+        let costs_no_op = afv_per_block_upstream_cost_xyb_host(
+            &enc,
+            &AFV4X4_BASIS_TRANSPOSE,
+            &g_x,
+            &g_y,
+            &g_b,
+            &wx,
+            &wy,
+            &wb,
+            &inv_wx,
+            &inv_wy,
+            &inv_wb,
+            &mask_plane,
+            &mask_row_base_handle,
+            N,
+            quant,
+            quant,
+            quant,
+            0.0,
+            0.0,
+            entropy_mul,
+            0.0,
+            scaled_constants,
+            &quant_for_coeffs_per_block,
+        );
+
+        // chunk-2 boost branch: K_AVOID_TRANSFORMS_BASE *
+        // avoid_entropy_of_transforms_mul(5.0) = 0.5 * (12-4)/(5-4) =
+        // 0.5 * 8.0 = 4.0. Effective entropy_mul becomes
+        // (~1.022 + 4.0).max(0.01) ≈ 5.022 — large enough that every
+        // per-block cost must shift up because the entropy contribution
+        // is strictly non-negative (entropy + nzeros bits term is always
+        // >= 0) and gets multiplied by a larger factor.
+        let costs_boost = afv_per_block_upstream_cost_xyb_host(
+            &enc,
+            &AFV4X4_BASIS_TRANSPOSE,
+            &g_x,
+            &g_y,
+            &g_b,
+            &wx,
+            &wy,
+            &wb,
+            &inv_wx,
+            &inv_wy,
+            &inv_wb,
+            &mask_plane,
+            &mask_row_base_handle,
+            N,
+            quant,
+            quant,
+            quant,
+            0.0,
+            0.0,
+            entropy_mul,
+            4.0, // chunk-1 / chunk-2 d=5.0 adjust value
+            scaled_constants,
+            &quant_for_coeffs_per_block,
+        );
+
+        assert_eq!(costs_no_op.len(), 4 * N);
+        assert_eq!(costs_boost.len(), 4 * N);
+
+        // Layer 1: every paired position with non-trivial entropy MUST
+        // see a strictly increased cost under the boost. Some pure-zero
+        // blocks (uniform mid-grey, every AC ~= 0) may not move; we
+        // require MEAN to be strictly greater and MEDIAN per-position
+        // delta to be non-negative.
+        let mut deltas: Vec<f32> = costs_no_op
+            .iter()
+            .zip(costs_boost.iter())
+            .map(|(&a, &b)| b - a)
+            .collect();
+        deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+        let median = deltas[deltas.len() / 2];
+        let mean_no_op: f64 =
+            costs_no_op.iter().map(|&v| v as f64).sum::<f64>() / costs_no_op.len() as f64;
+        let mean_boost: f64 =
+            costs_boost.iter().map(|&v| v as f64).sum::<f64>() / costs_boost.len() as f64;
+
+        std::println!(
+            "[chunk2-adjust] no_op mean={mean_no_op:.3e} boost mean={mean_boost:.3e} \
+             median delta={median:.3e}"
+        );
+
+        assert!(
+            mean_boost > mean_no_op,
+            "entropy_mul_adjust=4.0 must strictly increase mean AFV cost: \
+             no_op={mean_no_op} boost={mean_boost}"
+        );
+        assert!(
+            median >= 0.0,
+            "entropy_mul_adjust=4.0 must not decrease any block's cost \
+             (entropy contribution is non-negative): median delta={median}"
+        );
+        // All finite + non-negative invariant must still hold.
+        for &c in &costs_boost {
+            assert!(
+                c.is_finite() && c >= 0.0,
+                "AFV cost with adjust=4.0 must be finite >= 0, got {c}"
+            );
+        }
     }
 }

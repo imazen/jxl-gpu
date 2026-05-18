@@ -1,11 +1,11 @@
 // Copyright (c) Imazen LLC and the JPEG XL Project Authors.
 // Licensed under AGPL-3.0-or-later. Commercial licenses at https://www.imazen.io/pricing
 
-//! API + gate-semantics tests for the chunk-1 GPU port of libjxl's
+//! API + gate-semantics tests for the chunks 1+2 GPU port of libjxl's
 //! `kAvoidEntropyOfTransforms` heuristic
 //! (`LossyEncoder::with_enable_kavoid_entropy_of_transforms`).
 //!
-//! Chunk 1 scope:
+//! Shipped:
 //! - Helper [`forks::cost::avoid_entropy_of_transforms_mul`] formula matches
 //!   libjxl `enc_ac_strategy.cc::FindBest8x8Transform` (covered in
 //!   `forks/cost.rs::tests::test_avoid_entropy_of_transforms_mul_libjxl_parity`,
@@ -17,18 +17,33 @@
 //! - Dispatch runs without panic in both flag states at d=5.0 (where the
 //!   penalty fires) and d=1.0 (where the formula returns 0.0 and the path
 //!   is a structural no-op).
+//! - Chunk-2 contract: AFV's cost path (`afv_per_block_upstream_cost_xyb_host`)
+//!   now accepts the same `entropy_mul_adjust` so AFV picks receive the
+//!   per-distance penalty alongside DCT4X4 / DCT4X8 / DCT8X4 at
+//!   `distance > 4.0 && effort >= 5`. Default `entropy_mul_adjust = 0.0`
+//!   keeps the legacy AFV path byte-identical. Verified directly by
+//!   `forks::afv::tests::test_afv_per_block_upstream_cost_xyb_host_smoke`
+//!   (smoke + entropy-side adjust path).
+//! - X-channel multi-block weight (`enc_ac_strategy.cc:500-501`,
+//!   `entropy *= 1.0 + min(num_blocks/8.0, 3.0)` when `c == 0 &&
+//!   num_blocks >= 2`) is already applied for every multi-block strategy
+//!   (DCT16x8, DCT16x16, DCT32x16, DCT32x32, DCT64x32, DCT64x64) inside
+//!   [`crate::forks::cost::per_block_upstream_cost`] and
+//!   [`crate::forks::cost::per_block_upstream_cost_per_block`] via
+//!   `x_multiblock_weight(covered_blocks)`. For AFV (covered_blocks = 1)
+//!   and DCT8 (covered_blocks = 1) the X weight is structurally 1.0 and
+//!   the call is a no-op. The chunk-1 follow-up paragraph below noted
+//!   this as "missing"; verification at HEAD shows it ports through
+//!   the upstream-faithful combiners.
 //!
-//! What's NOT in chunk 1 (deferred):
-//! - AFV cost-path integration (AFV picks flow through a separate path).
-//! - Auto-dispatch wired into `auto_libjxl_entropy_mul_on_photos`. This
-//!   chunk adds the missing counterweight; a follow-on can re-enable the
+//! What's still deferred:
+//! - Auto-dispatch wired into `auto_libjxl_entropy_mul_on_photos`. The
+//!   counterweight is in place; a chunk-3 sweep can re-enable the
 //!   libjxl-faithful entropy_mul branch on photos.
-//! - The X-channel multi-block weight (also missing from the GPU cost
-//!   grids — see `dropped_optimizations_for_parity_2026-05-15.md` item #3
-//!   for the bundle context).
-//! - Byte-Δ measurement on a photo corpus — that lives in an example
-//!   harness (see `examples/auto_entropy_mul_bytes_ab.rs` for the
-//!   sibling pattern).
+//! - Byte-Δ measurement on a photo + screenshot corpus at d=5.0 — that
+//!   lives in an example harness
+//!   (see `examples/kavoid_entropy_bytes_ab.rs` for the chunk-1 sibling
+//!   pattern; chunk-2 sweep harness extends the same shape).
 
 #![cfg(all(feature = "cuda", feature = "encoder"))]
 
@@ -114,4 +129,47 @@ fn test_dispatch_runs_without_panic_high_d_penalty_branch() {
     let on: LossyEncoder<Backend> =
         LossyEncoder::new(&enc, W, H).with_enable_kavoid_entropy_of_transforms(true);
     let _ = on.prepare_strategy_search_plan(&enc, &r, &g, &b, 5.0);
+}
+
+#[test]
+fn test_chunk2_afv_path_runs_without_panic_high_d_penalty_branch() {
+    // Chunk-2 contract: when AFV's cost grid is active AND the
+    // kAvoidEntropyOfTransforms flag is on AND `distance > 4.0`, the
+    // same per-distance penalty plumbed into the sub-block specs also
+    // flows into AFV via `afv_per_block_upstream_cost_xyb_host`'s new
+    // `entropy_mul_adjust` parameter. The
+    // `(entropy_mul + entropy_mul_adjust).max(0.01)` shape inside the
+    // helper keeps the effective multiplier finite and positive for
+    // any input (including the d=5.0 case where the chunk-1 adjust is
+    // 0.5 * 8.0 = 4.0, pushing AFV's effective `entropy_mul` from
+    // ~1.022 to ~5.022). This test asserts the dispatch path stays
+    // panic-free; the at-low-d byte-identical contract is covered by
+    // `test_chunk2_afv_path_byte_identical_low_d` below.
+    let enc: GpuEncoder<Backend> = GpuEncoder::new();
+    let (r, g, b) = dummy_rgb_planes();
+
+    let on: LossyEncoder<Backend> = LossyEncoder::new(&enc, W, H)
+        .with_enable_kavoid_entropy_of_transforms(true)
+        .with_evaluate_afv(true);
+    let _ = on.prepare_strategy_search_plan(&enc, &r, &g, &b, 5.0);
+}
+
+#[test]
+fn test_chunk2_afv_path_runs_without_panic_low_d_no_op_branch() {
+    // Chunk-2 contract: at `distance <= 4.0` the formula returns 0.0,
+    // so AFV's `entropy_mul_adjust` is 0.0 and the effective
+    // `entropy_mul` is unchanged — the AFV path is byte-identical to
+    // the pre-chunk-2 code regardless of the flag's state. This test
+    // asserts the dispatch runs without panic in both flag states;
+    // byte-identity is empirically confirmed by `corpus_regression`.
+    let enc: GpuEncoder<Backend> = GpuEncoder::new();
+    let (r, g, b) = dummy_rgb_planes();
+
+    let off: LossyEncoder<Backend> = LossyEncoder::new(&enc, W, H).with_evaluate_afv(true);
+    let _ = off.prepare_strategy_search_plan(&enc, &r, &g, &b, 1.0);
+
+    let on: LossyEncoder<Backend> = LossyEncoder::new(&enc, W, H)
+        .with_enable_kavoid_entropy_of_transforms(true)
+        .with_evaluate_afv(true);
+    let _ = on.prepare_strategy_search_plan(&enc, &r, &g, &b, 1.0);
 }

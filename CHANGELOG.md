@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+### Added (May 17, 2026 — late evening)
+
+- **GPU port of libjxl `kAvoidEntropyOfTransforms` heuristic — chunk 2
+  AFV cost-path integration**. Extends chunk 1's
+  `LossyEncoder::with_enable_kavoid_entropy_of_transforms` flag into
+  AFV0-3's cost path so the per-distance penalty
+  `K_AVOID_TRANSFORMS_BASE * avoid_entropy_of_transforms_mul(distance)`
+  is applied to every non-DCT8 / non-DCT2X2 / non-IDENTITY 8×8-class
+  strategy libjxl penalizes (was DCT4X4 / DCT4X8 / DCT8X4 only in
+  chunk 1; AFV0-3 now joined). The CPU encoder applies the adjust
+  uniformly to all 8×8-class strategies via
+  `(entropy_mul_for_strategy + entropy_mul_adjust).max(0.01)` in
+  `jxl_encoder::vardct::ac_strategy.rs::estimate_entropy_with_mask`;
+  the GPU encoder splits the work between
+  `strategy_search_costs_subblock_8x8_batch` (chunk 1) and
+  `forks::afv::afv_per_block_upstream_cost_xyb_host` (chunk 2). The
+  AFV helper gained a new `entropy_mul_adjust: f32` parameter; default
+  `0.0` keeps the legacy AFV path byte-identical. Wiring in
+  `prepare_strategy_search_plan_inner` plumbs the same
+  `avoid_transforms_adjust` value to both batches.
+
+  Audited the X-channel multi-block weight at HEAD
+  (`enc_ac_strategy.cc:500-501`,
+  `entropy *= 1.0 + min(num_blocks/8.0, 3.0)` when
+  `c == 0 && num_blocks >= 2`) and confirmed it's already correctly
+  applied for every multi-block strategy via
+  `per_block_upstream_cost` / `per_block_upstream_cost_per_block`
+  (both call `x_multiblock_weight(covered_blocks)`). For AFV / DCT8
+  the weight is structurally 1.0 (covered_blocks = 1) and the call is
+  a no-op — matching the CPU encoder's DCT8-fast-path semantics. New
+  docstring on `K_AVOID_TRANSFORMS_BASE` locks the invariant so future
+  audits won't re-investigate this.
+
+  Tests: new lib unit test
+  `forks::afv::tests::test_afv_per_block_upstream_cost_adjust_boost_increases_costs`
+  (GPU required) asserts `entropy_mul_adjust = 4.0` (d=5.0 chunk-1
+  adjust value) STRICTLY increases per-block AFV costs vs
+  `entropy_mul_adjust = 0.0` (mean 6.166e3 → 3.003e4, median delta
+  2.413e4 — locks chunk-2 wiring as Layer-1 proven). Integration test
+  `tests/kavoid_entropy_of_transforms_dispatch.rs` adds two new
+  panic-free smoke tests for the AFV path (low-d no-op + high-d
+  penalty branches). New A/B harness
+  `examples/kavoid_entropy_chunk2_bytes_ab.rs` runs 3 CLIC photos +
+  3 GB82-SC screenshots × 3 distances with AFV force-evaluated.
+  Result (`benchmarks/kavoid_entropy_ab_chunk2_2026-05-17.{txt,meta}`):
+  byte-identical between OFF and ON on all 18 cells. The byte-identity
+  is the *desired* chunk-2 contract — chunk 2 adds the missing
+  counterweight; it doesn't (and shouldn't) flip block picks on its
+  own. The Layer-1 invariant test directly proves the wiring.
+
+  Chunk-3 scope: A/B sweep with `auto_libjxl_entropy_mul_on_photos`
+  re-enabled. With chunks 1+2's counterweight now in place, the
+  over-selection that originally pareto-refuted the auto-enable should
+  be prevented; if photos win on bytes, consider making auto-enable
+  the default.
+
 ### Added (May 17, 2026 — evening)
 
 - **GPU port of libjxl `kAvoidEntropyOfTransforms` heuristic — chunk 1

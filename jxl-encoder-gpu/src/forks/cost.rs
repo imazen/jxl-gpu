@@ -629,6 +629,28 @@ pub fn afv_entropy_mul(table: &EntropyMulTable) -> f32 {
 /// discourage the cost-model from over-picking small/sub-block
 /// transforms at very high distances where DCT8 wins on rate-distortion
 /// anyway.
+///
+/// GPU port chunks:
+/// - Chunk 1 (commit `f5d3703`): DCT4X4 / DCT4X8 / DCT8X4 via
+///   `LossyEncoder::prepare_strategy_search_plan_inner`'s
+///   `avoid_transforms_adjust` fold into `SubblockStratSpec.entropy_mul`.
+/// - Chunk 2 (this commit): AFV0-3 via
+///   [`crate::forks::afv::afv_per_block_upstream_cost_xyb_host`]'s
+///   new `entropy_mul_adjust` parameter, plumbed from the same
+///   `avoid_transforms_adjust` value. AFV's wiring required adding a
+///   per-call additive parameter to its cost-grid host helper because
+///   AFV runs its own batched pipeline (`forks::afv`) separate from the
+///   `SubblockStratSpec` batch.
+///
+/// The X-channel multi-block weight (`enc_ac_strategy.cc:500-501`,
+/// `entropy *= 1.0 + min(num_blocks/8.0, 3.0)` when `c == 0 &&
+/// num_blocks >= 2`) is already applied to every multi-block strategy
+/// (DCT16x8 / DCT16x16 / DCT32x16 / DCT32x32 / DCT64x32 / DCT64x64) by
+/// [`per_block_upstream_cost`] and [`per_block_upstream_cost_per_block`]
+/// via [`x_multiblock_weight`]; see also [`apply_x_multiblock_weight_to_loss`]
+/// for the matching pixel-loss-side weight. For AFV (always
+/// covered_blocks = 1) and DCT8 (always covered_blocks = 1) the
+/// X-channel weight is structurally 1.0 and the call is a no-op.
 pub const K_AVOID_TRANSFORMS_BASE: f32 = 0.5;
 
 /// libjxl `kAvoidEntropyOfTransforms` multiplier: `(12-4)/(d-4)` at
