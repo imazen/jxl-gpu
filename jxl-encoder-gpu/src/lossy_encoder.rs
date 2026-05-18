@@ -457,6 +457,41 @@ pub struct LossyEncoder<R: Runtime> {
     /// the fast path unconditional (e.g., for benchmarking the fast
     /// path in isolation).
     auto_patches_on_fast_path: bool,
+    /// Opt-in: apply libjxl's `kAvoidEntropyOfTransforms` heuristic to
+    /// the GPU cost-grid's sub-block strategies (DCT4X4, DCT4X8,
+    /// DCT8X4). When enabled, adds
+    /// `K_AVOID_TRANSFORMS_BASE * avoid_entropy_of_transforms_mul(distance)`
+    /// to those strategies' `entropy_mul` so the cost-grid penalizes
+    /// sub-block picks at very high distances (`distance > 4.0`) where
+    /// DCT8 dominates on rate-distortion anyway.
+    ///
+    /// **Default `false`** — chunk-1 POC of the multi-week GPU port of
+    /// libjxl's `kAvoidEntropyOfTransforms` counterweight. The full port
+    /// will unlock the libjxl-faithful entropy_mul branch on photos
+    /// (see [`Self::auto_libjxl_entropy_mul_on_photos`] field docs +
+    /// `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
+    /// item #3 for the rationale). This chunk-1 ships only the
+    /// formula + a narrow gate (`distance > 4.0`) so production at
+    /// `distance ≤ 4.0` stays byte-identical (the formula returns 0.0
+    /// inside the gated band and is therefore a no-op).
+    ///
+    /// Gate semantics (mirrors libjxl `enc_ac_strategy.cc::FindBest8x8Transform`):
+    ///
+    /// - `target_distance <= 4.0`: penalty is 0.0 — no effect on
+    ///   cost grids, output is byte-identical to default-off (so this
+    ///   flag is a structural no-op outside the gated band).
+    /// - `target_distance > 4.0` and `effort >= 5`: add
+    ///   `0.5 * (12 - 4) / (distance - 4)` (clamped at `d >= 12` to
+    ///   `0.5 * 1.0 = 0.5`) to the `entropy_mul` of DCT4X4,
+    ///   DCT4X8, and DCT8X4 cost-grid specs. AFV is not touched by
+    ///   this chunk because AFV picks flow through a separate cost
+    ///   path (`forks::afv`) and the GPU AFV grid is opt-in.
+    ///
+    /// IDENTITY and DCT2X2 are excluded from the penalty per libjxl
+    /// (they receive the `kFavor2X2` bonus instead at low distances).
+    ///
+    /// Enable via [`Self::with_enable_kavoid_entropy_of_transforms`].
+    enable_kavoid_entropy_of_transforms: bool,
 }
 
 /// Round `n` up to the next multiple of `align`.
@@ -821,6 +856,13 @@ impl<R: Runtime> LossyEncoder<R> {
             // win on the gated subset (small + screenshot + all-DCT8).
             // See `Self::auto_patches_on_fast_path` field docs.
             auto_patches_on_fast_path: true,
+            // Chunk-1 POC of GPU `kAvoidEntropyOfTransforms` port.
+            // Default `false` — narrow d>4 gate means this is a
+            // structural no-op at production distances anyway, but
+            // keep opt-in until the full multi-week port is wired
+            // (X-channel multi-block weight, AFV cost-path integration,
+            // bundle with `auto_libjxl_entropy_mul_on_photos`).
+            enable_kavoid_entropy_of_transforms: false,
         }
     }
 
@@ -966,6 +1008,28 @@ impl<R: Runtime> LossyEncoder<R> {
     /// [field]: #structfield.auto_patches_on_fast_path
     pub fn auto_patches_on_fast_path(&self) -> bool {
         self.auto_patches_on_fast_path
+    }
+
+    /// Opt-in: enable libjxl's `kAvoidEntropyOfTransforms` penalty on
+    /// the GPU cost-grid's sub-block strategies (DCT4X4, DCT4X8, DCT8X4).
+    /// Default `false`. See the
+    /// [`Self::enable_kavoid_entropy_of_transforms`][field] field for
+    /// gate semantics and the chunk-1 POC rationale.
+    ///
+    /// [field]: #structfield.enable_kavoid_entropy_of_transforms
+    pub fn with_enable_kavoid_entropy_of_transforms(mut self, on: bool) -> Self {
+        self.enable_kavoid_entropy_of_transforms = on;
+        self
+    }
+
+    /// Whether the encoder will apply the `kAvoidEntropyOfTransforms`
+    /// penalty on the GPU cost-grid's sub-block strategies. Default
+    /// `false`. See [`Self::enable_kavoid_entropy_of_transforms`][field]
+    /// for semantics.
+    ///
+    /// [field]: #structfield.enable_kavoid_entropy_of_transforms
+    pub fn enable_kavoid_entropy_of_transforms(&self) -> bool {
+        self.enable_kavoid_entropy_of_transforms
     }
 
     /// The current effort level. See [`Self::with_effort`].
@@ -2056,6 +2120,36 @@ impl<R: Runtime> LossyEncoder<R> {
         } else {
             1.85_f32
         };
+
+        // Chunk-1 POC of libjxl's `kAvoidEntropyOfTransforms` heuristic.
+        // Adds a per-distance penalty to non-DCT8 / non-DCT2X2 /
+        // non-IDENTITY 8×8-class strategies (DCT4X4, DCT4X8, DCT8X4)
+        // when `distance > 4.0` and `effort >= 5` (libjxl gates at
+        // `speed_tier <= kHare`). At `distance <= 4.0` the formula
+        // returns 0.0, so this is a structural no-op outside the
+        // gated band — production at `d <= 4.0` stays byte-identical
+        // regardless of `enable_kavoid_entropy_of_transforms`.
+        //
+        // The penalty mirrors the CPU encoder's
+        // `jxl_encoder::vardct::ac_strategy_search::avoid_entropy_of_transforms_mul`
+        // and folds straight into the existing per-strategy `entropy_mul`
+        // value uploaded to the cost-grid kernel — matching the CPU's
+        // `(entropy_mul_for_strategy + entropy_mul_adjust).max(0.01)`
+        // shape from `vardct/ac_strategy.rs::estimate_entropy_with_mask`.
+        //
+        // AFV0-3 are NOT touched here: AFV picks flow through a
+        // separate cost path (`forks::afv`) and the GPU AFV grid is
+        // opt-in. Wiring AFV into the same penalty is a follow-on
+        // chunk once the AFV cost path lands per-strategy entropy_mul
+        // input.
+        let avoid_transforms_adjust =
+            if self.enable_kavoid_entropy_of_transforms && self.effort >= 5 {
+                crate::forks::cost::K_AVOID_TRANSFORMS_BASE
+                    * crate::forks::cost::avoid_entropy_of_transforms_mul(distance)
+            } else {
+                0.0
+            };
+
         let mut specs: Vec<SubblockStratSpec> = Vec::new();
         if evaluate_subblock_costs {
             specs.push(SubblockStratSpec {
@@ -2066,7 +2160,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 inv_weights_x: &inv_4x4_x,
                 inv_weights_y: &inv_4x4_y,
                 inv_weights_b: &inv_4x4_b,
-                entropy_mul: 1.08,
+                entropy_mul: (1.08_f32 + avoid_transforms_adjust).max(0.01),
             });
         }
         if _eval_dct4x8_8x4 {
@@ -2078,7 +2172,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 inv_weights_x: &inv_4x8_x,
                 inv_weights_y: &inv_4x8_y,
                 inv_weights_b: &inv_4x8_b,
-                entropy_mul: entropy_mul_dct4x8,
+                entropy_mul: (entropy_mul_dct4x8 + avoid_transforms_adjust).max(0.01),
             });
             specs.push(SubblockStratSpec {
                 raw_strategy: RAW_STRATEGY_DCT8X4,
@@ -2088,7 +2182,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 inv_weights_x: &inv_4x8_x,
                 inv_weights_y: &inv_4x8_y,
                 inv_weights_b: &inv_4x8_b,
-                entropy_mul: entropy_mul_dct4x8,
+                entropy_mul: (entropy_mul_dct4x8 + avoid_transforms_adjust).max(0.01),
             });
         }
         if evaluate_subblock_costs {

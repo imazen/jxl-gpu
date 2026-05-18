@@ -619,6 +619,44 @@ pub fn afv_entropy_mul(table: &EntropyMulTable) -> f32 {
     table.afv / table.dct8
 }
 
+/// Base coefficient for libjxl's `kAvoidEntropyOfTransforms` heuristic
+/// (`enc_ac_strategy.cc::EvalAcStrategy`). The CPU encoder mirrors
+/// this as `EffortProfile::k_avoid_transforms_base = 0.5`.
+///
+/// Multiplied by [`avoid_entropy_of_transforms_mul`] and added to the
+/// `entropy_mul` of every non-DCT8 / non-DCT2X2 / non-IDENTITY 8×8-class
+/// strategy (DCT4X4, DCT4X8, DCT8X4, AFV0-3) at `distance > 4.0` to
+/// discourage the cost-model from over-picking small/sub-block
+/// transforms at very high distances where DCT8 wins on rate-distortion
+/// anyway.
+pub const K_AVOID_TRANSFORMS_BASE: f32 = 0.5;
+
+/// libjxl `kAvoidEntropyOfTransforms` multiplier: `(12-4)/(d-4)` at
+/// `4 < d < 12`, `1.0` at `d >= 12`, and `0.0` (the penalty is OFF) at
+/// `d <= 4`.
+///
+/// Returned value is multiplied by [`K_AVOID_TRANSFORMS_BASE`] (0.5)
+/// and ADDED to the `entropy_mul` of every non-DCT8 / non-DCT2X2 /
+/// non-IDENTITY 8×8-class strategy (DCT4X4, DCT4X8, DCT8X4, AFV0-3).
+///
+/// See `enc_ac_strategy.cc::FindBest8x8Transform` (line 592-601 in the
+/// reference) and the CPU encoder's
+/// `jxl_encoder::vardct::ac_strategy_search::avoid_entropy_of_transforms_mul`.
+///
+/// Returning `0.0` below `d=4` (rather than the raw formula value)
+/// preserves the libjxl semantics that the penalty is gated by
+/// `butteraugli_target > 4.0`.
+#[inline]
+pub fn avoid_entropy_of_transforms_mul(distance: f32) -> f32 {
+    if distance <= 4.0 {
+        0.0
+    } else if distance < 12.0 {
+        (12.0 - 4.0) / (distance - 4.0)
+    } else {
+        1.0
+    }
+}
+
 /// Per-channel offsets for pixel-domain loss masking. Bit-for-bit
 /// from upstream `jxl_encoder::vardct::ac_strategy::MASK_CHANNEL_OFFSET`
 /// (= libjxl `enc_ac_strategy.cc:446`).
@@ -3496,6 +3534,58 @@ pub fn pixel_loss_blocks_gpu<R: Runtime>(
 mod tests {
     use super::*;
     use alloc::vec;
+
+    /// Lock the [`avoid_entropy_of_transforms_mul`] formula against libjxl
+    /// `enc_ac_strategy.cc::FindBest8x8Transform`:
+    ///
+    /// ```text
+    ///   static const float kFavorAvoidEntropyOfTransformsMulOff = 4.0;
+    ///   static const float kFavorAvoidEntropyOfTransformsMulOn = 12.0;
+    ///   static const float kAvoidEntropyOfTransforms = 0.5;
+    ///   if (butteraugli_target > kFavorAvoidEntropyOfTransformsMulOff) {
+    ///     float mul = (kFavorAvoidEntropyOfTransformsMulOn -
+    ///                  kFavorAvoidEntropyOfTransformsMulOff) /
+    ///                 (butteraugli_target -
+    ///                  kFavorAvoidEntropyOfTransformsMulOff);
+    ///     entropy_mul += kAvoidEntropyOfTransforms * mul;
+    ///   }
+    /// ```
+    ///
+    /// Mirrors `jxl_encoder::vardct::ac_strategy_search::tests::
+    /// test_avoid_entropy_of_transforms_mul_libjxl_parity`.
+    #[test]
+    fn test_avoid_entropy_of_transforms_mul_libjxl_parity() {
+        // d <= 4.0: penalty is OFF (returns 0.0)
+        assert_eq!(avoid_entropy_of_transforms_mul(0.5), 0.0);
+        assert_eq!(avoid_entropy_of_transforms_mul(1.0), 0.0);
+        assert_eq!(avoid_entropy_of_transforms_mul(2.0), 0.0);
+        assert_eq!(avoid_entropy_of_transforms_mul(4.0), 0.0);
+
+        // d > 4.0, d < 12.0: (12 - 4) / (d - 4)
+        let v = avoid_entropy_of_transforms_mul(4.1);
+        let expected = (12.0 - 4.0) / (4.1 - 4.0);
+        assert!((v - expected).abs() < 1e-5);
+
+        let v = avoid_entropy_of_transforms_mul(5.0);
+        let expected = (12.0 - 4.0) / (5.0 - 4.0); // = 8.0
+        assert!((v - expected).abs() < 1e-6);
+
+        let v = avoid_entropy_of_transforms_mul(6.0);
+        let expected = (12.0 - 4.0) / (6.0 - 4.0); // = 4.0
+        assert!((v - expected).abs() < 1e-6);
+
+        let v = avoid_entropy_of_transforms_mul(8.0);
+        let expected = (12.0 - 4.0) / (8.0 - 4.0); // = 2.0
+        assert!((v - expected).abs() < 1e-6);
+
+        // d >= 12.0: clamped to 1.0
+        assert_eq!(avoid_entropy_of_transforms_mul(12.0), 1.0);
+        assert_eq!(avoid_entropy_of_transforms_mul(20.0), 1.0);
+
+        // Base constant matches libjxl `kAvoidEntropyOfTransforms = 0.5`
+        // and CPU encoder's `EffortProfile::k_avoid_transforms_base`.
+        assert_eq!(K_AVOID_TRANSFORMS_BASE, 0.5);
+    }
 
     #[cfg(feature = "cuda")]
     #[test]

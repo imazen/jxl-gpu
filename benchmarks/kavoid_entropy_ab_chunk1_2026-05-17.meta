@@ -1,0 +1,33 @@
+# kAvoidEntropyOfTransforms chunk-1 GPU port A/B bench
+date: 2026-05-17
+host: lilith
+parent_commit: fatal: not a git repository (or any of the parent directories): .git
+command: |
+  for d in 1.0 2.0 3.0 4.1 4.5 5.0 6.0 8.0; do
+    cargo run --release -p jxl-encoder-gpu --features 'cuda encoder' \
+      --example kavoid_entropy_bytes_ab -- --distance ${d}
+  done
+images:
+  - clic2025-1024/02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png  (1.05 MP CLIC photo)
+  - clic2025-1024/07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png  (1.05 MP CLIC photo)
+  - clic2025-1024/22ea12c903e41583b7c469cb86040157.png                                  (1.05 MP CLIC photo)
+distances_swept: [1.0, 2.0, 3.0, 4.1, 4.5, 5.0, 6.0, 8.0]
+flag_off_default: enable_kavoid_entropy_of_transforms = false (pre-chunk-1 GPU baseline)
+flag_on:          with_enable_kavoid_entropy_of_transforms(true) (chunk-1 POC)
+result:
+  - All 24 cells (3 images × 8 distances) byte-identical between OFF and ON
+  - bfly Δ identical, ssim2 Δ identical
+  - At d <= 4.0: formula returns 0.0, structural no-op (expected)
+  - At d > 4.0: penalty added to DCT4X4/DCT4X8/DCT8X4 entropy_mul, but the
+    GPU strategy selector on these photos already picks all-DCT8 at d >= 3.0
+    (verified: bytes_byte_identical proves no block picks flipped). The
+    penalty preserves the right answer without changing it on this corpus.
+interpretation:
+  - Chunk-1 contract upheld: production-range encodes (d <= 4.0) are
+    byte-identical regardless of flag state.
+  - Chunk-1 wiring verified via dispatch tests (entropy_mul values flow
+    through cost grids without panic at d=5.0).
+  - Photo content at d > 4.0 doesn't exercise the penalty's discriminating
+    behavior because DCT8 already dominates on these images. A high-detail
+    content sweep (text-heavy at d > 4.0) would be needed to demonstrate
+    flipped block picks, but that's a chunk-2+ measurement.

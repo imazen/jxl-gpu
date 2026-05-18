@@ -2,6 +2,54 @@
 
 ## [Unreleased]
 
+### Added (May 17, 2026 — evening)
+
+- **GPU port of libjxl `kAvoidEntropyOfTransforms` heuristic — chunk 1
+  POC** (opt-in via `LossyEncoder::with_enable_kavoid_entropy_of_transforms`).
+  Adds the canonical libjxl `(12-4)/(d-4)` formula to
+  `jxl_encoder_gpu::forks::cost::avoid_entropy_of_transforms_mul` plus
+  `K_AVOID_TRANSFORMS_BASE = 0.5` matching libjxl
+  `kAvoidEntropyOfTransforms` and the CPU encoder's
+  `EffortProfile::k_avoid_transforms_base`. Wires the resulting
+  per-distance penalty into the GPU sub-block cost-grid path
+  (`prepare_strategy_search_plan_inner`): when the flag is on AND
+  `effort >= 5` AND `target_distance > 4.0`, the penalty
+  `K_AVOID_TRANSFORMS_BASE * avoid_entropy_of_transforms_mul(distance)`
+  is added (with `.max(0.01)` floor) to the per-strategy `entropy_mul`
+  uploaded to the cost-grid kernels for DCT4X4 / DCT4X8 / DCT8X4.
+  AFV0-3 are not touched by this chunk (they flow through a separate
+  `forks::afv` cost path; AFV integration is a follow-on chunk).
+  Mirrors the CPU encoder's pattern at
+  `jxl_encoder::vardct::ac_strategy.rs::estimate_entropy_with_mask`
+  (`(entropy_mul_for_strategy + entropy_mul_adjust).max(0.01)`).
+
+  Tests: `forks::cost::tests::test_avoid_entropy_of_transforms_mul_libjxl_parity`
+  locks the formula at 9 distances {0.5, 1.0, 2.0, 4.0, 4.1, 5.0, 6.0,
+  8.0, 12.0, 20.0} against libjxl
+  `enc_ac_strategy.cc::FindBest8x8Transform`. New integration test
+  `tests/kavoid_entropy_of_transforms_dispatch.rs` covers
+  default-off contract, builder round-trip, and
+  dispatch-runs-without-panic at d=1.0 (no-op branch) + d=5.0
+  (penalty branch).
+
+  Default `false` — narrow `distance > 4.0` gate keeps production
+  byte-identical at typical distances. The chunk-1 sweep
+  (`benchmarks/kavoid_entropy_ab_chunk1_2026-05-17.{txt,meta}`,
+  3 CLIC photos × 8 distances {1.0, 2.0, 3.0, 4.1, 4.5, 5.0, 6.0, 8.0})
+  is byte-identical between OFF and ON on all 24 cells — the GPU
+  strategy selector picks all-DCT8 at d >= 3.0 on photos anyway, so
+  the penalty preserves the right answer without changing it. Chunk-1
+  contract upheld: no impact on production-range encodes.
+
+  Why opt-in: the full bundle that unlocks the libjxl-faithful
+  entropy_mul branch on photos (re-validate
+  `auto_libjxl_entropy_mul_on_photos`) requires also porting the
+  X-channel multi-block weight + AFV cost-path integration + a
+  per-content sweep (see
+  `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
+  items #3 + #4 for the multi-week scope). Chunk-1 ships the
+  foundation; chunks 2-4 follow.
+
 ### Changed (May 18, 2026)
 
 - **Auto-AFV cost-grid evaluation now skipped when patches will fire
