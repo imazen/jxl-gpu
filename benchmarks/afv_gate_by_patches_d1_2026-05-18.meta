@@ -11,7 +11,8 @@
 #
 # Repo:        jxl-encoder-gpu (sibling workspace
 #              `~/work/zen/jxl-encoder-gpu--afv-gate-by-patches`)
-# Commit:      <pending — set after the squash commit lands on main>
+# Commit:      ada27de13e23 (perf(gpu): gate auto-AFV cost grid by patches
+#              absence — W11-2 follow-on)
 # Branch:      main (jj-driven)
 # Date:        2026-05-18
 # Host:        $(hostname)
