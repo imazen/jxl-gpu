@@ -2,6 +2,82 @@
 
 ## [Unreleased]
 
+### Investigated (May 17, 2026 — late late evening, chunk 3)
+
+- **`auto_libjxl_entropy_mul_on_photos` re-verification with chunks 1+2
+  counterweights — hypothesis REFUTED, default stays `false`**. Chunk-3
+  re-ran the W8-5 photo-branch A/B (commit `f7677ac4`) with both
+  `with_auto_libjxl_entropy_mul_on_photos(true)` AND
+  `with_enable_kavoid_entropy_of_transforms(true)` enabled together,
+  AFV force-evaluated, across 3 CLIC photos × 4 distances
+  (d ∈ {0.5, 1.0, 2.0, 5.0}). The task hypothesis was that the chunks
+  1+2 counterweights would close the +2.51% to +8.53% photo regression
+  measured at W8-5. **Measured outcome: the regression did not close**:
+
+  | Distance | Bytes Δ | max Δbutteraugli | min Δssim2 |
+  |---------:|--------:|-----------------:|-----------:|
+  | 0.5      | +2.40%  | +0.032           | −0.21      |
+  | 1.0      | +4.91%  | +0.112           | −0.32      |
+  | 2.0      | +11.69% | +1.137           | −0.28      |
+  | 5.0      | +0.66%  | +0.925           | −1.31      |
+
+  All four cells fail the chunk-3 flip gate (Δb_pct ≤ 0 AND max Δbfly
+  ≤ +0.05 AND min Δss2 ≥ −0.20). The worst per-image is
+  `22ea12c9...png` at d=2.0: +12.5% bytes AND +1.137 butteraugli,
+  signature of "wrong large transform on detailed content".
+
+  **Root cause analysis**: the chunks 1+2 counterweights cover only the
+  sub-set of strategies libjxl's `kAvoidEntropyOfTransforms`
+  references — DCT4X4 / DCT4X8 / DCT8X4 / AFV0-3 (cf.
+  `jxl_encoder::vardct::ac_strategy_search.rs:2449`). The X-channel
+  multi-block weight is also already applied for every multi-block
+  strategy via `forks::cost::per_block_upstream_cost`. The over-pick
+  that should have been solved is NOT going to those strategies — it
+  concentrates on the LARGE square + rectangular transforms
+  (DCT16x16 / DCT16x8 / DCT8x16 / DCT32x16 / DCT16x32 / DCT32x32 /
+  DCT64x32 / DCT32x64 / DCT64x64), whose GPU cost grids were
+  specifically counter-weighted by the distance-scaled `dist_bias`
+  that the photo branch DISABLES. Removing `dist_bias` unleashes
+  large transforms that libjxl does NOT penalize via
+  `kAvoidEntropyOfTransforms` — only by `kFavor2X2` (DCT8 bonus). The
+  ports in chunks 1+2 were necessary for the libjxl-faithful
+  entropy_mul on 8×8-class strategies but not sufficient on their own.
+
+  Confirming pattern in the data:
+  - At d=0.5 (kAvoid no-op band), bytes still regress +2.4% — proving
+    the over-pick was never about kAvoid; it's about the
+    distance-scaled `dist_bias` the photo branch removes.
+  - At d=5.0 the bytes-Δ shrinks toward 0 (chunk-1 kAvoid does fire
+    on DCT4*/AFV*), but butteraugli is +0.420 to +0.925 worse — picks
+    redirect to DCT16/DCT32/DCT64 (still uncounterweighted on the
+    photo branch), and those over-pick on detailed regions.
+
+  **Decision**: default stays `false`. The opt-in builder is retained
+  for re-validation when an equivalent large-transform counterweight
+  lands (cross-ref forward work described in
+  `benchmarks/kavoid_entropy_chunk3_ab_2026-05-17.meta`). Either a
+  port of libjxl's per-strategy entropy_mul values for the LARGE
+  transforms, or a `kAvoid32`-style large-transform penalty (multi-week
+  scope), would be needed to re-open this dispatch.
+
+  Files:
+  - `jxl-encoder-gpu/examples/kavoid_entropy_chunk3_bytes_ab.rs`:
+    chunk-3 A/B harness — encodes each image twice (both flags off
+    vs both flags on, with AFV force-evaluated in both branches),
+    computes butteraugli + SSIM2 via jxl-oxide
+    `srgb_linear(Relative)` decode, and runs an automated decision
+    rule against the spec gates above.
+  - `benchmarks/kavoid_entropy_chunk3_ab_2026-05-17.{txt,meta}`: full
+    output + provenance + root-cause analysis.
+
+  References:
+  - `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
+    item #3 — audit hypothesis REFUTED twice now (at W8-5; again at
+    chunk 3 with counterweights in place).
+  - W8-5 (commit `f7677ac4`) original opt-in + measurement.
+  - Chunk 1 (commit `f5d3703`) sub-block kAvoid wiring.
+  - Chunk 2 (commit `dd4af71`) AFV kAvoid wiring + X-mb audit.
+
 ### Added (May 17, 2026 — late evening)
 
 - **GPU port of libjxl `kAvoidEntropyOfTransforms` heuristic — chunk 2

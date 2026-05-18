@@ -1,0 +1,117 @@
+# Chunk-3 re-verification A/B: `auto_libjxl_entropy_mul_on_photos` with chunks 1+2 counterweights
+# Date: 2026-05-17 UTC
+# Host: water-cooled AMD Ryzen 9 7950X, 128 GB RAM, CUDA
+# Bench: cargo run --release -p jxl-encoder-gpu --features 'cuda encoder' \
+#        --example kavoid_entropy_chunk3_bytes_ab
+# Images: 3 CLIC photos × 4 distances (d ∈ {0.5, 1.0, 2.0, 5.0})
+#   clic2025-1024/02809272...png
+#   clic2025-1024/07b9f93f...png
+#   clic2025-1024/22ea12c9...png
+# Decode: jxl-oxide srgb_linear(Relative) → butteraugli_linear (linear RGB)
+#         + fast_ssim2::compute_ssimulacra2 (sRGB u8)
+#
+# Path A (off — production default):
+#   LossyEncoder::new(...)
+#     .with_auto_evaluate_afv_on_screenshots(false)
+#     .with_evaluate_afv(true)
+#   (auto_libjxl_entropy_mul_on_photos = false)
+#   (enable_kavoid_entropy_of_transforms = false)
+#
+# Path B (on — experimental opt-in, chunks 1+2 counterweights enabled):
+#   LossyEncoder::new(...)
+#     .with_auto_evaluate_afv_on_screenshots(false)
+#     .with_evaluate_afv(true)
+#     .with_auto_libjxl_entropy_mul_on_photos(true)   # ← W8-5 dispatch
+#     .with_enable_kavoid_entropy_of_transforms(true) # ← chunks 1+2 counterweight
+#
+# Task hypothesis (chunk-3 spec):
+#   "With AFV cost-path integration + X-channel multi-block weight both
+#    in place, expect the +2.51% to +8.53% photo regression (W8-5) to
+#    close or reverse."
+#
+# Measured outcome (per-distance totals across 3 photos):
+#   d=0.5  +2.402%  max Δbfly +0.032  min Δss2 −0.21
+#   d=1.0  +4.907%  max Δbfly +0.112  min Δss2 −0.32
+#   d=2.0 +11.690%  max Δbfly +1.137  min Δss2 −0.28
+#   d=5.0  +0.657%  max Δbfly +0.925  min Δss2 −1.31
+#   ⇒ hypothesis REFUTED. Photos still strictly Pareto-worse.
+#
+# Decision: KEEP DEFAULT FALSE.
+#   The chunks 1+2 counterweights cover only the sub-set of strategies
+#   libjxl's `kAvoidEntropyOfTransforms` references: DCT4X4, DCT4X8,
+#   DCT8X4, AFV0-3 (cf. `jxl_encoder::vardct::ac_strategy_search.rs:2449`
+#   — `RAW_STRATEGY_DCT2X2 | RAW_STRATEGY_IDENTITY → favor_2x2_adjust`,
+#   `RAW_STRATEGY_DCT4X8 | DCT8X4 | DCT4X4 | AFV0-3 → avoid_transforms_adjust`).
+#   The X-channel multi-block weight is also already applied for every
+#   multi-block strategy via `forks::cost::per_block_upstream_cost`
+#   (cost.rs:240, called for DCT16/DCT32/DCT64 grids).
+#
+#   The over-pick that was supposed to be solved isn't going to those
+#   strategies. The Pareto loss concentrates on the larger transforms
+#   (DCT16x16/DCT16x8/DCT8x16/DCT32x16/DCT16x32/DCT32x32/DCT64x32/
+#   DCT32x64/DCT64x64), whose GPU cost grids were specifically
+#   counter-weighted by the distance-scaled `dist_bias` that the photo
+#   branch DISABLES. Removing `dist_bias` on the photo branch unleashes
+#   large transforms that libjxl does NOT penalize via
+#   `kAvoidEntropyOfTransforms` — only by `kFavor2X2` (DCT8 bonus) +
+#   the X-channel multi-block weight (already in place here, but
+#   insufficient at distance > 1.0).
+#
+#   Confirming pattern in the data:
+#   - 22ea12c9 d=2.0: +12.5% bytes AND +1.137 butteraugli simultaneously.
+#     This is the classic "wrong large transform on detailed content"
+#     signature — DCT32/DCT64 over-pick on a region with too much
+#     high-frequency detail to flatten that aggressively, leading to
+#     visible quality loss AND larger encoded bytes (the residual after
+#     the bad transform doesn't quantize cheaply).
+#   - d=5.0 bytes-Δ shrinks toward 0 (chunk-1 kAvoid does fire — adds
+#     0.5 * (12-4)/(5-4) = 4.0 to DCT4X4/DCT4X8/DCT8X4/AFV entropy_mul,
+#     making them much more expensive). But butteraugli at d=5.0 is
+#     +0.420 to +0.925 worse: the picks redirect from DCT4* / AFV* to
+#     DCT16/DCT32/DCT64 (still uncounterweighted on the photo branch
+#     because dist_bias = 1.0), and those over-pick on detailed regions
+#     produces worse perceptual quality.
+#   - At d=0.5 (kAvoid no-op band), bytes still regress +2.4% — proving
+#     the over-pick was never about kAvoid; it's about the
+#     distance-scaled dist_bias that the photo branch removes.
+#
+# Required forward work to unlock this dispatch:
+#   The dropped `dist_bias` was tuning DCT16/DCT32/DCT64 cost grids
+#   directly. Replacing it requires either:
+#   (a) Porting libjxl's per-strategy entropy_mul values for the LARGE
+#       transforms (currently the GPU uses lifted GPU-tuned values for
+#       these grids implicitly through dist_bias; libjxl applies
+#       kFavor2X2 to DCT8 specifically, no per-strategy lift to DCT16+),
+#       AND tuning the X-channel multi-block weight strength (currently
+#       libjxl's exact `1 + min(num_blocks/8, 3)` is in place — that's
+#       already 4× lift for DCT64x64's X channel; not the wedge).
+#   (b) Porting more of libjxl's strat-selection cost machinery —
+#       specifically `kAvoid32`-style large-transform penalties that
+#       exist in libjxl's CPU encoder but were never ported. Cross-ref
+#       `enc_ac_strategy.cc::FindBest16x16Transform` and
+#       `FindBest32x32Transform` for the equivalent gates.
+#   Either approach is multi-week (it requires re-discovering the
+#   GPU's effective entropy_mul/dist_bias tuning that was originally
+#   empirically bisected).
+#
+#   Until that work lands, keep `auto_libjxl_entropy_mul_on_photos`
+#   default-false. The opt-in builder is retained for re-validation
+#   when those counterweights eventually land.
+#
+# Pre-conditions verified at HEAD:
+#   chunk-1 wiring (f5d3703) — at HEAD
+#   chunk-2 AFV cost-path + X-mb audit (dd4af71) — at HEAD
+#   W8-5 dispatch infrastructure (f7677ac4) — at HEAD
+#   bench harness `examples/kavoid_entropy_chunk3_bytes_ab.rs` — added this commit
+#
+# Reproducer:
+#   cargo run --release -p jxl-encoder-gpu --features 'cuda encoder' \
+#     --example kavoid_entropy_chunk3_bytes_ab
+#
+# Cross-ref:
+#   - benchmarks/entropy_mul_bundle_ab_d1.0_2026-05-17.txt (W8-5 baseline)
+#   - benchmarks/kavoid_entropy_ab_chunk2_2026-05-17.txt (chunk-2 baseline)
+#   - vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md item #3
+#     (audit hypothesis — REFUTED twice now: at W8-5, again at chunk 3)
+#   - jxl_encoder::vardct::ac_strategy_search.rs::estimate_entropy_with_mask
+#     (CPU encoder's per-strategy kAvoid adjust set)
