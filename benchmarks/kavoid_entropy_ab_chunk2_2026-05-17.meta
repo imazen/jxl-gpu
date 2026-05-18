@@ -2,7 +2,7 @@
 date: 2026-05-17
 host: lilith
 parent_commit: f5d3703 (chunk-1 POC)
-chunk2_commit: 457e3702 (this commit) — final hash after rebase TBD
+chunk2_commit: dd4af71 (feat(gpu): kAvoidEntropyOfTransforms heuristic — chunk-2 AFV cost-path integration)
 command: |
   cargo build --release --features 'cuda encoder' \
     --example kavoid_entropy_chunk2_bytes_ab -p jxl-encoder-gpu
