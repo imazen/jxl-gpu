@@ -132,11 +132,7 @@ pub fn take_last_afv_preservation_stats() -> Option<LastAfvPreservationStats> {
 /// `jxl_encoder::vardct::ac_strategy::RAW_STRATEGY_AFV0..=RAW_STRATEGY_AFV3`.
 /// DCT8 is raw-strategy 0.
 #[doc(hidden)]
-pub fn record_afv_preservation_diff(
-    pre_hist: [u32; 19],
-    post_hist: [u32; 19],
-    total_blocks: u32,
-) {
+pub fn record_afv_preservation_diff(pre_hist: [u32; 19], post_hist: [u32; 19], total_blocks: u32) {
     let gpu_afv_picks_pre: u32 = pre_hist[12..=15].iter().sum();
     let cpu_afv_picks_post: u32 = post_hist[12..=15].iter().sum();
     let stats = LastAfvPreservationStats {

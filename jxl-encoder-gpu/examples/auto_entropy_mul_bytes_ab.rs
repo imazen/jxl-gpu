@@ -183,9 +183,7 @@ fn main() {
 
         // Source for butteraugli (linear interleaved RGB f32 pixels) and
         // for SSIM2 (sRGB u8 — re-use original pixels_u8 reshape).
-        let orig_lin_pixels: Vec<RGB<f32>> = (0..n)
-            .map(|i| RGB::new(r[i], g[i], b[i]))
-            .collect();
+        let orig_lin_pixels: Vec<RGB<f32>> = (0..n).map(|i| RGB::new(r[i], g[i], b[i])).collect();
         let orig_lin_img = Img::new(orig_lin_pixels, w as usize, h as usize);
         let orig_srgb_pixels: Vec<[u8; 3]> = pixels_u8
             .chunks_exact(3)
@@ -199,8 +197,8 @@ fn main() {
         // entropy_mul + distance-scaled dist_bias values applied uniformly).
         // Disable auto-AFV too so the only varying axis is the entropy_mul +
         // dist_bias bundle.
-        let lossy_off: LossyEncoder<B> = LossyEncoder::new(&enc, w, h)
-            .with_auto_evaluate_afv_on_screenshots(false);
+        let lossy_off: LossyEncoder<B> =
+            LossyEncoder::new(&enc, w, h).with_auto_evaluate_afv_on_screenshots(false);
         assert!(
             !lossy_off.auto_libjxl_entropy_mul_on_photos(),
             "production default must be OFF (refuted 2026-05-17 A/B)"
@@ -238,27 +236,24 @@ fn main() {
                 .map(|c| RGB::new(c[0], c[1], c[2]))
                 .collect();
             let dec_lin_img = Img::new(dec_lin_pixels, dw, dh);
-            let bfly = butteraugli_linear(
-                orig_lin_img.as_ref(),
-                dec_lin_img.as_ref(),
-                &bfly_params,
-            )
-            .map(|s| s.score as f64)
-            .unwrap_or(f64::NAN);
+            let bfly =
+                butteraugli_linear(orig_lin_img.as_ref(), dec_lin_img.as_ref(), &bfly_params)
+                    .map(|s| s.score as f64)
+                    .unwrap_or(f64::NAN);
             let dec_srgb: Vec<[u8; 3]> = dec_lin
                 .chunks_exact(3)
-                .map(|c| [
-                    linear_to_srgb_u8(c[0]),
-                    linear_to_srgb_u8(c[1]),
-                    linear_to_srgb_u8(c[2]),
-                ])
+                .map(|c| {
+                    [
+                        linear_to_srgb_u8(c[0]),
+                        linear_to_srgb_u8(c[1]),
+                        linear_to_srgb_u8(c[2]),
+                    ]
+                })
                 .collect();
             let dec_srgb_img = Img::new(dec_srgb, dw, dh);
-            let ssim2 = fast_ssim2::compute_ssimulacra2(
-                orig_srgb_img.as_ref(),
-                dec_srgb_img.as_ref(),
-            )
-            .unwrap_or(f64::NAN);
+            let ssim2 =
+                fast_ssim2::compute_ssimulacra2(orig_srgb_img.as_ref(), dec_srgb_img.as_ref())
+                    .unwrap_or(f64::NAN);
             (bfly, ssim2)
         };
         let (bfly_off, ssim2_off) = metric(&bs_off);
@@ -274,9 +269,7 @@ fn main() {
         let _ = ms_on;
         println!(
             "{:<60} {:>5.2} {:>10} {:>10} {:>+7} {:>+6.2}% {:>7.3} {:>7.3} {:>+6.3} {:>6.2} {:>6.2} {:>+6.2}",
-            short, mp, off, on, dbytes, dpct,
-            bfly_off, bfly_on, dbfly,
-            ssim2_off, ssim2_on, dssim2,
+            short, mp, off, on, dbytes, dpct, bfly_off, bfly_on, dbfly, ssim2_off, ssim2_on, dssim2,
         );
 
         total_off += off as u64;

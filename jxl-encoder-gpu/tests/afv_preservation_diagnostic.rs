@@ -23,9 +23,7 @@
 
 #![cfg(all(feature = "cuda", feature = "encoder"))]
 
-use jxl_encoder_gpu::diagnostics::{
-    LastAfvPreservationStats, take_last_afv_preservation_stats,
-};
+use jxl_encoder_gpu::diagnostics::{LastAfvPreservationStats, take_last_afv_preservation_stats};
 use jxl_encoder_gpu::encoder::GpuEncoder;
 use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 
@@ -65,8 +63,8 @@ fn test_diagnostic_sink_populated_after_encode() {
         .encode_lossy_to_bitstream_via_precomputed(&lossy, &r, &g, &b, 1.0)
         .expect("encode must succeed");
 
-    let stats = take_last_afv_preservation_stats()
-        .expect("diagnostic sink must be populated by encode");
+    let stats =
+        take_last_afv_preservation_stats().expect("diagnostic sink must be populated by encode");
 
     // Padded grid: 64×64 → 8×8 blocks = 64 blocks total.
     let cpu_pw = (W as usize).div_ceil(8) * 8;

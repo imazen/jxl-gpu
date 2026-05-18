@@ -229,9 +229,9 @@ fn main() {
         if stats.patches_recompute_fired && afv_lost > 0 {
             print!("    histogram delta (post - pre): ");
             let names = [
-                "DCT8", "DCT16X8", "DCT8X16", "DCT16X16", "DCT32X32", "DCT4X8", "DCT8X4",
-                "DCT4X4", "IDENTITY", "DCT2X2", "DCT32X16", "DCT16X32", "AFV0", "AFV1", "AFV2",
-                "AFV3", "DCT64X64", "DCT64X32", "DCT32X64",
+                "DCT8", "DCT16X8", "DCT8X16", "DCT16X16", "DCT32X32", "DCT4X8", "DCT8X4", "DCT4X4",
+                "IDENTITY", "DCT2X2", "DCT32X16", "DCT16X32", "AFV0", "AFV1", "AFV2", "AFV3",
+                "DCT64X64", "DCT64X32", "DCT32X64",
             ];
             let mut shown = 0;
             for k in 0..19 {
