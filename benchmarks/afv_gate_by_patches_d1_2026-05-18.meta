@@ -1,0 +1,47 @@
+# A/B sweep: auto-AFV cost-grid patches-absence gate (W11-2 follow-on)
+#
+# Compares the new default `auto_skip_afv_when_patches=true` against
+# the W7-3 baseline `false`. Bytes MUST be identical (the GPU AFV
+# picks made by the W7-3 dispatch are wiped on patches-fired
+# screenshots by the slow-path CPU `compute_ac_strategy` recompute
+# — see jxl-encoder-gpu@04541934 W11-2 finding). Wall-clock measures
+# `prepare_strategy_search_plan` only (where the AFV cost grid lives;
+# the full bitstream encode would dominate with entropy coding and
+# mask the small AFV delta).
+#
+# Repo:        jxl-encoder-gpu (sibling workspace
+#              `~/work/zen/jxl-encoder-gpu--afv-gate-by-patches`)
+# Commit:      <pending — set after the squash commit lands on main>
+# Branch:      main (jj-driven)
+# Date:        2026-05-18
+# Host:        $(hostname)
+# GPU:         CUDA (RTX-class — see `nvidia-smi -L`)
+# Distance:    1.0
+# Image set:   3 patches-fired screenshots + 3 patches-not-fired
+#              screenshots + 3 photos (1.05 MP CLIC2025 subset).
+# Effort:      7 (LossyEncoder default)
+#
+# Command:
+#   cargo run --release -p jxl-encoder-gpu \
+#     --features 'cuda encoder' \
+#     --example afv_gate_by_patches_ab -- --distance 1.0
+#
+# Reference data:
+# - W7-3 baseline:           benchmarks/auto_afv_screenshots_sweep_2026-05-17.txt
+# - W11-2 diagnostic:        benchmarks/afv_preservation_diagnostic_d1_2026-05-17.txt
+#
+# Per-image patches-fired status (from W11-2 chunk-1 diagnostic):
+#   terminal.png      fired=true   (GPU AFV: 40 picks, post-recompute: 214)
+#   windows.png       fired=true   (GPU AFV: 264 picks, post-recompute: 449)
+#   imac_g3.png       fired=true   (GPU AFV: 0 picks, post-recompute: 431)
+#   gmessages.png     fired=false  (GPU AFV: 184 picks → kept, -0.788% bytes)
+#   graph.png         fired=false  (GPU AFV: 13 picks → kept, -0.403% bytes)
+#   gui.png           fired=false  (GPU AFV: 9 picks → kept, -0.116% bytes)
+#   *.png (CLIC2025)  N/A          (auto-AFV gate doesn't fire on photos)
+#
+# Expected: bytes byte-identical on every row; wall-clock improves on
+# patches-fired rows by the AFV cost-grid wall-clock (~26 ms × 4 kinds
+# = ~100 ms / 5 MP target). Wall-clock GROWS on patches-not-fired
+# rows by the cost of the new patches pre-check (3-channel pre-gab
+# download + `find_and_build_patches` BFS). Photos: no measurable
+# delta (auto-AFV gate didn't fire, so the pre-check never runs).

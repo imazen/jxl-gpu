@@ -324,6 +324,45 @@ pub struct LossyEncoder<R: Runtime> {
     /// recover strict default-off AFV behavior (e.g., for byte-exact
     /// reproducibility against a pre-2026-05-17 baseline).
     auto_evaluate_afv_on_screenshots: bool,
+    /// Skip the GPU AFV cost-grid evaluation when patches detection
+    /// fires on the same image.
+    ///
+    /// Default `true`. When the W7-3 auto-AFV gate
+    /// ([`Self::auto_evaluate_afv_on_screenshots`]) would fire AND this
+    /// flag is set, [`Self::prepare_strategy_search_plan_inner`] runs
+    /// a cheap host-side `find_and_build_patches` pre-check on the
+    /// pre-gaborish XYB the GPU pipeline already produced. If patches
+    /// detection returns `Some(_)`, the AFV cost-grid stage is skipped
+    /// (saving ~26 ms / kernel call × 4 kinds ≈ ~100 ms on a 5 MP
+    /// screenshot).
+    ///
+    /// Rationale (jxl-encoder-gpu W11-2 finding, commit `04541934`):
+    /// the slow-path patches case-1 in `encoder.rs` runs an independent
+    /// CPU `compute_ac_strategy` on patches-subtracted XYB, which
+    /// produces its OWN AFV picks (typically 5-10× more than the GPU
+    /// did). GPU AFV picks on patches-fired images get wiped by the
+    /// CPU recompute → the auto-AFV cost-grid evaluation is dead code
+    /// on those images. The W7-3 sweep at d=1.0 confirmed this: zero
+    /// bytes change on terminal/windows (patches fired, 40+264 GPU AFV
+    /// picks each, wiped) vs `-0.788%` / `-0.403%` / `-0.116%` on
+    /// gmessages/graph/gui (patches did NOT fire, GPU AFV picks kept).
+    ///
+    /// Cost when gate fires: 3-plane host download of the pre-gaborish
+    /// XYB (refcounted GpuPlane → first read materializes bytes;
+    /// ~3-15 ms on a 5 MP screenshot) plus one
+    /// `find_and_build_patches` call (~10-50 ms on screenshot-sized
+    /// content). The download is duplicated with the slow-path
+    /// encoder.rs sites today; a follow-on chunk could plumb the
+    /// `PatchesData` through `StrategySearchPlan` so encoder.rs reuses
+    /// it instead of re-running detection.
+    ///
+    /// Disable via [`Self::with_auto_skip_afv_when_patches`] to
+    /// recover the unconditional pre-2026-05-18 auto-AFV behavior
+    /// (e.g., for ablation studies, or for byte-exact reproducibility
+    /// against the W7-3 baseline). Note: production bytes stay
+    /// byte-identical with or without this gate (the GPU AFV picks
+    /// were already getting wiped — this flag only saves wall-clock).
+    auto_skip_afv_when_patches: bool,
     /// Opt-in dispatch of per-strategy `entropy_mul` and `dist_bias`
     /// between libjxl-faithful and GPU-lifted values based on a content
     /// discriminator (median per-block `mask1x1`).
@@ -756,6 +795,13 @@ impl<R: Runtime> LossyEncoder<R> {
             // photos (gate never fires), modest bytes win on screenshots.
             // See `Self::auto_evaluate_afv_on_screenshots` field docs.
             auto_evaluate_afv_on_screenshots: true,
+            // Skip the AFV cost-grid evaluation when the slow-path
+            // patches case-1 will fire on this image (CPU recompute
+            // wipes the GPU AFV picks anyway — see W11-2 in
+            // jxl-encoder-gpu@04541934). Default `true`. Bytes
+            // byte-identical with/without; saves ~100 ms / 5 MP on
+            // patches-fired screenshots.
+            auto_skip_afv_when_patches: true,
             // Opt-in dispatch of entropy_mul / dist_bias bundle.
             // **Default `false`** — measured photo regression
             // (Pareto-worse on bytes + butteraugli + SSIM2) blocks
@@ -839,6 +885,32 @@ impl<R: Runtime> LossyEncoder<R> {
     /// [field]: #structfield.auto_evaluate_afv_on_screenshots
     pub fn auto_evaluate_afv_on_screenshots(&self) -> bool {
         self.auto_evaluate_afv_on_screenshots
+    }
+
+    /// Skip the AFV cost-grid evaluation when patches detection fires
+    /// on the same image (default `true`). See the
+    /// [`Self::auto_skip_afv_when_patches`][field] field for gate
+    /// semantics and rationale.
+    ///
+    /// Pass `false` to recover the unconditional pre-2026-05-18
+    /// auto-AFV behavior (e.g., for ablation studies, or for byte-exact
+    /// reproducibility against the W7-3 baseline). Bytes are
+    /// byte-identical with or without this gate — only wall-clock
+    /// changes.
+    ///
+    /// [field]: #structfield.auto_skip_afv_when_patches
+    pub fn with_auto_skip_afv_when_patches(mut self, on: bool) -> Self {
+        self.auto_skip_afv_when_patches = on;
+        self
+    }
+
+    /// Whether the encoder will skip the AFV cost-grid when patches
+    /// detection fires. Default `true`. See
+    /// [`Self::auto_skip_afv_when_patches`][field] for gate semantics.
+    ///
+    /// [field]: #structfield.auto_skip_afv_when_patches
+    pub fn auto_skip_afv_when_patches(&self) -> bool {
+        self.auto_skip_afv_when_patches
     }
 
     /// Opt-in dispatch of per-strategy `entropy_mul` and `dist_bias`
@@ -1639,10 +1711,57 @@ impl<R: Runtime> LossyEncoder<R> {
         // `LossyEncoder::content_looks_like_screenshot` uses, and
         // effort allows it. See `Self::auto_evaluate_afv_on_screenshots`
         // field docs for full rationale.
+        //
+        // W11-2 follow-on (this commit): if the W7-3 gate would fire
+        // AND `auto_skip_afv_when_patches` is set (default `true`), do
+        // a cheap host-side patches pre-check on the pre-gaborish XYB
+        // the GPU pipeline just produced. If patches detection returns
+        // `Some(_)`, skip AFV — the slow-path patches case-1 in
+        // encoder.rs runs an independent CPU `compute_ac_strategy` on
+        // patches-subtracted XYB that produces its own AFV picks
+        // (typically 5-10× more), wiping whatever the GPU AFV cost
+        // grid contributed. See `Self::auto_skip_afv_when_patches`
+        // field docs for full rationale. Bytes are byte-identical
+        // with or without the gate — only wall-clock changes.
+        let auto_afv_would_fire =
+            self.auto_evaluate_afv_on_screenshots && self.effort >= 7 && screenshot_likely;
+        let patches_likely_to_fire: bool =
+            if !self.evaluate_afv && auto_afv_would_fire && self.auto_skip_afv_when_patches {
+                // Download pre-gab XYB and run the same
+                // `find_and_build_patches` the encoder.rs slow path
+                // uses (`jxl-encoder/src/vardct/patches.rs:1761`).
+                // Cost: 3-plane host download (~3-15 ms / 5 MP) +
+                // ~10-50 ms for the BFS/L1-distance text-like-patch
+                // search. Net win on patches-fired screenshots:
+                // skips the AFV cost grid (~100 ms / 5 MP).
+                let (pre_x, pre_y, pre_b) = enc.download_planes_3ch(&xx, &xy, &xb);
+                let detected = jxl_encoder::__pre_quantized::find_and_build_patches(
+                    [&pre_x, &pre_y, &pre_b],
+                    w,
+                    h,
+                    pw,
+                )
+                .is_some();
+                #[cfg(any(test, feature = "encoder"))]
+                {
+                    extern crate std;
+                    if std::env::var("JXL_GPU_DEBUG_AUTO_AFV").is_ok() {
+                        std::eprintln!(
+                            "[auto_afv] patches pre-check: detected={}, will_skip_afv={}",
+                            detected,
+                            detected,
+                        );
+                    }
+                }
+                detected
+            } else {
+                false
+            };
         let effective_evaluate_afv = if self.evaluate_afv {
-            // Explicit opt-in always wins.
+            // Explicit opt-in always wins (caller knows what they want;
+            // patches gate is bypassed).
             true
-        } else if self.auto_evaluate_afv_on_screenshots && self.effort >= 7 && screenshot_likely {
+        } else if auto_afv_would_fire && !patches_likely_to_fire {
             // Diagnostic: set JXL_GPU_DEBUG_AUTO_AFV=1 to log the dispatch
             // decision per encode (host-side only; the `encoder` feature
             // brings std in transitively).
@@ -1661,6 +1780,22 @@ impl<R: Runtime> LossyEncoder<R> {
             }
             true
         } else {
+            #[cfg(any(test, feature = "encoder"))]
+            {
+                extern crate std;
+                if std::env::var("JXL_GPU_DEBUG_AUTO_AFV").is_ok()
+                    && auto_afv_would_fire
+                    && patches_likely_to_fire
+                {
+                    let median = mask1x1_block_median.unwrap_or(f32::NAN);
+                    std::eprintln!(
+                        "[auto_afv] mask1x1 block-mean median={:.3}, threshold={:.3}, effort={}, fired=false (patches gate)",
+                        median,
+                        Self::SCREENSHOT_MEDIAN_MASK_THRESHOLD,
+                        self.effort,
+                    );
+                }
+            }
             false
         };
 

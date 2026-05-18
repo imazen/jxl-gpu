@@ -1,0 +1,108 @@
+warning: enum `IwWeightKind` is never used
+  --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:39:10
+   |
+39 | pub enum IwWeightKind {
+   |          ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `IwWeightConfig` is never constructed
+  --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:73:12
+   |
+73 | pub struct IwWeightConfig {
+   |            ^^^^^^^^^^^^^^
+
+warning: function `compute_iw_weights` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:123:8
+    |
+123 | pub fn compute_iw_weights(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `compute_local_variance` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:194:4
+    |
+194 | fn compute_local_variance(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `compute_directional_max_variance` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:251:4
+    |
+251 | fn compute_directional_max_variance(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `local_variance_into` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:321:4
+    |
+321 | fn local_variance_into(plane: &[f32], width: usize, height: usize, half: usize, out: &mut [f32]) {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: enum `GradNorm` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:345:6
+    |
+345 | enum GradNorm {
+    |      ^^^^^^^^
+
+warning: function `compute_gradient` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:350:4
+    |
+350 | fn compute_gradient(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: struct `WeightedPool` is never constructed
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:379:12
+    |
+379 | pub struct WeightedPool;
+    |            ^^^^^^^^^^^^
+
+warning: associated functions `mean`, `l2`, and `l4` are never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:384:12
+    |
+381 | impl WeightedPool {
+    | ----------------- associated functions in this implementation
+...
+384 |     pub fn mean(values: &[f32], weights: &[f32]) -> f64 {
+    |            ^^^^
+...
+398 |     pub fn l2(values: &[f32], weights: &[f32]) -> f64 {
+    |            ^^
+...
+412 |     pub fn l4(values: &[f32], weights: &[f32]) -> f64 {
+    |            ^^
+
+warning: struct `IwSsimFeatures` is never constructed
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:434:12
+    |
+434 | pub struct IwSsimFeatures {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated items `FEATURES_PER_CALL`, `as_array`, and `pool_from_maps` are never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:451:15
+    |
+449 | impl IwSsimFeatures {
+    | ------------------- associated items in this implementation
+450 |     /// Number of features per call — matches `FEATURES_PER_CHANNEL_*_MASKED` in `metric.rs`.
+451 |     pub const FEATURES_PER_CALL: usize = 6;
+    |               ^^^^^^^^^^^^^^^^^
+...
+454 |     pub fn as_array(&self) -> [f64; 6] {
+    |            ^^^^^^^^
+...
+474 |     pub fn pool_from_maps(
+    |            ^^^^^^^^^^^^^^
+
+warning: `zensim` (lib) generated 12 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.25s
+     Running `target/release/examples/afv_gate_by_patches_ab --distance 1.0`
+[afv_gate_by_patches_ab] distance=1 images=9 (skip-when-patches OFF baseline vs ON)
+image                                                           MP    off_bytes     on_bytes Δ_bytes afv_o afv_n    off_ms     on_ms     Δ_ms
+terminal.png                                                  1.75        63175        63175      +0    40     0     133.0      76.4   -56.7
+windows.png                                                   3.56       268921       268921      +0   264     0     169.1     140.2   -28.9
+imac_g3.png                                                   5.62       299455       299455      +0     0     0     582.5     353.7  -228.8
+gmessages.png                                                 4.45       149812       149812      +0   184   184     201.5     326.3  +124.8
+graph.png                                                     0.38        26724        26724      +0    13    13      20.0      26.8    +6.8
+gui.png                                                       1.53        38618        38618      +0     9     9      74.4     245.2  +170.8
+02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png  1.05       297492       297492      +0     0     0      60.3      63.6    +3.4
+07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png  1.05       193716       193716      +0     0     0      74.1      86.4   +12.3
+22ea12c903e41583b7c469cb86040157.png                          1.05        98304        98304      +0     0     0      58.0      54.5    -3.5
+
+TOTAL (n=9 images, 20.44 MP): bytes 1436217 → 1436217 (+0); prepare ms 1372.9 → 1373.1 (+0.2)

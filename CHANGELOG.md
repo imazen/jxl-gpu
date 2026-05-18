@@ -2,6 +2,70 @@
 
 ## [Unreleased]
 
+### Changed (May 18, 2026)
+
+- **Auto-AFV cost-grid evaluation now skipped when patches will fire
+  on the same image (W11-2 follow-on)**. `LossyEncoder` now exposes
+  `with_auto_skip_afv_when_patches(bool)` (default `true`). When the
+  W7-3 auto-AFV gate
+  ([`auto_evaluate_afv_on_screenshots`]) would otherwise fire,
+  `prepare_strategy_search_plan_inner` runs a cheap host-side
+  `jxl_encoder::__pre_quantized::find_and_build_patches` pre-check
+  on the pre-gaborish XYB the GPU pipeline already produced. If
+  patches detection returns `Some(_)`, the AFV cost-grid stage is
+  skipped — saving the four AFV-kind cost-grid evaluations
+  (~26 ms / kernel call × 4 ≈ ~100 ms / 5 MP) and the
+  `download_planes_3ch` of post-gab XYB the AFV branch in
+  `forks::reconstruct.rs` would have triggered. Explicit
+  `with_evaluate_afv(true)` opt-in still bypasses the gate (caller
+  said "evaluate AFV" so we respect that even on patches-firing
+  content).
+
+  Rationale (jxl-encoder-gpu W11-2 chunk-1 finding, commit
+  `04541934`): the slow-path patches case-1 in `encoder.rs` runs an
+  independent CPU `compute_ac_strategy` on patches-subtracted XYB
+  that produces its OWN AFV picks — typically 5-10× more than the
+  GPU did (terminal: GPU 40 → CPU 214, windows: GPU 264 → CPU 449).
+  Whatever GPU AFV picks the W7-3 cost grid contributed on
+  patches-fired images are wiped by that CPU recompute, so the GPU
+  AFV cost-grid evaluation is **dead code** on those images.
+  Output bytes are byte-identical with or without this gate — only
+  wall-clock changes.
+
+  **Bench** (`benchmarks/afv_gate_by_patches_d1_2026-05-18.{txt,meta}`,
+  3 patches-fired screenshots + 3 patches-not-fired screenshots + 3
+  CLIC2025 1.05 MP photos, d=1.0):
+  - **bytes byte-identical on every image** (+0 across all 9 rows).
+  - **patches-fired screenshots** (terminal/windows/imac_g3):
+    `prepare_strategy_search_plan` -56.7 / -28.9 / -228.8 ms (afv_n
+    correctly drops 40→0, 264→0, 0→0).
+  - **patches-not-fired screenshots** (gmessages/graph/gui): AFV
+    picks preserved (afv_n 184/13/9 → 184/13/9); wall-clock UP by
+    +125 / +7 / +171 ms — the patches pre-check itself costs (host
+    download + BFS L1-distance text-like-patch search).
+  - **photos** (CLIC2025): auto-AFV gate never fires on photo
+    content (median(mask1x1) < 95), so the pre-check never runs;
+    measurements within ±15 ms noise.
+
+  **Future chunk** (not in this commit): plumb the
+  `PatchesData` from the pre-check through `StrategySearchPlan` so
+  encoder.rs reuses it instead of re-running `find_and_build_patches`
+  on the slow path — would shave ~10-50 ms more on patches-fired
+  paths and cut the patches-not-fired overhead in half (the host
+  download would still be needed for the cheap "is patches
+  detected" probe). For now the gate prioritizes the W11-2 target
+  (skip dead-code AFV on patches-fired screenshots) over the
+  symmetric cost reduction on patches-not-fired.
+
+  Opt-out via `with_auto_skip_afv_when_patches(false)` recovers
+  pre-2026-05-18 W7-3 behavior. Tests:
+  `tests/afv_cost_grid_wiring.rs` (3 new: default-true, opt-out,
+  explicit-bypasses-gate). All 293 lib tests pass; AFV-cost-grid
+  wiring 8/8 pass. Refs: jxl-encoder-gpu W11-2 commit `04541934`,
+  W7-3 commit `406b40bb`, `dropped_optimizations_for_parity_2026-05-15.md`
+  item #1, `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
+  item #1 follow-on.
+
 ### Added (May 17, 2026 — afternoon)
 
 - **AFV preservation across patches case-1 recompute — investigation

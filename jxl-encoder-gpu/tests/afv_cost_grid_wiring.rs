@@ -278,3 +278,104 @@ fn test_auto_afv_opt_out_disables_dispatch() {
         "auto-AFV OFF + evaluate_afv OFF must never produce AFV picks"
     );
 }
+
+/// W11-2 follow-on: the `auto_skip_afv_when_patches` flag defaults to
+/// `true`. On synthetic input where neither auto-AFV nor patches would
+/// fire (smooth gradient, mask1x1 median << 95), the gate is a no-op:
+/// no patches pre-check happens, no AFV picks happen.
+#[test]
+fn test_auto_skip_afv_when_patches_default_true() {
+    let enc: GpuEncoder<Backend> = GpuEncoder::new();
+    let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, W, H);
+    assert!(
+        lossy.auto_skip_afv_when_patches(),
+        "auto_skip_afv_when_patches() must default to true"
+    );
+    let (r, g, b) = smooth_gradient();
+    let plan = lossy.prepare_strategy_search_plan(&enc, &r, &g, &b, 1.0);
+    // Smooth gradient mask1x1 median << 95 → auto-AFV gate doesn't
+    // fire → patches pre-check is skipped (the gate is gated on
+    // auto-AFV gate firing first) → no panic, no AFV picks.
+    use jxl_encoder_gpu::forks::transform::{
+        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
+    };
+    let n_afv = plan
+        .assignments
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.raw_strategy,
+                RAW_STRATEGY_AFV0 | RAW_STRATEGY_AFV1 | RAW_STRATEGY_AFV2 | RAW_STRATEGY_AFV3
+            )
+        })
+        .count();
+    assert_eq!(n_afv, 0, "smooth gradient must not produce AFV picks");
+}
+
+/// W11-2 follow-on: opt-out via `with_auto_skip_afv_when_patches(false)`
+/// recovers the pre-2026-05-18 W7-3 behavior (no patches pre-check;
+/// AFV cost-grid evaluates unconditionally when the auto-AFV gate
+/// fires). Verifies the builder + getter wire correctly.
+#[test]
+fn test_auto_skip_afv_when_patches_opt_out() {
+    let enc: GpuEncoder<Backend> = GpuEncoder::new();
+    let lossy_off: LossyEncoder<Backend> =
+        LossyEncoder::new(&enc, W, H).with_auto_skip_afv_when_patches(false);
+    assert!(
+        !lossy_off.auto_skip_afv_when_patches(),
+        "with_auto_skip_afv_when_patches(false) must flip the flag"
+    );
+    // Synthetic gradient still doesn't trigger anything; we only
+    // exercise the toggle path here. Production behavior on patches-
+    // fired screenshots is bench-validated by the sweep at
+    // `benchmarks/afv_gate_by_patches_*`.
+    let (r, g, b) = smooth_gradient();
+    let _plan = lossy_off.prepare_strategy_search_plan(&enc, &r, &g, &b, 1.0);
+}
+
+/// W11-2 follow-on: explicit `with_evaluate_afv(true)` always wins —
+/// the patches pre-check is bypassed regardless of
+/// `auto_skip_afv_when_patches`. Caller said "evaluate AFV" so we
+/// respect that even on patches-firing content.
+#[test]
+fn test_explicit_evaluate_afv_bypasses_patches_gate() {
+    use jxl_encoder_gpu::forks::transform::{
+        RAW_STRATEGY_AFV0, RAW_STRATEGY_AFV1, RAW_STRATEGY_AFV2, RAW_STRATEGY_AFV3,
+    };
+    let enc: GpuEncoder<Backend> = GpuEncoder::new();
+    let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, W, H)
+        .with_evaluate_afv(true)
+        // Even with auto-skip enabled (the default), explicit opt-in
+        // must bypass the patches gate.
+        .with_auto_skip_afv_when_patches(true);
+    assert!(lossy.evaluate_afv());
+    assert!(lossy.auto_skip_afv_when_patches());
+    let (r, g, b) = diagonal_pattern();
+    let mut stages: Vec<&'static str> = Vec::new();
+    let mut mark = |s: &'static str| stages.push(s);
+    let plan = lossy.prepare_strategy_search_plan_traced(&enc, &r, &g, &b, 1.0, &mut mark);
+    // `cost_afv` mark fires regardless of patches pre-check (the
+    // gate only runs when auto-AFV is the path; explicit opt-in
+    // takes the early-return arm).
+    assert!(
+        stages.contains(&"cost_afv"),
+        "cost_afv must fire under explicit opt-in: {stages:?}"
+    );
+    // Log pick distribution for diagnostics (no strong assertion —
+    // 32x32 synthetic may not favor AFV).
+    let n_afv = plan
+        .assignments
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.raw_strategy,
+                RAW_STRATEGY_AFV0 | RAW_STRATEGY_AFV1 | RAW_STRATEGY_AFV2 | RAW_STRATEGY_AFV3
+            )
+        })
+        .count();
+    std::println!(
+        "[explicit-afv-patches-bypass] picks={} of {} blocks",
+        n_afv,
+        plan.assignments.len()
+    );
+}
