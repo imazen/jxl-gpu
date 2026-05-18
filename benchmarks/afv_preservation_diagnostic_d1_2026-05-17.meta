@@ -1,0 +1,72 @@
+date: 2026-05-17 (UTC)
+host: lilith primary dev rig (Ryzen 9 7950X + RTX 5070)
+git: jxl-encoder-gpu@HEAD (sibling workspace `jxl-encoder-gpu--patches-afv-preservation`)
+parent: jxl-encoder-gpu/main @ commit 406b40bb (W7-3 auto-AFV-on-screenshots)
+command:
+  cargo run --release --features 'cuda encoder' \
+    --example afv_preservation_diagnostic -- --distance 1.0
+
+What the readout proves:
+- "fired" column: whether `find_and_build_patches` returned `Some` AND
+  the case-1 recompute ran (line ~2120 / ~2639 in encoder.rs).
+- "afv_pre": GPU AFV first-block count BEFORE the recompute (mirrors
+  what the GPU strategy-search plan + auto-AFV-on-screenshots dispatch
+  produced).
+- "afv_post": AFV first-block count AFTER the CPU
+  `compute_ac_strategy` recompute. When `fired=true`, this is the
+  CPU's independent AFV count on patches-subtracted XYB; when
+  `fired=false`, this equals `afv_pre` (no recompute).
+- "afv_lost": `max(0, afv_pre - afv_post)`. ALL ZERO across the
+  10-image corpus — proves the W7-3 commit's premise was inverted.
+
+Key finding (chunk 1 conclusion):
+
+  The CPU `compute_ac_strategy` recompute does NOT discard GPU AFV picks.
+  It runs independently on patches-subtracted XYB and produces its
+  OWN AFV picks — typically MORE than the GPU produced (terminal:
+  40 → 214; windows: 264 → 449; imessage: 0 → 791). The DCT8 column
+  shows a corresponding decrease (~12,000 fewer DCT8 blocks across
+  the 10 images), indicating the CPU recompute is reassigning DCT8
+  blocks to AFV / IDENTITY / other small transforms — not just
+  "wiping" the GPU plan but performing a fresh, more thorough
+  strategy search on patches-subtracted XYB.
+
+  The W7-3 commit message ("preserving GPU AFV picks across the
+  patches case-1 recompute would unlock the picks currently wiped on
+  terminal/windows (40 + 264 picks)") is technically true (the GPU
+  picks themselves don't survive) but operationally FALSE — those
+  GPU picks are not load-bearing on bitstream bytes because the CPU
+  recompute already picks AFV on those blocks plus many more.
+
+  This explains the W7-3 sweep result: terminal.png + windows.png
+  saved 0 bytes when auto-AFV was turned ON. The GPU AFV picks the
+  dispatch produced on those images had no bytes impact because the
+  patches case-1 recompute generates equivalent or better AFV
+  assignment from scratch. The 0.091% sweep-wide saving came
+  exclusively from the patches-NOT-detected subset (gmessages,
+  graph, gui), where the GPU plan flows through unmodified to the
+  bitstream emit path.
+
+Implications for chunk 2:
+- The "preserve GPU AFV across patches recompute" follow-on is NOT
+  worth pursuing. The CPU recompute is already doing the work.
+- A separate, real wedge exists: the auto-AFV dispatch on screenshots
+  produces no incremental win on patches-fired images (terminal,
+  windows). The byte saving could be larger if the W7-3 gate
+  (`mask1x1 median > 95 + e>=7`) were dropped entirely on the
+  patches-detected screenshot subset — because the CPU recompute
+  evaluates AFV unconditionally at e>=6, the GPU dispatch is
+  effectively dead code on those images. Worth a follow-on chunk:
+  measure whether disabling auto-AFV on patches-detected screenshots
+  speeds up the GPU strat-search without bytes loss.
+- The unconditional CPU recompute (`compute_ac_strategy` on
+  patches-subtracted XYB, ~1100 ms at 5.6 MP imac_dark in this run)
+  is the dominant time cost on patches-fired screenshots. A real
+  perf wedge is GPU-porting `compute_ac_strategy` for that path —
+  but that's item #4 in the V2 audit
+  (`vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`),
+  multi-week scope, not chunk-2.
+
+Filed: chunk 1 closes the "preserve GPU AFV picks" investigation
+as misdirected. Diagnostic instrumentation retained for future
+audits.

@@ -2008,6 +2008,13 @@ impl<R: Runtime> GpuEncoder<R> {
         let mut masking = masking;
         let mut ac_strategy = ac_strategy;
         let mut mask1x1: Option<alloc::vec::Vec<f32>> = None;
+        // Diagnostic baseline: snapshot GPU AFV picks BEFORE the patches
+        // case-1 path so the "no patches" branch is observable via
+        // `diagnostics::take_last_afv_preservation_stats`. If patches
+        // detection fires below we overwrite this snapshot with the
+        // post-recompute diff (`record_afv_preservation_diff`).
+        // Branchless `Cell::set` — cost negligible.
+        crate::diagnostics::record_afv_preservation_baseline(&ac_strategy);
         let patches_data: Option<jxl_encoder::__pre_quantized::PatchesData> = {
             let mut pd = jxl_encoder::__pre_quantized::find_and_build_patches(
                 [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
@@ -2117,6 +2124,13 @@ impl<R: Runtime> GpuEncoder<R> {
                     &xyb_y_pre, cpu_pw, cpu_ph,
                 ));
 
+                // Snapshot the GPU pre-recompute strategy HISTOGRAM
+                // (jxl_encoder::__pre_quantized::AcStrategyMap exposes
+                // no Clone surface and the inner `data: Vec<u8>` is
+                // private, so we capture histogram-level counts only —
+                // see `diagnostics.rs` for the chunk-2 follow-on that
+                // would need Clone or a per-block extraction API).
+                let pre_hist = ac_strategy.strategy_histogram();
                 ac_strategy = jxl_encoder::__pre_quantized::compute_ac_strategy(
                     &xyb_x,
                     &xyb_y,
@@ -2132,6 +2146,12 @@ impl<R: Runtime> GpuEncoder<R> {
                     mask1x1.as_deref(),
                     cpu_pw,
                     profile,
+                );
+                let post_hist = ac_strategy.strategy_histogram();
+                crate::diagnostics::record_afv_preservation_diff(
+                    pre_hist,
+                    post_hist,
+                    (xsize_blocks * ysize_blocks) as u32,
                 );
             }
             pd
@@ -2539,6 +2559,9 @@ impl<R: Runtime> GpuEncoder<R> {
         let mut masking = masking;
         let mut ac_strategy = ac_strategy;
         let mut mask1x1: Option<alloc::vec::Vec<f32>> = None;
+        // Baseline AFV-preservation snapshot — see matching block in
+        // encode_lossy_to_bitstream_via_precomputed.
+        crate::diagnostics::record_afv_preservation_baseline(&ac_strategy);
         let patches_data: Option<jxl_encoder::__pre_quantized::PatchesData> = {
             let mut pd = jxl_encoder::__pre_quantized::find_and_build_patches(
                 [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
@@ -2616,6 +2639,7 @@ impl<R: Runtime> GpuEncoder<R> {
                 mask1x1 = Some(jxl_encoder::__pre_quantized::compute_mask1x1(
                     &xyb_y_pre, cpu_pw, cpu_ph,
                 ));
+                let pre_hist = ac_strategy.strategy_histogram();
                 ac_strategy = jxl_encoder::__pre_quantized::compute_ac_strategy(
                     &xyb_x,
                     &xyb_y,
@@ -2631,6 +2655,12 @@ impl<R: Runtime> GpuEncoder<R> {
                     mask1x1.as_deref(),
                     cpu_pw,
                     profile,
+                );
+                let post_hist = ac_strategy.strategy_histogram();
+                crate::diagnostics::record_afv_preservation_diff(
+                    pre_hist,
+                    post_hist,
+                    (xsize_blocks * ysize_blocks) as u32,
                 );
             }
             pd

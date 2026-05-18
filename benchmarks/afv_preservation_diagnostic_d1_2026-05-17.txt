@@ -1,0 +1,316 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libm v0.2.16
+   Compiling autocfg v1.5.0
+   Compiling serde_core v1.0.228
+   Compiling pin-project-lite v0.2.17
+   Compiling cfg-if v1.0.4
+   Compiling once_cell v1.21.4
+   Compiling zerocopy v0.8.48
+   Compiling serde v1.0.228
+   Compiling crossbeam-utils v0.8.21
+   Compiling libc v0.2.186
+   Compiling ident_case v1.0.1
+   Compiling cfg_aliases v0.2.1
+   Compiling simd-adler32 v0.3.9
+   Compiling unicode-segmentation v1.13.2
+   Compiling thiserror v2.0.18
+   Compiling adler2 v2.0.1
+   Compiling unicode-xid v0.2.6
+   Compiling memchr v2.8.0
+   Compiling strsim v0.11.1
+   Compiling equivalent v1.0.2
+   Compiling fnv v1.0.7
+   Compiling parking v2.2.1
+   Compiling getrandom v0.4.2
+   Compiling rand_core v0.10.1
+   Compiling scopeguard v1.2.0
+   Compiling object v0.37.3
+   Compiling parking_lot_core v0.9.12
+   Compiling zmij v1.0.21
+   Compiling regex-syntax v0.8.10
+   Compiling lock_api v0.4.14
+   Compiling log v0.4.29
+   Compiling allocator-api2 v0.2.21
+   Compiling option-ext v0.2.0
+   Compiling cpufeatures v0.3.0
+   Compiling serde_json v1.0.149
+   Compiling futures-core v0.3.32
+   Compiling winnow v1.0.2
+   Compiling tracing-core v0.1.36
+   Compiling ciborium-io v0.2.2
+   Compiling gimli v0.32.3
+   Compiling foldhash v0.2.0
+   Compiling miniz_oxide v0.8.9
+   Compiling chacha20 v0.10.0
+   Compiling cubecl-common v0.10.0
+   Compiling itoa v1.0.18
+   Compiling convert_case v0.10.0
+   Compiling portable-atomic v1.13.1
+   Compiling num-traits v0.2.19
+   Compiling fastrand v2.4.1
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling nom v8.0.0
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling rustc-demangle v0.1.27
+   Compiling tracing v0.1.44
+   Compiling futures-io v0.3.32
+   Compiling prettyplease v0.2.37
+   Compiling version_check v0.9.5
+   Compiling spin v0.10.0
+   Compiling xxhash-rust v0.8.15
+   Compiling futures-lite v2.6.1
+   Compiling embassy-futures v0.1.2
+   Compiling float4 v0.2.0
+   Compiling jxl-bitstream v1.1.0 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling oneshot v0.2.1
+   Compiling safe_unaligned_simd v0.2.5
+   Compiling cudarc v0.19.4
+   Compiling web-time v1.1.0
+   Compiling jxl-grid v0.6.1 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling ahash v0.8.12
+   Compiling rand v0.10.1
+   Compiling cubecl-runtime v0.10.0
+   Compiling paste v1.0.15
+   Compiling float-ord v0.3.2
+   Compiling cubecl-macros v0.10.0
+   Compiling concurrent-queue v2.5.0
+   Compiling jxl-oxide-common v1.0.0 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling hashbrown v0.16.1
+   Compiling either v1.15.0
+   Compiling jxl-coding v1.0.1 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling jxl-threadpool v1.0.0 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling hashbrown v0.17.0
+   Compiling foldhash v0.1.5
+   Compiling md5 v0.8.0
+   Compiling inflections v1.1.1
+   Compiling crossbeam-epoch v0.9.18
+   Compiling libloading v0.9.0
+   Compiling event-listener v5.4.1
+   Compiling fixedbitset v0.5.7
+   Compiling rustc-hash v2.1.2
+   Compiling syn v2.0.117
+   Compiling rayon-core v1.13.0
+   Compiling jxl-image v0.13.0 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling crc32fast v1.5.0
+   Compiling stable-vec v0.4.2
+   Compiling itertools v0.14.0
+   Compiling dirs-sys v0.5.0
+   Compiling hashbrown v0.15.5
+   Compiling type-map v0.5.1
+   Compiling regex-automata v0.4.14
+   Compiling dirs v6.0.0
+   Compiling event-listener-strategy v0.5.4
+   Compiling crossbeam-deque v0.8.6
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling proc-macro-error-attr2 v2.0.0
+   Compiling jxl-modular v0.11.2 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling byte-slice-cast v1.2.3
+   Compiling async-channel v2.5.0
+   Compiling imgref v1.12.1
+   Compiling bytes v1.11.1
+   Compiling alloc-stdlib v0.2.2
+   Compiling cubecl v0.10.0
+   Compiling yuvxyb-math v0.1.1
+   Compiling jxl-color v0.11.0 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling indexmap v2.14.0
+   Compiling brotli-decompressor v5.0.0
+   Compiling fdeflate v0.3.7
+   Compiling flate2 v1.1.9
+   Compiling enough v0.4.4
+   Compiling lz4_flex v0.11.6
+   Compiling fast-ssim2 v0.8.0 (/home/lilith/work/zen/fast-ssim2/fast-ssim2)
+   Compiling pxfm v0.1.29
+   Compiling whereat v0.1.5
+   Compiling jxl_simd v0.4.3 (/home/lilith/work/third-party/jxl-rs/jxl_simd)
+   Compiling byteorder-lite v0.1.0
+   Compiling array-init v2.1.0
+   Compiling byteorder v1.5.0
+   Compiling num-integer v0.1.46
+   Compiling num-complex v0.4.6
+   Compiling addr2line v0.25.1
+   Compiling num-bigint v0.4.6
+   Compiling num-iter v0.1.45
+   Compiling rayon v1.12.0
+   Compiling jxl_transforms v0.4.3 (/home/lilith/work/third-party/jxl-rs/jxl_transforms)
+   Compiling jxl-vardct v0.11.1 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling petgraph v0.8.3
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling serde_bytes v0.11.19
+   Compiling bitflags v2.11.1
+   Compiling png v0.18.1
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling tynm v0.2.0
+   Compiling num-rational v0.4.2
+   Compiling regex v1.12.3
+   Compiling jxl-frame v0.13.3 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling num v0.4.3
+   Compiling sanitize-filename v0.6.0
+   Compiling jxl-jbr v0.2.1 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling backtrace v0.3.76
+   Compiling moxcms v0.8.1
+   Compiling cubecl-cuda v0.10.0 (/home/lilith/work/zen/jxl-encoder-gpu--patches-afv-preservation/local-cubecl-cuda)
+   Compiling darling_core v0.23.0
+   Compiling darling_core v0.21.3
+   Compiling proc-macro-error2 v2.0.1
+   Compiling bytemuck_derive v1.10.2
+   Compiling serde_derive v1.0.228
+   Compiling zerocopy-derive v0.8.48
+   Compiling thiserror-impl v2.0.18
+   Compiling derive_more-impl v2.1.1
+   Compiling derive-new v0.7.0
+   Compiling archmage-macros v0.9.23
+   Compiling variadics_please v1.1.0
+   Compiling num-derive v0.4.2
+   Compiling jxl_macros v0.4.3 (/home/lilith/work/third-party/jxl-rs/jxl_macros)
+   Compiling bytemuck v1.25.0
+   Compiling av-data v0.4.4
+   Compiling v_frame v0.5.2
+   Compiling jxl v0.4.3 (/home/lilith/work/third-party/jxl-rs/jxl)
+   Compiling archmage v0.9.23
+   Compiling safe_arch v1.0.0
+   Compiling rgb v0.8.53
+   Compiling jxl-render v0.12.3 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling zenpredict v0.2.1 (/home/lilith/work/zen/zenanalyze/zenpredict)
+   Compiling magetypes v0.9.23
+   Compiling wide v1.3.0
+   Compiling darling_macro v0.21.3
+   Compiling darling_macro v0.23.0
+   Compiling darling v0.21.3
+   Compiling darling v0.23.0
+   Compiling cubecl-macros-internal v0.10.0
+   Compiling enumset_derive v0.15.0
+   Compiling derive_more v2.1.1
+   Compiling image v0.25.10
+   Compiling smallvec v1.15.1
+   Compiling cubecl-zspace v0.10.0
+   Compiling parking_lot v0.12.5
+   Compiling enumset v1.1.12
+   Compiling jxl-oxide v0.12.5 (https://github.com/imazen/jxl-oxide.git?rev=fd4e2c3#fd4e2c3e)
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling float8 v0.7.0
+   Compiling ciborium v0.2.2
+   Compiling yuvxyb v0.5.0
+   Compiling jxl-encoder-simd v0.3.2 (/home/lilith/work/zen/jxl-encoder/jxl-encoder-simd)
+   Compiling linear-srgb v0.6.12
+   Compiling butteraugli v0.9.2 (/home/lilith/work/butteraugli/butteraugli)
+   Compiling zensim v0.3.0 (/home/lilith/work/zen/zensim/zensim)
+   Compiling jxl-encoder v0.3.2 (/home/lilith/work/zen/jxl-encoder/jxl-encoder)
+   Compiling cubecl-ir v0.10.0
+warning: enum `IwWeightKind` is never used
+  --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:39:10
+   |
+39 | pub enum IwWeightKind {
+   |          ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `IwWeightConfig` is never constructed
+  --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:73:12
+   |
+73 | pub struct IwWeightConfig {
+   |            ^^^^^^^^^^^^^^
+
+warning: function `compute_iw_weights` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:123:8
+    |
+123 | pub fn compute_iw_weights(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `compute_local_variance` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:194:4
+    |
+194 | fn compute_local_variance(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `compute_directional_max_variance` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:251:4
+    |
+251 | fn compute_directional_max_variance(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `local_variance_into` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:321:4
+    |
+321 | fn local_variance_into(plane: &[f32], width: usize, height: usize, half: usize, out: &mut [f32]) {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: enum `GradNorm` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:345:6
+    |
+345 | enum GradNorm {
+    |      ^^^^^^^^
+
+warning: function `compute_gradient` is never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:350:4
+    |
+350 | fn compute_gradient(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: struct `WeightedPool` is never constructed
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:379:12
+    |
+379 | pub struct WeightedPool;
+    |            ^^^^^^^^^^^^
+
+warning: associated functions `mean`, `l2`, and `l4` are never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:384:12
+    |
+381 | impl WeightedPool {
+    | ----------------- associated functions in this implementation
+...
+384 |     pub fn mean(values: &[f32], weights: &[f32]) -> f64 {
+    |            ^^^^
+...
+398 |     pub fn l2(values: &[f32], weights: &[f32]) -> f64 {
+    |            ^^
+...
+412 |     pub fn l4(values: &[f32], weights: &[f32]) -> f64 {
+    |            ^^
+
+warning: struct `IwSsimFeatures` is never constructed
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:434:12
+    |
+434 | pub struct IwSsimFeatures {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated items `FEATURES_PER_CALL`, `as_array`, and `pool_from_maps` are never used
+   --> /home/lilith/work/zen/zensim/zensim/src/iw_pool.rs:451:15
+    |
+449 | impl IwSsimFeatures {
+    | ------------------- associated items in this implementation
+450 |     /// Number of features per call — matches `FEATURES_PER_CHANNEL_*_MASKED` in `metric.rs`.
+451 |     pub const FEATURES_PER_CALL: usize = 6;
+    |               ^^^^^^^^^^^^^^^^^
+...
+454 |     pub fn as_array(&self) -> [f64; 6] {
+    |            ^^^^^^^^
+...
+474 |     pub fn pool_from_maps(
+    |            ^^^^^^^^^^^^^^
+
+warning: `zensim` (lib) generated 12 warnings
+   Compiling cubecl-core v0.10.0
+   Compiling cubecl-opt v0.10.0
+   Compiling cubecl-cpp v0.10.0
+   Compiling jxl-encoder-gpu v0.0.1 (/home/lilith/work/zen/jxl-encoder-gpu--patches-afv-preservation/jxl-encoder-gpu)
+    Finished `release` profile [optimized + debuginfo] target(s) in 7m 28s
+     Running `target/release/examples/afv_preservation_diagnostic --distance 1.0`
+[afv_preservation_diagnostic] distance=1 images=10 (auto-AFV ON)
+image                           MP fired afv_pre afv_post afv_lost   dct8_pre  dct8_post  afv→dct8?  d4x4_post    id_post
+codec_wiki.png                4.26  true       0     338       0       6980       1741          0          0        238
+gmessages.png                 4.45 false     184     184       0      10549      10549          0          1          1
+graph.png                     0.38 false      13      13       0       2002       2002          0          0          0
+gui.png                       1.53 false       9       9       0       5815       5815          0          0          0
+imac_dark.png                 5.62  true       0     524       0      13304       6183          0          0        668
+imac_g3.png                   5.62  true       0     431       0      17172       5196          0          0        830
+imessage.png                  3.16  true       0     791       0       5336       2656          0          0        344
+terminal.png                  1.75  true      40     214       0       8315       1581          0          0        395
+windows95.png                 0.31  true       0     140       0       3684        730          0          0         43
+windows.png                   3.56  true     264     449       0      18518       4111          0          0       1408
+
+TOTAL (n=10 images): AFV pre = 510, AFV post = 3093, AFV lost = 0
+TOTAL DCT8 pre = 91675, DCT8 post = 40564, DCT8 gained = 0 (upper bound on AFV→DCT8)

@@ -2,6 +2,68 @@
 
 ## [Unreleased]
 
+### Added (May 17, 2026 — afternoon)
+
+- **AFV preservation across patches case-1 recompute — investigation
+  diagnostic (chunk 1)**. Adds `jxl_encoder_gpu::diagnostics` (a new
+  `#[doc(hidden)]` module mirroring the pattern of
+  `jxl_encoder::__pre_quantized::take_last_patches_stats`) that exposes
+  a thread-local `LastAfvPreservationStats` snapshot of GPU vs CPU AFV
+  picks across the patches case-1 path in
+  `encoder.rs` (lines ~2120 and ~2639, the two
+  `jxl_encoder::__pre_quantized::compute_ac_strategy` reassignments
+  inside `encode_lossy_to_bitstream_via_precomputed{,_from_u8}`).
+  Wired branchless `Cell::set` before/after the recompute — captures
+  `(patches_recompute_fired, gpu_afv_picks_pre, cpu_afv_picks_post,
+  gpu_dct8_picks_pre, cpu_dct8_picks_post,
+  gpu_strategy_histogram_pre, cpu_strategy_histogram_post)`. Histogram-
+  only (no per-block transition lists or position vectors) because
+  `jxl_encoder::__pre_quantized::AcStrategyMap` exposes no `Clone` or
+  per-block extraction surface and the inner `data: Vec<u8>` is
+  private — a future chunk would need to land a Clone-or-extract API
+  in jxl-encoder first if per-block diff tracking is needed.
+
+  **Headline finding from the chunk-1 diagnostic run**
+  (`benchmarks/afv_preservation_diagnostic_d1_2026-05-17.{txt,meta}`,
+  same 10-image gb82-sc corpus W7-3 swept at d=1.0): the CPU
+  `compute_ac_strategy` recompute on patches-subtracted XYB does
+  **NOT** discard GPU AFV picks. It runs independently and produces
+  its OWN AFV picks — typically far MORE than the GPU did: terminal
+  GPU=40 → CPU=214, windows GPU=264 → CPU=449, imac_dark GPU=0 →
+  CPU=524, imessage GPU=0 → CPU=791, codec_wiki GPU=0 → CPU=338. The
+  W7-3 commit message's premise ("preserving GPU AFV picks across the
+  patches case-1 recompute would unlock the picks currently wiped")
+  is technically true (the GPU picks themselves don't survive) but
+  operationally inverted — those GPU picks are not load-bearing on
+  bitstream bytes because the CPU recompute already picks AFV on
+  those blocks plus many more. This explains the W7-3 sweep result
+  (terminal + windows saved 0 bytes when auto-AFV was turned ON):
+  the GPU AFV dispatch on patches-fired images is effectively dead
+  code because the CPU recompute does the AFV work unconditionally
+  at `try_dct4x8_afv = true` (effort >= 6, the default profile).
+
+  **Implications for chunk 2**: the "preserve GPU AFV across patches
+  recompute" follow-on is closed as MISDIRECTED. A separate, real
+  wedge for chunk-2 is that the auto-AFV dispatch from W7-3 is
+  dead code on patches-fired screenshots — disabling auto-AFV on
+  that subset would save the GPU AFV cost-grid evaluation
+  (~26 ms / kernel call × 4 = ~100 ms at 5 MP) without bytes loss.
+  See `benchmarks/afv_preservation_diagnostic_d1_2026-05-17.meta`
+  for the full per-image readout + chunk-2 narrative. Default-on
+  diagnostic instrumentation cost is one branchless `Cell::set` per
+  encode (negligible vs encoder wall-clock); the slot can be drained
+  by external diagnostic examples via
+  `diagnostics::take_last_afv_preservation_stats()`. Tests:
+  `tests/afv_preservation_diagnostic.rs` (sink populated after every
+  encode, baseline contract: pre == post when
+  `patches_recompute_fired = false`, sink consumed on take).
+  Production behavior byte-identical (`auto_afv_bytes_ab` re-run on
+  terminal/imac_g3/windows at d=1.0 matches W7-3 bytes exactly).
+  Reference: dropped log
+  (`dropped_optimizations_for_parity_2026-05-15.md`),
+  V2 audit (`vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`)
+  item #1 follow-on, W7-3 commit (`406b40bb`).
+
 ### Added (May 17, 2026)
 
 - **Auto-patches-on-fast-path dispatch in the GPU u8 entry**.

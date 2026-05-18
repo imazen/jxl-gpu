@@ -67,6 +67,8 @@
 extern crate alloc;
 
 #[cfg(feature = "encoder")]
+pub mod diagnostics;
+#[cfg(feature = "encoder")]
 pub mod encoder;
 #[cfg(feature = "encoder")]
 pub mod forks;
