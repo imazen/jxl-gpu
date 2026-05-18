@@ -168,7 +168,7 @@ fn default_gaborish_weights() -> GaborishWeights {
 /// `encode_and_reconstruct_mixed_strategy_3channel` lets per-iter
 /// encodes skip the redundant `upload_plane(xyb)` /
 /// `upload_blocks(dc_grid)` PCIe transfers.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StrategySearchPlan<R: Runtime> {
     /// XYB X-channel host buffer, padded-image-size raster order.
     /// Currently kept alongside the GPU plane below for the AFV
@@ -245,6 +245,58 @@ pub struct StrategySearchPlan<R: Runtime> {
     pub padded_width: u32,
     /// Padded image height.
     pub padded_height: u32,
+    /// Cached result of `jxl_encoder::__pre_quantized::find_and_build_patches`
+    /// run on the pre-gaborish XYB during the W12-2 auto-AFV gate
+    /// pre-check (see [`LossyEncoder::auto_skip_afv_when_patches`]).
+    ///
+    /// **Outer `Option`**: was the cache populated? `Some(_)` means
+    /// `prepare_strategy_search_plan_inner` ran patches detection (the
+    /// W12-2 gate fired). `None` means the gate did not fire — the
+    /// encoder slow path must run its own detection.
+    ///
+    /// **Inner `Option`**: the detection result. `Some(pd)` = patches
+    /// found (unquantized; the encoder slow path is responsible for
+    /// `quantize_ref_image`). `None` = no patches detected.
+    ///
+    /// **W12-2 chunk-2 (this field)**: eliminates the double-detection
+    /// cost on patches-not-fired screenshots. Before this cache, the
+    /// gate's BFS L1-distance text-like-patch search + host download
+    /// (~125-170 ms on screenshot-sized inputs) ran for the boolean
+    /// gate, then `encoder.rs` re-ran the same detection on the same
+    /// pre-gab XYB to build the `PatchesData` it actually consumes.
+    /// With the cache, the encoder slow path can `take()` the
+    /// pre-detected `PatchesData` and skip the second detection.
+    pub patches_data_cache: Option<Option<jxl_encoder::__pre_quantized::PatchesData>>,
+}
+
+// Manual Debug: `jxl_encoder::__pre_quantized::PatchesData` does not
+// implement Debug (its fields are crate-private to libjxl-tiny's
+// patches.rs). All other StrategySearchPlan fields use the default
+// `{:?}` representation; `patches_data_cache` is rendered as a
+// presence flag (`<none>` / `<no-patches>` / `<patches>`).
+impl<R: Runtime> core::fmt::Debug for StrategySearchPlan<R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let patches_cache_state: &'static str = match &self.patches_data_cache {
+            None => "<none>",
+            Some(None) => "<no-patches>",
+            Some(Some(_)) => "<patches>",
+        };
+        f.debug_struct("StrategySearchPlan")
+            .field("xyb_x.len", &self.xyb_x.len())
+            .field("xyb_y.len", &self.xyb_y.len())
+            .field("xyb_b.len", &self.xyb_b.len())
+            .field("dc_grid_x.len", &self.dc_grid_x.len())
+            .field("dc_grid_y.len", &self.dc_grid_y.len())
+            .field("dc_grid_b.len", &self.dc_grid_b.len())
+            .field("assignments.len", &self.assignments.len())
+            .field("quant_field_float.len", &self.quant_field_float.len())
+            .field("masking.len", &self.masking.len())
+            .field("target_distance", &self.target_distance)
+            .field("padded_width", &self.padded_width)
+            .field("padded_height", &self.padded_height)
+            .field("patches_data_cache", &patches_cache_state)
+            .finish()
+    }
 }
 
 pub struct LossyEncoder<R: Runtime> {
@@ -1792,7 +1844,14 @@ impl<R: Runtime> LossyEncoder<R> {
         // with or without the gate — only wall-clock changes.
         let auto_afv_would_fire =
             self.auto_evaluate_afv_on_screenshots && self.effort >= 7 && screenshot_likely;
-        let patches_likely_to_fire: bool =
+        // W12-2 chunk-2: cache the detection RESULT (not just the bool)
+        // in the StrategySearchPlan so the encoder slow path can
+        // `take()` it instead of re-running `find_and_build_patches`
+        // on the same pre-gab XYB. Outer Option = "was the gate run";
+        // inner Option = "patches found?". `None` outer means the gate
+        // did not fire — the encoder slow path falls back to its own
+        // detection (the W11-2 legacy path).
+        let patches_data_cache: Option<Option<jxl_encoder::__pre_quantized::PatchesData>> =
             if !self.evaluate_afv && auto_afv_would_fire && self.auto_skip_afv_when_patches {
                 // Download pre-gab XYB and run the same
                 // `find_and_build_patches` the encoder.rs slow path
@@ -1807,23 +1866,24 @@ impl<R: Runtime> LossyEncoder<R> {
                     w,
                     h,
                     pw,
-                )
-                .is_some();
+                );
                 #[cfg(any(test, feature = "encoder"))]
                 {
                     extern crate std;
                     if std::env::var("JXL_GPU_DEBUG_AUTO_AFV").is_ok() {
+                        let det = detected.is_some();
                         std::eprintln!(
                             "[auto_afv] patches pre-check: detected={}, will_skip_afv={}",
-                            detected,
-                            detected,
+                            det,
+                            det,
                         );
                     }
                 }
-                detected
+                Some(detected)
             } else {
-                false
+                None
             };
+        let patches_likely_to_fire: bool = matches!(patches_data_cache, Some(Some(_)));
         let effective_evaluate_afv = if self.evaluate_afv {
             // Explicit opt-in always wins (caller knows what they want;
             // patches gate is bypassed).
@@ -3059,6 +3119,7 @@ impl<R: Runtime> LossyEncoder<R> {
             target_distance,
             padded_width: self.padded_width,
             padded_height: self.padded_height,
+            patches_data_cache,
         }
     }
 

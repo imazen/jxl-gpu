@@ -1802,7 +1802,7 @@ impl<R: Runtime> GpuEncoder<R> {
         // f32 planes. The u8 fast path
         // (`encode_lossy_to_bitstream_via_precomputed_from_u8`) avoids
         // both the host conversion and the 4× upload bandwidth.
-        let plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
+        let mut plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
 
         // Step 2: download xyb planes (GPU-padded layout) in one
         // batched read. Saves ~25 ms at 12 MP vs 3 sequential reads.
@@ -2016,12 +2016,23 @@ impl<R: Runtime> GpuEncoder<R> {
         // Branchless `Cell::set` — cost negligible.
         crate::diagnostics::record_afv_preservation_baseline(&ac_strategy);
         let patches_data: Option<jxl_encoder::__pre_quantized::PatchesData> = {
-            let mut pd = jxl_encoder::__pre_quantized::find_and_build_patches(
-                [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
-                width as usize,
-                height as usize,
-                cpu_pw,
-            );
+            // W12-2 chunk-2: reuse the pre-detected `PatchesData` from
+            // `prepare_strategy_search_plan_inner`'s auto-AFV gate if
+            // present. `take()` consumes the cache so we don't double-
+            // detect on the same pre-gab XYB. Cache is populated only
+            // when the W12-2 gate fired (auto-AFV + screenshot-likely +
+            // e>=7 + auto_skip_afv_when_patches); otherwise fall back
+            // to the legacy in-function detection.
+            let mut pd = if let Some(cached) = plan.patches_data_cache.take() {
+                cached
+            } else {
+                jxl_encoder::__pre_quantized::find_and_build_patches(
+                    [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
+                    width as usize,
+                    height as usize,
+                    cpu_pw,
+                )
+            };
             if let Some(ref mut p) = pd {
                 p.quantize_ref_image();
                 let mut pre = [
@@ -2262,7 +2273,7 @@ impl<R: Runtime> GpuEncoder<R> {
         // sRGB→linear + pad happens inside `upload_u8_rgb_to_linear_planar_padded`
         // — host never sees the f32 planes, and the wire transfer is
         // `width * height * 3` bytes (no padding, no per-pixel powf).
-        let plan = lossy.prepare_strategy_search_plan_from_u8(self, pixels_u8, distance);
+        let mut plan = lossy.prepare_strategy_search_plan_from_u8(self, pixels_u8, distance);
 
         // Step 2: AcStrategyMap from plan.assignments (clip to CPU grid).
         // This depends only on plan, not on XYB on host.
@@ -2563,12 +2574,20 @@ impl<R: Runtime> GpuEncoder<R> {
         // encode_lossy_to_bitstream_via_precomputed.
         crate::diagnostics::record_afv_preservation_baseline(&ac_strategy);
         let patches_data: Option<jxl_encoder::__pre_quantized::PatchesData> = {
-            let mut pd = jxl_encoder::__pre_quantized::find_and_build_patches(
-                [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
-                width as usize,
-                height as usize,
-                cpu_pw,
-            );
+            // W12-2 chunk-2: reuse cached `PatchesData` from the
+            // auto-AFV gate pre-check when available — see matching
+            // block in encode_lossy_to_bitstream_via_precomputed for
+            // full rationale.
+            let mut pd = if let Some(cached) = plan.patches_data_cache.take() {
+                cached
+            } else {
+                jxl_encoder::__pre_quantized::find_and_build_patches(
+                    [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
+                    width as usize,
+                    height as usize,
+                    cpu_pw,
+                )
+            };
             if let Some(ref mut p) = pd {
                 p.quantize_ref_image();
                 let mut pre = [
@@ -2758,7 +2777,7 @@ impl<R: Runtime> GpuEncoder<R> {
         // starting point — uniform initial wastes most of the iter
         // budget converging on the per-block masking the encoder
         // already knows about.
-        let plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
+        let mut plan = lossy.prepare_strategy_search_plan(self, r, g, b, distance);
         let xyb_x_dl = self.download_plane(&plan.xyb_x_gpu);
         let xyb_y_dl = self.download_plane(&plan.xyb_y_gpu);
         let xyb_b_dl = self.download_plane(&plan.xyb_b_gpu);
@@ -3007,12 +3026,20 @@ impl<R: Runtime> GpuEncoder<R> {
         let mut xyb_y = xyb_y;
         let mut xyb_b = xyb_b;
         let patches_data: Option<jxl_encoder::__pre_quantized::PatchesData> = {
-            let mut pd = jxl_encoder::__pre_quantized::find_and_build_patches(
-                [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
-                width as usize,
-                height as usize,
-                cpu_pw,
-            );
+            // W12-2 chunk-2: reuse cached `PatchesData` from the
+            // auto-AFV gate pre-check when available — see matching
+            // block in encode_lossy_to_bitstream_via_precomputed for
+            // full rationale.
+            let mut pd = if let Some(cached) = plan.patches_data_cache.take() {
+                cached
+            } else {
+                jxl_encoder::__pre_quantized::find_and_build_patches(
+                    [&xyb_x_pre, &xyb_y_pre, &xyb_b_pre],
+                    width as usize,
+                    height as usize,
+                    cpu_pw,
+                )
+            };
             if let Some(ref mut p) = pd {
                 p.quantize_ref_image();
                 let mut pre = [

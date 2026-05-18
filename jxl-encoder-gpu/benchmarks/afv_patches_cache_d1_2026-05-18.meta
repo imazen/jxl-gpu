@@ -1,0 +1,70 @@
+# A/B sweep: W12-2 chunk-2 PatchesData cache plumbing through
+# StrategySearchPlan (follow-on to ada27de13e23).
+#
+# Compares the W12-2 baseline (`auto_skip_afv_when_patches=false`,
+# encoder.rs always recomputes patches) against the new default
+# (`auto_skip_afv_when_patches=true`) + the chunk-2 cache plumbing
+# (encoder.rs `take()`s the pre-detected PatchesData from
+# `plan.patches_data_cache` instead of re-running
+# `find_and_build_patches` on the same pre-gab XYB).
+#
+# Bytes MUST be identical: the cache holds the SAME PatchesData
+# the encoder slow path would have built on its own.
+#
+# Wall-clock measures FULL ENCODE (not just prepare) since the
+# chunk-2 savings live inside encoder.rs's patches case-1 block,
+# not the strat-search plan stage. min-of-N to filter scheduler
+# hiccups (the savings are 10-50ms in absolute terms — too tight
+# to average over single noisy runs).
+#
+# Repo:        jxl-encoder-gpu (sibling workspace
+#              `~/work/zen/jxl-encoder-gpu--afv-patches-cache`)
+# Branch:      main (jj-driven, on top of fa26379)
+# Date:        2026-05-18
+# Host:        $(hostname) (water-cooled Ryzen 9 7950X, 128 GB RAM,
+#              concurrent kavoid-chunk3 agent in sibling worktree)
+# GPU:         CUDA (cudarc backend)
+# Distance:    1.0
+# Image set:   3 patches-fired screenshots + 3 patches-not-fired
+#              screenshots (per W11-2 chunk-1 diagnostic).
+# Effort:      7 (LossyEncoder default)
+#
+# Command:
+#   cargo run --release -p jxl-encoder-gpu \
+#     --features 'cuda encoder' \
+#     --example afv_patches_cache_ab -- --distance 1.0 --iters 3
+#   cargo run --release -p jxl-encoder-gpu \
+#     --features 'cuda encoder' \
+#     --example afv_patches_cache_ab -- --distance 1.0 --iters 5
+#
+# Reference data:
+# - W12-2 (this commit's parent):
+#   benchmarks/afv_gate_by_patches_d1_2026-05-18.{txt,meta}
+# - W11-2 chunk-1 diagnostic:
+#   benchmarks/afv_preservation_diagnostic_d1_2026-05-17.txt
+#
+# Per-image patches-fired status (from W11-2 chunk-1 diagnostic):
+#   terminal.png  : fires
+#   windows.png   : fires
+#   imac_g3.png   : fires
+#   gmessages.png : does NOT fire (gate runs detection, returns None,
+#                   encoder.rs would have re-detected None — the cache
+#                   eliminates that double-work)
+#   graph.png     : does NOT fire (same)
+#   gui.png       : does NOT fire (same)
+#
+# Expected: bytes byte-identical on every row; wall-clock saves
+# 50-650 ms on patches-fired screenshots + recovers the W12-2
+# pre-check cost on patches-not-fired screenshots (gmessages -300+).
+#
+# Result summary (iters=3 run, primary):
+#   bytes total: 846705 → 846705 (+0, byte-identical) ✓
+#   ms total:    4253.3 → 2952.1 (-1301.2, -30.6%)
+#   patches-fired wins: terminal -75.7, windows -168.7, imac_g3 -652.4
+#   patches-not-fired wins: gmessages -400.0, graph -1.5, gui -2.8
+#
+# Variance check (iters=5 run): bytes still byte-identical (+0);
+# wall-clock direction consistent on all 6 images (5 wins,
+# +2 / +16.9 ms within noise on the smallest two graph/gui where
+# the absolute savings are sub-noise anyway). The biggest wins on
+# imac_g3 / gmessages are reproducible.

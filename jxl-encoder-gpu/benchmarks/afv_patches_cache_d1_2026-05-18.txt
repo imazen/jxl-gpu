@@ -1,0 +1,21 @@
+[afv_patches_cache_ab] distance=1 iters=3 images=6 (path A: skip-off baseline; path B: skip-on + cache)
+image                                                           MP      A_bytes      B_bytes Δ_bytes      A_ms      B_ms      Δ_ms
+terminal.png                                                  1.75        63175        63175      +0     328.9     253.2     -75.7
+windows.png                                                   3.56       268921       268921      +0     676.4     507.7    -168.7
+imac_g3.png                                                   5.62       299455       299455      +0    1759.5    1107.1    -652.4
+gmessages.png                                                 4.45       149812       149812      +0    1178.9     778.8    -400.0
+graph.png                                                     0.38        26724        26724      +0      66.1      64.5      -1.5
+gui.png                                                       1.53        38618        38618      +0     243.6     240.8      -2.8
+
+TOTAL (n=6 images, 17.30 MP): bytes 846705 → 846705 (+0); full-encode ms 4253.3 → 2952.1 (-1301.2)
+
+[afv_patches_cache_ab] distance=1 iters=5 images=6 (re-run for noise check)
+image                                                           MP      A_bytes      B_bytes Δ_bytes      A_ms      B_ms      Δ_ms
+terminal.png                                                  1.75        63175        63175      +0     295.5     250.9     -44.6
+windows.png                                                   3.56       268921       268921      +0     588.9     461.3    -127.6
+imac_g3.png                                                   5.62       299455       299455      +0    1079.8     838.5    -241.3
+gmessages.png                                                 4.45       149812       149812      +0    1098.3     784.1    -314.2
+graph.png                                                     0.38        26724        26724      +0      62.2      64.1      +2.0
+gui.png                                                       1.53        38618        38618      +0     260.1     277.0     +16.9
+
+TOTAL (n=6 images, 17.30 MP): bytes 846705 → 846705 (+0); full-encode ms 3384.8 → 2676.0 (-708.9)

@@ -2,6 +2,68 @@
 
 ## [Unreleased]
 
+### Changed (May 18, 2026)
+
+- **W12-2 chunk-2: `PatchesData` cached in `StrategySearchPlan`
+  eliminates double-detection on the encoder slow path** (follow-on
+  to `ada27de13e23`). The W12-2 auto-AFV-gate-by-patches pre-check
+  now stores its `find_and_build_patches` result in a new
+  `StrategySearchPlan::patches_data_cache` field; the three
+  `encoder.rs` slow-path entry points
+  (`encode_lossy_to_bitstream_via_precomputed{,_from_u8,_with_butteraugli}`)
+  `take()` the cached `PatchesData` instead of re-running detection
+  on the same pre-gaborish XYB. When the gate did not fire
+  (cache `None`), encoder.rs falls back to its in-function detection
+  — same behaviour as pre-chunk-2.
+
+  Rationale (the W12-2 commit's documented future chunk): W12-2
+  paid +125-170 ms on patches-NOT-fired screenshots because the
+  gate ran the BFS L1-distance text-like-patch search just to
+  decide whether to skip AFV, then the encoder slow path ran
+  exactly the same detection again. The cache makes that double-
+  work one-way: the gate's result feeds the encoder directly.
+
+  **Bench**
+  (`benchmarks/afv_patches_cache_d1_2026-05-18.{txt,meta}`, 3
+  patches-fired + 3 patches-not-fired screenshots, d=1.0, min of
+  3 full-encode iterations, baseline =
+  `with_auto_skip_afv_when_patches(false)` — i.e. pre-chunk-2
+  W11-2 path with no gate, no cache):
+  - **bytes byte-identical on every image** (+0 across all 6 rows;
+    total 846705 → 846705).
+  - **patches-fired screenshots**: full-encode -75.7 ms (terminal,
+    1.75 MP), -168.7 ms (windows, 3.56 MP), -652.4 ms (imac_g3,
+    5.62 MP).
+  - **patches-not-fired screenshots**: full-encode -400.0 ms
+    (gmessages, 4.45 MP), -1.5 ms (graph, 0.38 MP), -2.8 ms (gui,
+    1.53 MP). gmessages is the load-bearing recovery: pre-chunk-2
+    paid +125-170 ms on this class, the cache returns the W11-2
+    cost.
+  - **total wall-clock**: 4253.3 ms → 2952.1 ms (-1301.2 ms,
+    -30.6%) across 17.30 MP of test content. iters=5 re-run
+    confirms direction is reproducible (-708.9 ms total; gmessages
+    and imac_g3 are the durable wins).
+
+  Implementation:
+  `StrategySearchPlan` gains
+  `pub patches_data_cache: Option<Option<jxl_encoder::__pre_quantized::PatchesData>>`
+  (outer = "gate ran?", inner = "patches found?"). `PatchesData`
+  is not `Debug`, so the auto-derived `Debug` on
+  `StrategySearchPlan` is replaced with a manual impl that
+  renders the cache as `<none>` / `<no-patches>` / `<patches>`.
+  Tests: `tests/afv_cost_grid_wiring.rs` (3 new chunk-2 tests +
+  the 8 pre-existing W11-2/W12-2 tests, 11/11 pass). All 295 lib
+  tests pass; `corpus_regression` blocked on the same
+  pre-existing `butteraugli-gpu` /
+  `local-cubecl-cuda::reserve_staging` compile error that W12-2
+  documented — byte-identity invariant captured by the bench TSV
+  instead.
+
+  Refs: W12-2 commit `ada27de13e23`, W11-2 chunk-1 diagnostic
+  `04541934`,
+  `vardct_gpu_dropped_optimizations_resurrection_2026-05-17.md`
+  item #1 follow-on cleanup.
+
 ### Investigated (May 17, 2026 — late late evening, chunk 3)
 
 - **`auto_libjxl_entropy_mul_on_photos` re-verification with chunks 1+2
