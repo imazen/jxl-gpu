@@ -679,6 +679,52 @@ pub fn avoid_entropy_of_transforms_mul(distance: f32) -> f32 {
     }
 }
 
+/// libjxl `kFavor2X2AtHighQuality` constant. Subtracted (with
+/// [`favor_2x2_weight`]) from the `entropy_mul` of IDENTITY and DCT2X2
+/// at `distance < 5.0` to favor those flat / detail-preserving
+/// strategies on high-quality content. See
+/// `enc_ac_strategy.cc::FindBest8x8Transform` line 588.
+///
+/// In the CPU encoder this lives in `EffortProfile::k_favor_2x2` as
+/// `-0.4` (the sign is folded into the field so the call site is
+/// `entropy_mul + k_favor_2x2 * weight` rather than
+/// `entropy_mul - K_FAVOR_2X2 * weight`). The GPU port follows that
+/// convention: callers pass `-K_FAVOR_2X2_AT_HIGH_QUALITY` as the
+/// addend coefficient.
+pub const K_FAVOR_2X2_AT_HIGH_QUALITY: f32 = 0.4;
+
+/// libjxl `kFavor2X2AtHighQuality` weight: returns `((5-d)/5)^2` at
+/// `d < 5.0`, else `0.0`.
+///
+/// Multiplied by `-K_FAVOR_2X2_AT_HIGH_QUALITY` (i.e. `-0.4`) and
+/// ADDED to the `entropy_mul` of IDENTITY and DCT2X2 8x8-class
+/// strategies. See `enc_ac_strategy.cc::FindBest8x8Transform`
+/// (line 585-590) and the CPU encoder's
+/// `jxl_encoder::vardct::ac_strategy_search::favor_2x2_weight`.
+///
+/// Returns `0.0` at `d >= 5.0` (rather than a negative-extension of
+/// the formula) per libjxl's `if (butteraugli_target < 5.0)` guard.
+/// `f32` matches the CPU encoder's `favor_2x2_weight` signature.
+#[inline]
+pub fn favor_2x2_weight(distance: f32) -> f32 {
+    if distance < 5.0 {
+        let r = (5.0 - distance) / 5.0;
+        r * r
+    } else {
+        0.0
+    }
+}
+
+/// Convenience: returns the signed addend the GPU `SubblockStratSpec`
+/// loop should fold into IDENTITY and DCT2X2 `entropy_mul`. Equals
+/// `-K_FAVOR_2X2_AT_HIGH_QUALITY * favor_2x2_weight(distance)` so
+/// callers can write `entropy_mul + favor_2x2_adjust(d)` matching the
+/// CPU port shape in `vardct/ac_strategy_search.rs:415`.
+#[inline]
+pub fn favor_2x2_adjust(distance: f32) -> f32 {
+    -K_FAVOR_2X2_AT_HIGH_QUALITY * favor_2x2_weight(distance)
+}
+
 /// Per-channel offsets for pixel-domain loss masking. Bit-for-bit
 /// from upstream `jxl_encoder::vardct::ac_strategy::MASK_CHANNEL_OFFSET`
 /// (= libjxl `enc_ac_strategy.cc:446`).
@@ -3607,6 +3653,57 @@ mod tests {
         // Base constant matches libjxl `kAvoidEntropyOfTransforms = 0.5`
         // and CPU encoder's `EffortProfile::k_avoid_transforms_base`.
         assert_eq!(K_AVOID_TRANSFORMS_BASE, 0.5);
+    }
+
+    /// Verify `favor_2x2_weight` matches libjxl
+    /// `enc_ac_strategy.cc::FindBest8x8Transform` line 588-590:
+    ///
+    /// ```cpp
+    /// if ((tx.type == AcStrategyType::DCT2X2 ||
+    ///      tx.type == AcStrategyType::IDENTITY) &&
+    ///     butteraugli_target < 5.0) {
+    ///   static const float kFavor2X2AtHighQuality = 0.4;
+    ///   float weight = pow((5.0f - butteraugli_target) / 5.0f, 2.0f);
+    ///   entropy_mul -= kFavor2X2AtHighQuality * weight;
+    /// }
+    /// ```
+    ///
+    /// Mirrors `jxl_encoder::vardct::ac_strategy_search::favor_2x2_weight`.
+    #[test]
+    fn test_favor_2x2_weight_libjxl_parity() {
+        // d >= 5.0: returns 0.0 (the libjxl `if (butteraugli_target < 5.0)`
+        // guard hits this path so the bonus is OFF at high distance).
+        assert_eq!(favor_2x2_weight(5.0), 0.0);
+        assert_eq!(favor_2x2_weight(5.001), 0.0);
+        assert_eq!(favor_2x2_weight(10.0), 0.0);
+        assert_eq!(favor_2x2_weight(100.0), 0.0);
+
+        // d < 5.0: ((5 - d) / 5)^2.
+        // d = 0.0 → (5/5)^2 = 1.0 (max bonus)
+        assert!((favor_2x2_weight(0.0) - 1.0).abs() < 1e-6);
+        // d = 1.0 → (4/5)^2 = 0.64
+        assert!((favor_2x2_weight(1.0) - 0.64).abs() < 1e-6);
+        // d = 2.5 → (2.5/5)^2 = 0.25
+        assert!((favor_2x2_weight(2.5) - 0.25).abs() < 1e-6);
+        // d = 4.0 → (1/5)^2 = 0.04
+        assert!((favor_2x2_weight(4.0) - 0.04).abs() < 1e-6);
+        // d = 4.99 → ((0.01)/5)^2 = 0.000004
+        assert!((favor_2x2_weight(4.99) - 4.0e-6).abs() < 1e-9);
+
+        // Base constant matches libjxl
+        // `kFavor2X2AtHighQuality = 0.4` and CPU encoder's
+        // `EffortProfile::k_favor_2x2 = -0.4` (CPU folds the sign).
+        assert_eq!(K_FAVOR_2X2_AT_HIGH_QUALITY, 0.4);
+
+        // `favor_2x2_adjust` returns the signed addend the GPU spec
+        // loop folds into entropy_mul (matches CPU's
+        // `favor_2x2_adjust = profile.k_favor_2x2 * favor_2x2_weight(d)`
+        // with `k_favor_2x2 = -0.4`).
+        assert_eq!(favor_2x2_adjust(5.0), 0.0); // no-op band
+        assert!((favor_2x2_adjust(0.0) + 0.4).abs() < 1e-6); // -0.4 * 1.0
+        assert!((favor_2x2_adjust(1.0) + 0.4 * 0.64).abs() < 1e-6); // -0.256
+        assert!((favor_2x2_adjust(2.5) + 0.4 * 0.25).abs() < 1e-6); // -0.1
+        assert!((favor_2x2_adjust(4.0) + 0.4 * 0.04).abs() < 1e-6); // -0.016
     }
 
     #[cfg(feature = "cuda")]

@@ -2217,6 +2217,22 @@ impl<R: Runtime> LossyEncoder<R> {
                 0.0
             };
 
+        // libjxl `kFavor2X2AtHighQuality` (`enc_ac_strategy.cc:585-590`):
+        // subtract `0.4 * ((5-d)/5)^2` from IDENTITY and DCT2X2
+        // `entropy_mul` at `d < 5.0` to favor those flat / detail-
+        // preserving strategies on high-quality content. Returns 0.0
+        // at `d >= 5.0` so the bonus is OFF outside the gated band.
+        //
+        // Mirrors the CPU encoder's
+        // `vardct/ac_strategy_search.rs:415` site exactly:
+        //   `favor_2x2_adjust = profile.k_favor_2x2 * favor_2x2_weight(d)`
+        // with `EffortProfile::k_favor_2x2 = -0.4`.
+        //
+        // No effort gate (libjxl applies the bonus at every speed_tier
+        // that runs FindBest8x8Transform — i.e. all effort levels).
+        // The narrow `d < 5.0` gate keeps high-distance output unchanged.
+        let favor_2x2_adjust = crate::forks::cost::favor_2x2_adjust(distance);
+
         let mut specs: Vec<SubblockStratSpec> = Vec::new();
         if evaluate_subblock_costs {
             specs.push(SubblockStratSpec {
@@ -2253,6 +2269,13 @@ impl<R: Runtime> LossyEncoder<R> {
             });
         }
         if evaluate_subblock_costs {
+            // libjxl `kFavor2X2AtHighQuality` ADDS a negative adjustment
+            // (`-0.4 * ((5-d)/5)^2`) to IDENTITY and DCT2X2 entropy_mul
+            // at d < 5.0 to favor those flat / detail-preserving picks.
+            // At d >= 5.0 the adjust is 0.0 (no-op). Clamped via
+            // .max(0.01) to keep the multiplier strictly positive,
+            // matching the CPU encoder's
+            // `(entropy_mul_for_strategy + adjust).max(0.01)` shape.
             specs.push(SubblockStratSpec {
                 raw_strategy: RAW_STRATEGY_IDENTITY,
                 weights_x: &id_x,
@@ -2261,7 +2284,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 inv_weights_x: &inv_id_x,
                 inv_weights_y: &inv_id_y,
                 inv_weights_b: &inv_id_b,
-                entropy_mul: entropy_mul_identity,
+                entropy_mul: (entropy_mul_identity + favor_2x2_adjust).max(0.01),
             });
             specs.push(SubblockStratSpec {
                 raw_strategy: RAW_STRATEGY_DCT2X2,
@@ -2271,7 +2294,7 @@ impl<R: Runtime> LossyEncoder<R> {
                 inv_weights_x: &inv_d2_x,
                 inv_weights_y: &inv_d2_y,
                 inv_weights_b: &inv_d2_b,
-                entropy_mul: 0.95,
+                entropy_mul: (0.95_f32 + favor_2x2_adjust).max(0.01),
             });
         }
         // Submit all strategies' pipelines, then ONE batched download.
