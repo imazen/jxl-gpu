@@ -1,0 +1,60 @@
+W44-41 chunks A+B post-merge `auto_libjxl_entropy_mul_on_photos` flip bench
+==========================================================================
+
+Sweep date: 2026-05-18
+Repo: imazen/jxl-gpu @ 1ef1b5bc (chunk A) + f4c4d35f (chunk B)
+Sibling workspace: ~/work/zen/jxl-encoder-gpu--w44-41-counterweights
+CPU encoder workspace: ~/work/zen/jxl-encoder--w44-4-baseline (one-liner repair, NOT committed)
+
+Bench: examples/kavoid_entropy_chunk3_bytes_ab.rs
+Command:
+  cargo run --release -p jxl-encoder-gpu --features 'cuda encoder' \
+    --example kavoid_entropy_chunk3_bytes_ab
+
+Inputs: 3 CLIC photos × 4 distances (0.5, 1.0, 2.0, 5.0)
+  - 02809272b4ca9b08af45771501b741296187c7e26907efb44abbbfcb6cd804f7.png (1.05 MP)
+  - 07b9f93f170a0381836bdf301280a5b80b2c4be6e66f793a3c335dc200fb4e5b.png (1.05 MP)
+  - 22ea12c903e41583b7c469cb86040157.png (1.05 MP)
+
+Comparison axes:
+  OFF (baseline): auto_libjxl_entropy_mul_on_photos=false,
+                  enable_kavoid_entropy_of_transforms=false (W44-41 explicit
+                  baseline override; production default is now TRUE for kavoid).
+                  Note: chunk B (kFavor2X2) applies to BOTH paths uniformly —
+                  it's always-on, no toggle.
+  ON: auto_libjxl_entropy_mul_on_photos=true,
+      enable_kavoid_entropy_of_transforms=true.
+  AFV: explicitly on for both paths so the AFV cost grid is exercised.
+
+Decision rule for flipping `auto_libjxl_entropy_mul_on_photos` to true:
+  Δb_pct ≤ 0  AND  max Δbfly ≤ +0.05  AND  min Δss2 ≥ −0.20  (at every distance)
+
+Result: KEEP DEFAULT FALSE — failed at every distance.
+
+Per-distance summary:
+  d=0.5  +5.117% bytes  max Δbfly=+0.228  min Δss2=-0.30
+  d=1    +6.213% bytes  max Δbfly=+0.029  min Δss2=-0.20
+  d=2   +13.464% bytes  max Δbfly=+1.137  min Δss2=-0.25
+  d=5    +0.657% bytes  max Δbfly=+0.925  min Δss2=-1.31
+
+Conclusion:
+The W44-41 hypothesis — that porting the three missing libjxl
+counterweights (kAvoidEntropyOfTransforms / X-channel multi-block
+weight / kFavor2X2AtHighQuality) would unlock the photo-branch
+dispatch — is REFUTED.
+
+Even with all three counterweights now present (kAvoid in chunk A,
+X-channel weight already present, kFavor2X2 in chunk B), flipping
+`auto_libjxl_entropy_mul_on_photos` to true broadly regresses photos
+across every measured distance band. The lifted GPU entropy_mul
+values + dist_bias compensate for OTHER GPU encoder deltas beyond the
+three counterweights — most likely cost-grid path divergence vs
+libjxl's FindBest8x8Transform, aq_field handling, FP precision, or
+similar structural differences.
+
+Follow-on chunks (not shipped here):
+  1. Re-bisect lifted values under chunks A+B — maybe entropy_mul_identity
+     = 1.4 works better than 1.85 once kFavor2X2 fires.
+  2. Profile per-block strategy picks GPU-libjxl-mode vs CPU encoder
+     on the same XYB input to isolate where the over-pick concentrates.
+  3. Consider dropping dist_bias alone (without entropy_mul changes).
