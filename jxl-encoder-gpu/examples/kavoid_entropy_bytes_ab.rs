@@ -169,13 +169,16 @@ fn main() {
 
         let enc: GpuEncoder<B> = GpuEncoder::new();
 
-        // Path A: chunk-1 flag OFF (production default). All cost-grid
-        // tuning matches the pre-2026-05-17 GPU baseline.
-        let lossy_off: LossyEncoder<B> =
-            LossyEncoder::new(&enc, w, h).with_auto_evaluate_afv_on_screenshots(false);
+        // Path A: pre-W44-41 baseline — chunk-1 flag explicitly OFF
+        // to reproduce the pre-2026-05-17 GPU baseline. (Note: the
+        // production default flipped to TRUE in W44-41 chunk A; this
+        // bench compares against the historical baseline.)
+        let lossy_off: LossyEncoder<B> = LossyEncoder::new(&enc, w, h)
+            .with_auto_evaluate_afv_on_screenshots(false)
+            .with_enable_kavoid_entropy_of_transforms(false);
         assert!(
             !lossy_off.enable_kavoid_entropy_of_transforms(),
-            "production default must be OFF"
+            "explicit OFF override must reproduce pre-W44-41 baseline"
         );
         let bs_off = enc
             .encode_lossy_to_bitstream_via_precomputed(&lossy_off, &r, &g, &b, distance)

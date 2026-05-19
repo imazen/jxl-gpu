@@ -912,12 +912,16 @@ impl<R: Runtime> LossyEncoder<R> {
             // See `Self::auto_patches_on_fast_path` field docs.
             auto_patches_on_fast_path: true,
             // Chunk-1 POC of GPU `kAvoidEntropyOfTransforms` port.
-            // Default `false` — narrow d>4 gate means this is a
-            // structural no-op at production distances anyway, but
-            // keep opt-in until the full multi-week port is wired
-            // (X-channel multi-block weight, AFV cost-path integration,
-            // bundle with `auto_libjxl_entropy_mul_on_photos`).
-            enable_kavoid_entropy_of_transforms: false,
+            // Default `true` (W44-41 chunk A) — narrow d>4 gate keeps
+            // this a structural no-op at d≤4 (formula returns 0.0,
+            // bytes identical), so default-on is safe for production at
+            // common distances and matches libjxl-faithful counterweight
+            // semantics at d>4. AFV cost-path integration shipped in
+            // chunk 2; X-channel multi-block weight was already wired
+            // via per_block_upstream_cost_per_block. The remaining bundle
+            // piece (`auto_libjxl_entropy_mul_on_photos`) is independent.
+            // See dropped_optimizations_for_parity_2026-05-15.md item #3.
+            enable_kavoid_entropy_of_transforms: true,
         }
     }
 

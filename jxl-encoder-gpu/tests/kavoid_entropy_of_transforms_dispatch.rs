@@ -74,18 +74,19 @@ fn dummy_rgb_planes() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
 }
 
 #[test]
-fn test_enable_kavoid_entropy_of_transforms_default_is_off() {
+fn test_enable_kavoid_entropy_of_transforms_default_is_on() {
     let enc: GpuEncoder<Backend> = GpuEncoder::new();
     let lossy: LossyEncoder<Backend> = LossyEncoder::new(&enc, W, H);
-    // Default MUST be `false`. Chunk-1 ships the port behind an opt-in
-    // flag so production at distance > 4.0 stays byte-identical until
-    // the full multi-week bundle (AFV path + X-channel multi-block
-    // weight) lands. At distance <= 4.0 the formula returns 0.0 so the
-    // path is a structural no-op regardless of the flag.
+    // Default MUST be `true` (W44-41 chunk A flip). The narrow d>4
+    // gate means production at distance ≤ 4.0 stays byte-identical
+    // regardless (formula returns 0.0). AFV cost-path integration is
+    // already wired (chunk 2), X-channel multi-block weight is already
+    // applied via per_block_upstream_cost_per_block, so the previous
+    // "multi-week port" blocker is resolved.
     assert!(
-        !lossy.enable_kavoid_entropy_of_transforms(),
-        "enable_kavoid_entropy_of_transforms() MUST default to false — \
-         see field docs for the chunk-1 POC rationale"
+        lossy.enable_kavoid_entropy_of_transforms(),
+        "enable_kavoid_entropy_of_transforms() MUST default to true — \
+         W44-41 chunk A flip; see field docs for rationale"
     );
 }
 

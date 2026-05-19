@@ -182,15 +182,17 @@ fn main() {
 
         let enc: GpuEncoder<B> = GpuEncoder::new();
 
-        // Path A: chunks 1+2 flag OFF. AFV is force-evaluated so the
-        // AFV cost path runs (chunk-2 wiring is exercised even though
-        // the entropy_mul_adjust = 0.0 makes it a no-op).
+        // Path A: pre-W44-41 baseline — chunks 1+2 flag explicitly
+        // OFF. AFV is force-evaluated so the AFV cost path runs
+        // (chunk-2 wiring is exercised even though the
+        // entropy_mul_adjust = 0.0 makes it a no-op).
         let lossy_off: LossyEncoder<B> = LossyEncoder::new(&enc, w, h)
             .with_auto_evaluate_afv_on_screenshots(false)
-            .with_evaluate_afv(true);
+            .with_evaluate_afv(true)
+            .with_enable_kavoid_entropy_of_transforms(false);
         assert!(
             !lossy_off.enable_kavoid_entropy_of_transforms(),
-            "production default must be OFF"
+            "explicit OFF override must reproduce pre-W44-41 baseline"
         );
         let bs_off = enc
             .encode_lossy_to_bitstream_via_precomputed(&lossy_off, &r, &g, &b, distance)

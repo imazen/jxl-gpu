@@ -221,19 +221,22 @@ fn main() {
         let enc: GpuEncoder<B> = GpuEncoder::new();
 
         for &distance in &distances {
-            // Path A: production default. AFV explicitly on so the
-            // chunk-2 AFV cost path is exercised in both branches (only
-            // varying axis is the bundle + counterweights).
+            // Path A: pre-W44-41 baseline. Both flags explicitly OFF
+            // to isolate the lifted entropy_mul + dist_bias bundle from
+            // the W44-41 chunk A flip. AFV explicitly on so the chunk-2
+            // AFV cost path is exercised in both branches (only varying
+            // axis remains the bundle + counterweights).
             let lossy_off: LossyEncoder<B> = LossyEncoder::new(&enc, w, h)
                 .with_auto_evaluate_afv_on_screenshots(false)
-                .with_evaluate_afv(true);
+                .with_evaluate_afv(true)
+                .with_enable_kavoid_entropy_of_transforms(false);
             assert!(
                 !lossy_off.auto_libjxl_entropy_mul_on_photos(),
-                "production default must be OFF"
+                "production default for auto_libjxl_entropy_mul_on_photos must be OFF"
             );
             assert!(
                 !lossy_off.enable_kavoid_entropy_of_transforms(),
-                "production default must be OFF"
+                "pre-W44-41 baseline must have kAvoidEntropyOfTransforms OFF"
             );
             let bs_off = enc
                 .encode_lossy_to_bitstream_via_precomputed(&lossy_off, &r, &g, &b, distance)
