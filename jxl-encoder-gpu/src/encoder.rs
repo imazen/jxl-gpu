@@ -1720,11 +1720,10 @@ impl<R: Runtime> GpuEncoder<R> {
         width: u32,
         height: u32,
         layout: PixelLayout,
-    ) -> Result<Vec<u8>, jxl_encoder::api::EncodeError> {
+    ) -> jxl_encoder::api::Result<Vec<u8>> {
         config
             .encode_request(width, height, layout)
             .encode(pixels)
-            .map_err(|e| e.decompose().0)
     }
 
     /// Encode to JXL bitstream via the `__pre_quantized` seam — runs

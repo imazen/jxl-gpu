@@ -4,6 +4,12 @@
 
 ### Fixed (June 19, 2026)
 
+- **`encode_lossy_via_cpu` preserves the whereat error trace** — now returns
+  `jxl_encoder::api::Result<Vec<u8>>` (`At<EncodeError>`) instead of dropping the
+  trace via `.map_err(|e| e.decompose().0)` into a bare `EncodeError`. Public
+  signature change (the fn already delegated to jxl-encoder's `At`-returning
+  `Encoder::encode`). Pre-existing clippy `-D warnings` debt + an unrelated
+  example/lib-test arg-count drift remain untouched here.
 - **Non-CUDA test + example builds compile again** (closes #6, closes #7).
   - `#6`: `src/forks/reconstruct.rs` —
     `test_reconstruct_mixed_strategy_gpu_dct8_and_dct16x16` references
