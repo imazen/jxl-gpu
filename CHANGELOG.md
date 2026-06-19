@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Fixed (June 19, 2026)
+
+- **Non-CUDA test + example builds compile again** (closes #6, closes #7).
+  - `#6`: `src/forks/reconstruct.rs` —
+    `test_reconstruct_mixed_strategy_gpu_dct8_and_dct16x16` references
+    `cubecl::cuda::CudaRuntime` but lacked the `#[cfg(feature = "cuda")]`
+    gate every other CUDA test in the module carries, so every non-CUDA
+    `cargo check --tests` (CI `build-cpu` runs `--tests`) failed with
+    `E0433: cannot find cuda in cubecl`. Added the gate (verified: the
+    build fails without it, passes with it on `--features 'wgpu encoder'`
+    and `--features 'cpu encoder'`).
+  - `#7`: three `examples/*.rs` failed to compile on non-CUDA backends
+    (the issue's "49 of 87" set had mostly been gated since it was filed;
+    only three still broke). `perf_fast_path_breakdown.rs` and
+    `perf_production_e7_e8_e9.rs` had a top-level
+    `use cubecl::cuda::CudaRuntime as Backend;` — replaced with the
+    four-`cfg` multi-backend `type Backend` pattern used by the other
+    examples, with backend-presence-gated `main()` + a stub.
+    `quantize_cfl_parity.rs` called `cfl_find_best_multiplier_newton_scalar`
+    with 7 args after the upstream signature grew two trailing
+    `bool`s — passed `false, false` (legacy Newton-default behavior).
+    Verified clean on `--examples` for both `wgpu encoder` and
+    `cpu encoder`.
+  - `src/encoder.rs`: the six `compute_cfl_map` call sites grew two
+    trailing `bool` args (`newton_libjxl_parity`,
+    `newton_libjxl_math_with_ls_warm_start`) to match the current
+    public `imazen/jxl-encoder` signature; both passed `false`
+    (the legacy "Newton-default" branch — behavior-preserving). Required
+    for the crate to compile against upstream at all.
+
 ### Changed (May 18, 2026)
 
 - **W12-2 chunk-2: `PatchesData` cached in `StrategySearchPlan`

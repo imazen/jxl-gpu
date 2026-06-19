@@ -6,13 +6,31 @@
 
 use std::time::Instant;
 
-use cubecl::cuda::CudaRuntime as Backend;
+#[cfg(feature = "cuda")]
+type Backend = cubecl::cuda::CudaRuntime;
+
+#[cfg(all(not(feature = "cuda"), feature = "wgpu"))]
+type Backend = cubecl::wgpu::WgpuRuntime;
+
+#[cfg(all(not(feature = "cuda"), not(feature = "wgpu"), feature = "cpu"))]
+type Backend = cubecl::cpu::CpuRuntime;
+
+#[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
 use jxl_encoder::__pre_quantized::{
     AcStrategyMap, DistanceParams, EncoderPrecomputed, VarDctEncoder, quantize_quant_field,
 };
+#[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
 use jxl_encoder_gpu::encoder::GpuEncoder;
+#[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
 use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 
+#[cfg(not(any(feature = "cuda", feature = "wgpu", feature = "cpu")))]
+fn main() {
+    eprintln!("enable one of: --features cuda | wgpu | cpu");
+    std::process::exit(2);
+}
+
+#[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut image_path: Option<String> = None;

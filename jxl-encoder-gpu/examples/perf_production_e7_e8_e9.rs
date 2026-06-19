@@ -13,16 +13,38 @@
 
 use std::time::Instant;
 
-use cubecl::cuda::CudaRuntime as Backend;
+#[cfg(feature = "cuda")]
+type Backend = cubecl::cuda::CudaRuntime;
+
+#[cfg(all(not(feature = "cuda"), feature = "wgpu"))]
+type Backend = cubecl::wgpu::WgpuRuntime;
+
+#[cfg(all(not(feature = "cuda"), not(feature = "wgpu"), feature = "cpu"))]
+type Backend = cubecl::cpu::CpuRuntime;
+
+#[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
 use jxl_encoder_gpu::encoder::GpuEncoder;
+#[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
 use jxl_encoder_gpu::lossy_encoder::LossyEncoder;
 
-#[cfg(not(feature = "butteraugli-loop"))]
+#[cfg(not(any(feature = "cuda", feature = "wgpu", feature = "cpu")))]
+fn main() {
+    eprintln!("enable one of: --features cuda | wgpu | cpu");
+    std::process::exit(2);
+}
+
+#[cfg(all(
+    any(feature = "cuda", feature = "wgpu", feature = "cpu"),
+    not(feature = "butteraugli-loop")
+))]
 fn main() {
     eprintln!("perf_production_e7_e8_e9 needs --features butteraugli-loop");
 }
 
-#[cfg(feature = "butteraugli-loop")]
+#[cfg(all(
+    any(feature = "cuda", feature = "wgpu", feature = "cpu"),
+    feature = "butteraugli-loop"
+))]
 fn main() {
     use jxl_encoder_gpu::forks::butteraugli_loop::ButteraugliLoopGpu;
 

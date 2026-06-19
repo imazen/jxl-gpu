@@ -220,6 +220,8 @@ fn main() {
                 distance_mul,
                 eps,
                 max_iters,
+                false, // libjxl_parity (legacy Newton-default behavior)
+                false, // libjxl_math_with_ls_warm_start
             );
         }
 

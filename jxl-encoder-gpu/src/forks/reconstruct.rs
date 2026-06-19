@@ -2955,6 +2955,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cuda")]
     #[test]
     fn test_reconstruct_mixed_strategy_gpu_dct8_and_dct16x16() {
         // Mix two strategies: 3 DCT8 blocks + 2 DCT16x16 blocks at

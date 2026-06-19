@@ -1943,6 +1943,8 @@ impl<R: Runtime> GpuEncoder<R> {
             true, // use_newton (effort >= 7)
             1e-3, // newton_eps (libjxl default)
             10,   // newton_max_iters
+            false, // SCAFFOLD-REVERTME newton_libjxl_parity
+            false, // SCAFFOLD-REVERTME newton_libjxl_math_with_ls_warm_start
         );
 
         // Step 5: GPU-computed quant_field_float + masking from
@@ -2087,6 +2089,8 @@ impl<R: Runtime> GpuEncoder<R> {
                     true,
                     1e-3,
                     10,
+                    false, // SCAFFOLD-REVERTME
+                    false, // SCAFFOLD-REVERTME
                 );
 
                 // Case-1 contract: quant_field / masking / mask1x1 /
@@ -2542,6 +2546,8 @@ impl<R: Runtime> GpuEncoder<R> {
             true,
             1e-3,
             10,
+            false, // SCAFFOLD-REVERTME
+            false, // SCAFFOLD-REVERTME
         );
 
         // Download pre-gaborish XYB for patches detection — see the
@@ -2630,6 +2636,8 @@ impl<R: Runtime> GpuEncoder<R> {
                     true,
                     1e-3,
                     10,
+                    false, // SCAFFOLD-REVERTME
+                    false, // SCAFFOLD-REVERTME
                 );
                 let vardct_for_profile = jxl_encoder::__pre_quantized::VarDctEncoder::new(distance);
                 let profile = &vardct_for_profile.profile;
@@ -2941,6 +2949,8 @@ impl<R: Runtime> GpuEncoder<R> {
             true,
             1e-3,
             10,
+            false, // SCAFFOLD-REVERTME
+            false, // SCAFFOLD-REVERTME
         );
 
         // We still need masking from compute_quant_field_float_free,
@@ -3082,6 +3092,8 @@ impl<R: Runtime> GpuEncoder<R> {
                     true,
                     1e-3,
                     10,
+                    false, // SCAFFOLD-REVERTME
+                    false, // SCAFFOLD-REVERTME
                 );
             }
             pd
