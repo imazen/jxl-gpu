@@ -4,10 +4,12 @@
 
 ### Changed (October 6, 2026)
 
+- The 64 `f32::new(<untyped literal>)` sites carry an explicit `_f32`: current stable rejects the f32 fallback, so the crate did not compile (79a404b).
+- jxl-rs is reached by a relative path (`../../third-party/jxl-rs`) instead of an absolute home path, which macOS runners cannot create; the i686 cross job mounts the sibling tree (8f02f95).
 - CI: the sibling-clone step could not succeed (zenmetrics' `feat/internals-from-linear-planes` branch is gone, and `../zensim` was never cloned). The action now clones zenmetrics' default branch and zensim; `cargo fmt` checks only this workspace (664bbb8). `actions/checkout` v5 -> v7 (619e852).
 - Parity examples pass the `XybCubeRoot` argument `forward_xyb_scalar` now takes (`LibjxlUnfused`, matching the kernel) (a022180).
 - Dependencies: lock regenerated in CI's sibling layout; rayon 1.12.0 and cudarc 0.19.10 floors; cubecl held at 0.10.0-pre.4 (2930f0e).
-- Known: the `fmt + clippy` job still fails on lint debt in the kernels (newer clippy: excessive float precision, digit grouping; rustc future-incompat `f32::new(<untyped literal>)` fallback, 64 sites).
+- Known: the `fmt + clippy` job still fails on clippy lint debt in the kernels (excessive float precision, digit grouping, ...).
 
 ### Fixed (June 19, 2026)
 
