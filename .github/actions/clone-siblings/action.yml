@@ -24,8 +24,7 @@ runs:
         #   ../zensim             -> imazen/zensim
         #   ../fast-ssim2         -> imazen/fast-ssim2
         #   ../../butteraugli     -> imazen/butteraugli
-        # Plus an absolute /home/lilith/work/third-party/jxl-rs/jxl
-        # (workspace.dependencies.jxl uses an absolute path).
+        #   ../../third-party/jxl-rs -> lilith/jxl-rs @ develop
         parent="$(dirname "$GITHUB_WORKSPACE")"
         gparent="$(dirname "$parent")"
         clone_if_missing() {
@@ -46,24 +45,9 @@ runs:
         clone_if_missing https://github.com/imazen/fast-ssim2 "$parent/fast-ssim2"
         clone_if_missing https://github.com/imazen/butteraugli "$gparent/butteraugli"
 
-        # Absolute /home/lilith/work/third-party/jxl-rs/jxl. Cargo on
-        # Windows treats /home/... as drive-relative, so the Git Bash
-        # /home/lilith/... path (= C:\home\lilith on Windows) lines up.
-        case "$RUNNER_OS" in
-          Linux|macOS)
-            sudo mkdir -p /home/lilith/work/third-party
-            sudo chown -R "$(id -u):$(id -g)" /home/lilith
-            clone_if_missing https://github.com/lilith/jxl-rs /home/lilith/work/third-party/jxl-rs develop
-            ;;
-          Windows)
-            mkdir -p "/c/home/lilith/work/third-party"
-            clone_if_missing https://github.com/lilith/jxl-rs "/c/home/lilith/work/third-party/jxl-rs" develop
-            ;;
-          *)
-            echo "Unknown RUNNER_OS=$RUNNER_OS" >&2
-            exit 1
-            ;;
-        esac
+        # workspace.dependencies.jxl points at ../../third-party/jxl-rs/jxl.
+        mkdir -p "$gparent/third-party"
+        clone_if_missing https://github.com/lilith/jxl-rs "$gparent/third-party/jxl-rs" develop
 
     - name: Write Cross.toml override (i686 / cross-rs builds only)
       shell: bash
@@ -94,7 +78,7 @@ runs:
             "git clone --depth 1 https://github.com/imazen/zensim /zensim",
             "git clone --depth 1 https://github.com/imazen/fast-ssim2 /fast-ssim2",
             "git clone --depth 1 https://github.com/imazen/butteraugli /butteraugli",
-            "mkdir -p /home/lilith/work/third-party && git clone --depth 1 --branch develop https://github.com/lilith/jxl-rs /home/lilith/work/third-party/jxl-rs",
+            "mkdir -p /third-party && git clone --depth 1 --branch develop https://github.com/lilith/jxl-rs /third-party/jxl-rs",
         ]
         TOML
         echo "Wrote $ws/Cross.toml"

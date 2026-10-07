@@ -30,8 +30,9 @@ jxl-encoder = { path = "../jxl-encoder/jxl-encoder", default-features = false }
 bytemuck = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
-# jxl-rs — primary Rust JXL decoder for roundtrip tests.
-jxl = { path = "/home/lilith/work/third-party/jxl-rs/jxl" }
+# jxl-rs — primary Rust JXL decoder for roundtrip tests. Expects a jxl-rs
+# checkout at ../../third-party/jxl-rs (CI: the clone-siblings action).
+jxl = { path = "../../third-party/jxl-rs/jxl" }
 
 # Perceptual quality metric for AQ demos / sweeps. dev-dep only.
 fast-ssim2 = { path = "../fast-ssim2/fast-ssim2", default-features = true, features = ["imgref"] }

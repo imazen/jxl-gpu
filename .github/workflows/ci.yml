@@ -44,6 +44,10 @@ jobs:
   build-i686:
     name: build (cpu) / i686-unknown-linux-gnu
     runs-on: ubuntu-latest
+    # cross mounts only the workspace; the sibling path-deps live up to two
+    # levels above it (../zenmetrics, ../../butteraugli, ../../third-party).
+    env:
+      CROSS_CONTAINER_OPTS: -v ${{ github.workspace }}/../..:${{ github.workspace }}/../..
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/clone-siblings
