@@ -136,7 +136,7 @@ pub fn dequant_strategy_kernel_broadcast_w_dct8(
         let iu = i as usize;
         let q_int = quant[off + iu];
         let biased = if q_int == 0i32 {
-            f32::new(0.0)
+            f32::new(0.0_f32)
         } else {
             let q = q_int as f32;
             if f32::abs(q) < 1.125f32 {

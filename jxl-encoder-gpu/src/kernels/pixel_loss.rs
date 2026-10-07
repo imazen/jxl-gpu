@@ -54,7 +54,7 @@ pub fn pixel_loss_kernel(
     let mrb = mask_row_base[block_idx] as usize;
     let err_base = block_idx * bw * bh;
 
-    let mut acc = f64::new(0.0);
+    let mut acc = f64::new(0.0_f32);
     let mut py: u32 = 0u32;
     while py < block_height {
         let pyu = py as usize;

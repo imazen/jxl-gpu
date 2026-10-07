@@ -32,7 +32,7 @@ fn bias_and_quantize(x: f32) -> i32 {
     } else if x <= -TOWARDS_ZERO {
         x + TOWARDS_ZERO
     } else {
-        f32::new(0.0)
+        f32::new(0.0_f32)
     };
     // round half-away-from-zero (matches Rust f32::round, libjxl uses same here)
     let rounded = if biased >= 0.0f32 {
@@ -74,8 +74,8 @@ pub fn find_best_multiplier_newton_kernel(
         let n_f = num_per_tile as f32;
 
         // LS warm start
-        let mut sum_aa = f32::new(0.0);
-        let mut sum_ab = f32::new(0.0);
+        let mut sum_aa = f32::new(0.0_f32);
+        let mut sum_ab = f32::new(0.0_f32);
         let mut i: u32 = 0u32;
         while (i as usize) < n {
             let iu = i as usize;
@@ -182,8 +182,8 @@ pub fn find_best_multiplier_kernel(
     } else {
         let off = tile_idx * n;
         let base = bases[tile_idx];
-        let mut sum_aa = f32::new(0.0);
-        let mut sum_ab = f32::new(0.0);
+        let mut sum_aa = f32::new(0.0_f32);
+        let mut sum_ab = f32::new(0.0_f32);
         let mut i: u32 = 0u32;
         while (i as usize) < n {
             let iu = i as usize;

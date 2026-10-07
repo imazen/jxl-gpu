@@ -707,7 +707,7 @@ pub fn dequant_idct_dc_scatter_dct8_kernel(
         let iu = i as usize;
         let q_int = quant[off + iu];
         let biased = if q_int == 0i32 {
-            f32::new(0.0)
+            f32::new(0.0_f32)
         } else {
             let q = q_int as f32;
             if f32::abs(q) < 1.125f32 {
@@ -831,7 +831,7 @@ pub fn dequant_idct_dc_scatter_dct8_wide_kernel(
         let iu = i as usize;
         let q_int = quant[off + iu];
         let biased = if q_int == 0i32 {
-            f32::new(0.0)
+            f32::new(0.0_f32)
         } else {
             let q = q_int as f32;
             if f32::abs(q) < 1.125f32 {

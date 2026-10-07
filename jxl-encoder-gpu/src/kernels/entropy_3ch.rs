@@ -48,12 +48,12 @@ pub fn entropy_coeffs_pixel_3ch_kernel(
     let off = block_idx * n_per;
     let oo = block_idx * 4usize;
 
-    let mut e_x = f32::new(0.0);
-    let mut nz_x = f32::new(0.0);
-    let mut e_y = f32::new(0.0);
-    let mut nz_y = f32::new(0.0);
-    let mut e_b = f32::new(0.0);
-    let mut nz_b = f32::new(0.0);
+    let mut e_x = f32::new(0.0_f32);
+    let mut nz_x = f32::new(0.0_f32);
+    let mut e_y = f32::new(0.0_f32);
+    let mut nz_y = f32::new(0.0_f32);
+    let mut e_b = f32::new(0.0_f32);
+    let mut nz_b = f32::new(0.0_f32);
     let mut i: u32 = 0u32;
     while (i as usize) < n_per {
         let iu = i as usize;
@@ -95,14 +95,14 @@ pub fn entropy_coeffs_pixel_3ch_kernel(
 
     out_x[oo] = e_x;
     out_x[oo + 1usize] = nz_x;
-    out_x[oo + 2usize] = f32::new(0.0);
-    out_x[oo + 3usize] = f32::new(0.0);
+    out_x[oo + 2usize] = f32::new(0.0_f32);
+    out_x[oo + 3usize] = f32::new(0.0_f32);
     out_y[oo] = e_y;
     out_y[oo + 1usize] = nz_y;
-    out_y[oo + 2usize] = f32::new(0.0);
-    out_y[oo + 3usize] = f32::new(0.0);
+    out_y[oo + 2usize] = f32::new(0.0_f32);
+    out_y[oo + 3usize] = f32::new(0.0_f32);
     out_b[oo] = e_b;
     out_b[oo + 1usize] = nz_b;
-    out_b[oo + 2usize] = f32::new(0.0);
-    out_b[oo + 3usize] = f32::new(0.0);
+    out_b[oo + 2usize] = f32::new(0.0_f32);
+    out_b[oo + 3usize] = f32::new(0.0_f32);
 }

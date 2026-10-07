@@ -68,7 +68,7 @@ fn cbrt_fast_nonneg(x: f32) -> f32 {
     // t³ which collapses toward 0 as x = 0.
     //
     // To avoid 0/0 issues we substitute a tiny epsilon when x is exactly 0.
-    let safe_x = if x > 0.0f32 { x } else { f32::new(1e-30) };
+    let safe_x = if x > 0.0f32 { x } else { f32::new(1e-30_f32) };
     let ui = u32::reinterpret(safe_x);
     let approx = ui / 3u32 + CBRT_INITIAL_BIAS_U32;
     let mut t = f32::reinterpret(approx);
@@ -77,7 +77,7 @@ fn cbrt_fast_nonneg(x: f32) -> f32 {
     let r = t * t * t;
     t = t * (safe_x + safe_x + r) / (safe_x + r + r);
     // Force exact 0 result for exact 0 input (matches CPU's early-return path).
-    if x > 0.0f32 { t } else { f32::new(0.0) }
+    if x > 0.0f32 { t } else { f32::new(0.0_f32) }
 }
 
 /// Forward: planar linear RGB → planar XYB. One thread per pixel.

@@ -212,7 +212,7 @@ const BIAS_RECIP: f32 = 0.145;
 #[cube]
 fn adjust_quant_bias_y(q_int: i32) -> f32 {
     if q_int == 0i32 {
-        f32::new(0.0)
+        f32::new(0.0_f32)
     } else {
         let q = q_int as f32;
         if f32::abs(q) < 1.125f32 {
@@ -260,7 +260,7 @@ pub fn dequant_idct8_fused_y_wide_kernel(
     let mut transposed = SharedMemory::<f32>::new((WIDE_CUBE_DIM * 64u32) as usize);
 
     // ── Dequantize directly into shared memory ─────────────────────
-    scratch[private_base_us] = f32::new(0.0); // DC = 0 (caller restores)
+    scratch[private_base_us] = f32::new(0.0_f32); // DC = 0 (caller restores)
     let mut i: u32 = 1u32;
     while i < 64u32 {
         let iu = i as usize;

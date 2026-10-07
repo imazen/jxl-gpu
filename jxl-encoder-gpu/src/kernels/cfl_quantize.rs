@@ -63,7 +63,7 @@ fn round_ties_even_to_i32(x: f32) -> i32 {
 fn dequant_y_with_bias(q: i32) -> f32 {
     let qf = q as f32;
     let abs_q = f32::abs(qf);
-    let mut out = f32::new(0.0);
+    let mut out = f32::new(0.0_f32);
     if q != 0i32 {
         if abs_q < 1.125f32 {
             // ±1 → channel-specific bias with sign

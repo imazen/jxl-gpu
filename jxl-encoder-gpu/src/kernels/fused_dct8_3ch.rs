@@ -173,7 +173,7 @@ fn round_ties_away_to_i32(x: f32) -> i32 {
 fn dequant_y_with_bias(q: i32) -> f32 {
     let qf = q as f32;
     let abs_q = f32::abs(qf);
-    let mut out = f32::new(0.0);
+    let mut out = f32::new(0.0_f32);
     if q != 0i32 {
         if abs_q < 1.125f32 {
             let s = if qf > 0.0f32 { 1.0f32 } else { -1.0f32 };

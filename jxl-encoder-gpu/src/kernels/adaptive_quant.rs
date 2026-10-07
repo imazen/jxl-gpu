@@ -192,7 +192,7 @@ pub fn compute_pre_erosion_kernel(
     let base_x = (x0 as usize) + out_x * 4usize;
     let base_y = (y_start as usize) + out_y * 4usize;
 
-    let mut sum = f32::new(0.0);
+    let mut sum = f32::new(0.0_f32);
     let mut dy: u32 = 0u32;
     while dy < 4u32 {
         let dyu = dy as usize;
@@ -276,7 +276,7 @@ pub fn per_block_modulations_kernel(
                 / (k_dampen_ramp_end - k_dampen_ramp_start));
         f32::max(raw, 0.0f32)
     } else {
-        f32::new(1.0)
+        f32::new(1.0_f32)
     };
     let mul = scale * dampen;
     let add = (1.0f32 - dampen) * base_level;
@@ -296,7 +296,7 @@ pub fn per_block_modulations_kernel(
 
     // ---- GammaModulation ----
     {
-        let mut overall_ratio = f32::new(0.0);
+        let mut overall_ratio = f32::new(0.0_f32);
         let mut dy: u32 = 0u32;
         while dy < 8u32 {
             let dyu = dy as usize;
@@ -321,7 +321,7 @@ pub fn per_block_modulations_kernel(
 
     // ---- HfModulation ----
     let after_hf = {
-        let mut sum_y = f32::new(0.0);
+        let mut sum_y = f32::new(0.0_f32);
         let mut dy: u32 = 0u32;
         while dy < 8u32 {
             let dyu = dy as usize;
@@ -349,7 +349,7 @@ pub fn per_block_modulations_kernel(
 
     // ---- BlueModulation ----
     let after_blue = {
-        let mut sum = f32::new(0.0);
+        let mut sum = f32::new(0.0_f32);
         let mut dy: u32 = 0u32;
         while dy < 8u32 {
             let dyu = dy as usize;

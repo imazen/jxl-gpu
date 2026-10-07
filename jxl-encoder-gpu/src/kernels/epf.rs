@@ -201,11 +201,11 @@ pub fn epf_step1_kernel(
         let bm = if at_border_x || at_border_y {
             border_sigma_mul
         } else {
-            f32::new(1.0)
+            f32::new(1.0_f32)
         };
         let eff_is = is * sigma_scale * bm;
 
-        let mut total_w = f32::new(1.0);
+        let mut total_w = f32::new(1.0_f32);
         let mut sum_x = center_x;
         let mut sum_y = center_y;
         let mut sum_b = center_b;
@@ -324,7 +324,7 @@ pub fn epf_step2_kernel(
         let bm = if at_border_x || at_border_y {
             border_sigma_mul
         } else {
-            f32::new(1.0)
+            f32::new(1.0_f32)
         };
         let eff_is = is * sigma_scale * bm;
 
@@ -334,7 +334,7 @@ pub fn epf_step2_kernel(
         let n_top = pidx - stride;
         let n_bot = pidx + stride;
 
-        let mut total_w = f32::new(1.0);
+        let mut total_w = f32::new(1.0_f32);
         let mut sum_x = center_x;
         let mut sum_y = center_y;
         let mut sum_b = center_b;
@@ -465,14 +465,14 @@ pub fn epf_step0_kernel(
         let bm = if at_border_x || at_border_y {
             border_sigma_mul
         } else {
-            f32::new(1.0)
+            f32::new(1.0_f32)
         };
         let eff_is = is * sigma_scale * bm;
 
         let cx = ipx as u32;
         let cy = ipy as u32;
 
-        let mut total_w = f32::new(1.0);
+        let mut total_w = f32::new(1.0_f32);
         let mut sum_x = center_x;
         let mut sum_y = center_y;
         let mut sum_b = center_b;

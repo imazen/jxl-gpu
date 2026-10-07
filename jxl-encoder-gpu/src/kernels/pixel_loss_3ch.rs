@@ -42,9 +42,9 @@ pub fn pixel_loss_3ch_kernel(
     let mrb = mask_row_base[block_idx] as usize;
     let err_base = block_idx * bw * bh;
 
-    let mut acc_x = f64::new(0.0);
-    let mut acc_y = f64::new(0.0);
-    let mut acc_b = f64::new(0.0);
+    let mut acc_x = f64::new(0.0_f32);
+    let mut acc_y = f64::new(0.0_f32);
+    let mut acc_b = f64::new(0.0_f32);
     let mut py: u32 = 0u32;
     while py < block_height {
         let pyu = py as usize;

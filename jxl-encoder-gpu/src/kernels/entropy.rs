@@ -45,8 +45,8 @@ pub fn entropy_coeffs_pixel_kernel(
     let off = block_idx * n_per;
     let oo = block_idx * 4usize;
 
-    let mut entropy_sum = f32::new(0.0);
-    let mut nzeros_sum = f32::new(0.0);
+    let mut entropy_sum = f32::new(0.0_f32);
+    let mut nzeros_sum = f32::new(0.0_f32);
     let mut i: u32 = 0u32;
     while (i as usize) < n_per {
         let iu = i as usize;
@@ -66,8 +66,8 @@ pub fn entropy_coeffs_pixel_kernel(
 
     output[oo] = entropy_sum;
     output[oo + 1usize] = nzeros_sum;
-    output[oo + 2usize] = f32::new(0.0);
-    output[oo + 3usize] = f32::new(0.0);
+    output[oo + 2usize] = f32::new(0.0_f32);
+    output[oo + 3usize] = f32::new(0.0_f32);
 }
 
 /// Broadcast-weights variant of [`entropy_coeffs_pixel_kernel`].
@@ -99,8 +99,8 @@ pub fn entropy_coeffs_pixel_kernel_broadcast_w(
     let off = block_idx * n_per;
     let oo = block_idx * 4usize;
 
-    let mut entropy_sum = f32::new(0.0);
-    let mut nzeros_sum = f32::new(0.0);
+    let mut entropy_sum = f32::new(0.0_f32);
+    let mut nzeros_sum = f32::new(0.0_f32);
     let mut i: u32 = 0u32;
     while (i as usize) < n_per {
         let iu = i as usize;
@@ -121,8 +121,8 @@ pub fn entropy_coeffs_pixel_kernel_broadcast_w(
 
     output[oo] = entropy_sum;
     output[oo + 1usize] = nzeros_sum;
-    output[oo + 2usize] = f32::new(0.0);
-    output[oo + 3usize] = f32::new(0.0);
+    output[oo + 2usize] = f32::new(0.0_f32);
+    output[oo + 3usize] = f32::new(0.0_f32);
 }
 
 /// Coefficient-domain mode: skips error_coeffs writes, computes info_loss
@@ -149,10 +149,10 @@ pub fn entropy_coeffs_coeff_kernel(
     let off = block_idx * n_per;
     let oo = block_idx * 4usize;
 
-    let mut entropy_sum = f32::new(0.0);
-    let mut nzeros_sum = f32::new(0.0);
-    let mut info_loss_sum = f32::new(0.0);
-    let mut info_loss2_sum = f32::new(0.0);
+    let mut entropy_sum = f32::new(0.0_f32);
+    let mut nzeros_sum = f32::new(0.0_f32);
+    let mut info_loss_sum = f32::new(0.0_f32);
+    let mut info_loss2_sum = f32::new(0.0_f32);
     let mut i: u32 = 0u32;
     while (i as usize) < n_per {
         let iu = i as usize;
@@ -210,10 +210,10 @@ pub fn entropy_coeffs_coeff_kernel_broadcast_w(
     let off = block_idx * n_per;
     let oo = block_idx * 4usize;
 
-    let mut entropy_sum = f32::new(0.0);
-    let mut nzeros_sum = f32::new(0.0);
-    let mut info_loss_sum = f32::new(0.0);
-    let mut info_loss2_sum = f32::new(0.0);
+    let mut entropy_sum = f32::new(0.0_f32);
+    let mut nzeros_sum = f32::new(0.0_f32);
+    let mut info_loss_sum = f32::new(0.0_f32);
+    let mut info_loss2_sum = f32::new(0.0_f32);
     let mut i: u32 = 0u32;
     while (i as usize) < n_per {
         let iu = i as usize;

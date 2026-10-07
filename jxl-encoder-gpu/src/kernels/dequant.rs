@@ -23,7 +23,7 @@ const BIAS_RECIP: f32 = 0.145;
 #[cube]
 fn adjust_quant_bias(q_int: i32, channel_bias: f32) -> f32 {
     if q_int == 0i32 {
-        f32::new(0.0)
+        f32::new(0.0_f32)
     } else {
         let q = q_int as f32;
         if f32::abs(q) < 1.125f32 {
@@ -80,9 +80,9 @@ pub fn dequant_dct8_kernel(
     let xf = x_factor[block_idx];
     let bf = b_factor[block_idx];
 
-    out_x[off] = f32::new(0.0);
-    out_y[off] = f32::new(0.0);
-    out_b[off] = f32::new(0.0);
+    out_x[off] = f32::new(0.0_f32);
+    out_y[off] = f32::new(0.0_f32);
+    out_b[off] = f32::new(0.0_f32);
 
     let mut i: u32 = 1u32;
     while i < 64u32 {
@@ -135,9 +135,9 @@ pub fn dequant_dct8_kernel_broadcast_w(
     let xf = x_factor[block_idx];
     let bf = b_factor[block_idx];
 
-    out_x[off] = f32::new(0.0);
-    out_y[off] = f32::new(0.0);
-    out_b[off] = f32::new(0.0);
+    out_x[off] = f32::new(0.0_f32);
+    out_y[off] = f32::new(0.0_f32);
+    out_b[off] = f32::new(0.0_f32);
 
     let mut i: u32 = 1u32;
     while i < 64u32 {
