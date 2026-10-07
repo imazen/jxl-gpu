@@ -46,7 +46,7 @@ cubecl = { workspace = true }
 jxl-encoder = { workspace = true, optional = true, features = ["std", "__pre_quantized", "parallel"] }
 # Used directly (rayon::join × 3) for the post-download repack +
 # downstream batched ops in encode_lossy_to_bitstream_via_precomputed*.
-rayon = "1.10"
+rayon = "1.12.0"
 butteraugli-gpu = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -74,7 +74,7 @@ rgb = { workspace = true }
 # extra resolver pain. Features kept minimal: just driver + std.
 # cuda-version-from-build-system + fallback-* match cubecl-cuda's
 # feature set to ensure unified linkage.
-cudarc = { version = "0.19.4", default-features = false, features = [
+cudarc = { version = "0.19.10", default-features = false, features = [
     "std",
     "driver",
     "cuda-version-from-build-system",
