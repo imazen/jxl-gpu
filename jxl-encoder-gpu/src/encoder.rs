@@ -1721,9 +1721,7 @@ impl<R: Runtime> GpuEncoder<R> {
         height: u32,
         layout: PixelLayout,
     ) -> jxl_encoder::api::Result<Vec<u8>> {
-        config
-            .encode_request(width, height, layout)
-            .encode(pixels)
+        config.encode_request(width, height, layout).encode(pixels)
     }
 
     /// Encode to JXL bitstream via the `__pre_quantized` seam — runs
@@ -1939,9 +1937,9 @@ impl<R: Runtime> GpuEncoder<R> {
             cpu_ph,
             xsize_blocks,
             ysize_blocks,
-            true, // use_newton (effort >= 7)
-            1e-3, // newton_eps (libjxl default)
-            10,   // newton_max_iters
+            true,  // use_newton (effort >= 7)
+            1e-3,  // newton_eps (libjxl default)
+            10,    // newton_max_iters
             false, // SCAFFOLD-REVERTME newton_libjxl_parity
             false, // SCAFFOLD-REVERTME newton_libjxl_math_with_ls_warm_start
         );
