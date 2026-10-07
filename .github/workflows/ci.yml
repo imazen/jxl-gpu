@@ -27,7 +27,7 @@ jobs:
           - macos-15-intel
           - macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/clone-siblings
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
@@ -45,7 +45,7 @@ jobs:
     name: build (cpu) / i686-unknown-linux-gnu
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/clone-siblings
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cross
@@ -63,7 +63,7 @@ jobs:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/clone-siblings
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -92,7 +92,7 @@ jobs:
       # Suppress wgpu's chatty info-level logs in CI.
       RUST_LOG: warn
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/clone-siblings
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
@@ -158,7 +158,7 @@ jobs:
   #   name: build + parity (cuda) / self-hosted
   #   runs-on: [self-hosted, linux, x64, gpu]
   #   steps:
-  #     - uses: actions/checkout@v5
+  #     - uses: actions/checkout@v7
   #     - uses: dtolnay/rust-toolchain@stable
   #     - uses: Swatinem/rust-cache@v2
   #     - name: cargo build --features cuda
