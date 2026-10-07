@@ -29,7 +29,7 @@ fn main() {
 fn main() {
     use cubecl::prelude::*;
     use jxl_encoder_gpu::launch::xyb::{xyb_forward, xyb_inverse};
-    use jxl_encoder_simd::{forward_xyb_scalar, inverse_xyb_planar_scalar};
+    use jxl_encoder_simd::{XybCubeRoot, forward_xyb_scalar, inverse_xyb_planar_scalar};
 
     let device = <Backend as cubecl::Runtime>::Device::default();
     let client = <Backend as cubecl::Runtime>::client(&device);
@@ -57,7 +57,17 @@ fn main() {
     let mut x_cpu = vec![0.0f32; N];
     let mut y_cpu = vec![0.0f32; N];
     let mut b_cpu = vec![0.0f32; N];
-    forward_xyb_scalar(&r, &g, &b, &mut x_cpu, &mut y_cpu, &mut b_cpu, N);
+    // The kernel adds -cbrt(bias) after the cube root, unfused.
+    forward_xyb_scalar(
+        XybCubeRoot::LibjxlUnfused,
+        &r,
+        &g,
+        &b,
+        &mut x_cpu,
+        &mut y_cpu,
+        &mut b_cpu,
+        N,
+    );
 
     // GPU forward.
     let h_r = client.create_from_slice(f32::as_bytes(&r));

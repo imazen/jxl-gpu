@@ -107,7 +107,16 @@ fn main() {
         let mut cpu_x = vec![0.0f32; N2];
         let mut cpu_y = vec![0.0f32; N2];
         let mut cpu_b = vec![0.0f32; N2];
-        jxl_encoder_simd::forward_xyb_scalar(&r2, &g2, &b2, &mut cpu_x, &mut cpu_y, &mut cpu_b, N2);
+        jxl_encoder_simd::forward_xyb_scalar(
+            jxl_encoder_simd::XybCubeRoot::LibjxlUnfused,
+            &r2,
+            &g2,
+            &b2,
+            &mut cpu_x,
+            &mut cpu_y,
+            &mut cpu_b,
+            N2,
+        );
 
         let max_x = gpu_x
             .iter()
