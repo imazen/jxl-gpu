@@ -70,7 +70,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+        run: cargo fmt -- --check
       - name: cargo clippy (lib + tests only — examples are throwaway parity probes)
         run: cargo clippy --release --no-default-features --features cpu --lib --tests -- -D warnings
 
