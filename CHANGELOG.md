@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed (October 6, 2026)
+
+- CI: the sibling-clone step could not succeed (zenmetrics' `feat/internals-from-linear-planes` branch is gone, and `../zensim` was never cloned). The action now clones zenmetrics' default branch and zensim; `cargo fmt` checks only this workspace (664bbb8). `actions/checkout` v5 -> v7 (619e852).
+- Parity examples pass the `XybCubeRoot` argument `forward_xyb_scalar` now takes (`LibjxlUnfused`, matching the kernel) (a022180).
+- Dependencies: lock regenerated in CI's sibling layout; rayon 1.12.0 and cudarc 0.19.10 floors; cubecl held at 0.10.0-pre.4 (2930f0e).
+- Known: the `fmt + clippy` job still fails on lint debt in the kernels (newer clippy: excessive float precision, digit grouping; rustc future-incompat `f32::new(<untyped literal>)` fallback, 64 sites).
+
 ### Fixed (June 19, 2026)
 
 - **`encode_lossy_via_cpu` preserves the whereat error trace** — now returns
