@@ -21,7 +21,7 @@ runs:
         #                                                    + jxl-encoder-simd)
         #   ../zenmetrics         -> imazen/zenmetrics (default branch;
         #                            butteraugli-gpu `internals`)
-        #   ../zensim             -> imazen/zensim
+        #   ../zensimx            -> imazen/zensimx (zensim research repo)
         #   ../fast-ssim2         -> imazen/fast-ssim2
         #   ../../butteraugli     -> imazen/butteraugli
         #   ../../third-party/jxl-rs -> lilith/jxl-rs @ develop
@@ -41,7 +41,7 @@ runs:
         }
         clone_if_missing https://github.com/imazen/jxl-encoder "$parent/jxl-encoder"
         clone_if_missing https://github.com/imazen/zenmetrics "$parent/zenmetrics"
-        clone_if_missing https://github.com/imazen/zensim "$parent/zensim"
+        clone_if_missing https://github.com/imazen/zensimx "$parent/zensimx"
         clone_if_missing https://github.com/imazen/fast-ssim2 "$parent/fast-ssim2"
         clone_if_missing https://github.com/imazen/butteraugli "$gparent/butteraugli"
 
@@ -75,7 +75,7 @@ runs:
             "apt-get update && apt-get install -y --no-install-recommends git ca-certificates",
             "git clone --depth 1 https://github.com/imazen/jxl-encoder /jxl-encoder",
             "git clone --depth 1 https://github.com/imazen/zenmetrics /zenmetrics",
-            "git clone --depth 1 https://github.com/imazen/zensim /zensim",
+            "git clone --depth 1 https://github.com/imazen/zensimx /zensimx",
             "git clone --depth 1 https://github.com/imazen/fast-ssim2 /fast-ssim2",
             "git clone --depth 1 https://github.com/imazen/butteraugli /butteraugli",
             "mkdir -p /third-party && git clone --depth 1 --branch develop https://github.com/lilith/jxl-rs /third-party/jxl-rs",

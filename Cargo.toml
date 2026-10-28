@@ -43,7 +43,7 @@ imgref = "1"
 # integration test as the principal "did GPU output regress quality"
 # gate. Path-dep on the local zensim repo; pulls the trained MLP weights
 # baked into the crate (PreviewV0_3 by default).
-zensim = { path = "../zensim/zensim", default-features = false, features = ["imgref"] }
+zensim = { path = "../zensimx/zensim", default-features = false, features = ["imgref"] }
 
 # GPU butteraugli for the (opt-in) butteraugli-loop quant refinement.
 # Pinned to the zenmetrics workspace path; same cubecl version as us.
